@@ -2,6 +2,7 @@
 
 #include <iomanip>
 #include <ostream>
+#include <string>
 
 void printStructuralSummaryBlock(std::ostream& out, const StructuralSummary& summary) {
     const auto old_flags = out.flags();
@@ -46,6 +47,26 @@ void printStructuralSummaryBlock(std::ostream& out, const StructuralSummary& sum
     out << "  residues/subunit: min=" << summary.residues_per_subunit.min
         << ", max=" << summary.residues_per_subunit.max
         << ", mean=" << summary.residues_per_subunit.mean << "\n";
+    out << "  unique original labels: " << summary.unique_original_label_count << "\n";
+
+    constexpr std::size_t kMaxInlineLabelList = 12;
+    if (!summary.sorted_unique_original_labels.empty() &&
+        summary.sorted_unique_original_labels.size() <= kMaxInlineLabelList) {
+        out << "  labels: ";
+        for (std::size_t i = 0; i < summary.sorted_unique_original_labels.size(); ++i) {
+            if (i > 0) {
+                out << ", ";
+            }
+
+            const char label = summary.sorted_unique_original_labels[i];
+            if (label == ' ') {
+                out << "<blank>";
+            } else {
+                out << std::string(1, label);
+            }
+        }
+        out << "\n";
+    }
 
     out.flags(old_flags);
     out.precision(old_precision);

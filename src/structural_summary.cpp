@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <limits>
+#include <set>
 #include <stdexcept>
 
 namespace {
@@ -41,10 +42,12 @@ StructuralSummary computeStructuralSummary(const Capsid& capsid) {
     std::size_t min_residues_per_subunit = std::numeric_limits<std::size_t>::max();
     std::size_t max_residues_per_subunit = 0;
     std::size_t sum_residues_per_subunit = 0;
+    std::set<char> unique_original_labels;
 
     for (const Chain& chain : capsid.chains()) {
         const std::size_t chain_atom_count = chain.atomCount();
         const std::size_t chain_residue_count = chain.residueCount();
+        unique_original_labels.insert(chain.pdbChainId());
 
         if (chain_atom_count < min_atoms_per_subunit) {
             min_atoms_per_subunit = chain_atom_count;
@@ -139,6 +142,9 @@ StructuralSummary computeStructuralSummary(const Capsid& capsid) {
         summary.residues_per_subunit.max = static_cast<double>(max_residues_per_subunit);
         summary.residues_per_subunit.mean = static_cast<double>(sum_residues_per_subunit) / subunit_count_d;
     }
+
+    summary.unique_original_label_count = unique_original_labels.size();
+    summary.sorted_unique_original_labels.assign(unique_original_labels.begin(), unique_original_labels.end());
 
     return summary;
 }

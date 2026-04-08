@@ -2,6 +2,8 @@
 #define CAPDAT_STRUCTURAL_SUMMARY_HPP
 
 #include <cstddef>
+#include <string>
+#include <vector>
 
 #include "capsid.hpp"
 
@@ -43,6 +45,8 @@ struct StructuralSummary {
     std::size_t internal_subunit_count = 0;
     RangeStats atoms_per_subunit{};
     RangeStats residues_per_subunit{};
+    std::size_t unique_original_label_count = 0;
+    std::vector<char> sorted_unique_original_labels{};
 };
 
 [[nodiscard]] StructuralSummary computeStructuralSummary(const Capsid& capsid);
