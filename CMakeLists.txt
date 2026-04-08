@@ -34,6 +34,7 @@ set(CAPDAT_SOURCES
     src/chain.cpp
     src/capsid.cpp
     src/pdb_parser.cpp
+    src/geometry_symmetry.cpp
     src/accepted_structure_writer.cpp
     src/logger.cpp
     src/structural_summary.cpp
@@ -131,6 +132,35 @@ if(CAPDAT_BUILD_TESTS)
     endif()
 
     add_test(NAME capdat_structural_summary_tests COMMAND capdat_structural_summary_tests)
+
+    add_executable(capdat_geometry_symmetry_tests
+        tests/geometry_symmetry_tests.cpp
+        src/geometry_symmetry.cpp
+    )
+
+    target_include_directories(capdat_geometry_symmetry_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+    )
+
+    if(CAPDAT_ENABLE_WARNINGS)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(capdat_geometry_symmetry_tests PRIVATE
+                -Wall
+                -Wextra
+                -Wpedantic
+                -Wconversion
+                -Wsign-conversion
+            )
+        elseif(MSVC)
+            target_compile_options(capdat_geometry_symmetry_tests PRIVATE
+                /W4
+                /permissive-
+            )
+        endif()
+    endif()
+
+    add_test(NAME capdat_geometry_symmetry_tests COMMAND capdat_geometry_symmetry_tests)
 endif()
 
 # ------------------------------------------------------------------------------
