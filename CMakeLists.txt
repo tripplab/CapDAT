@@ -34,7 +34,10 @@ set(CAPDAT_SOURCES
     src/chain.cpp
     src/capsid.cpp
     src/pdb_parser.cpp
+    src/accepted_structure_writer.cpp
     src/logger.cpp
+    src/structural_summary.cpp
+    src/summary_reporter.cpp
     src/timer.cpp
 )
 
@@ -92,7 +95,42 @@ install(TARGETS capsid_analyzer
 
 if(CAPDAT_BUILD_TESTS)
     enable_testing()
-    message(STATUS "CAPDAT_BUILD_TESTS=ON, but no tests are registered yet.")
+
+    add_executable(capdat_structural_summary_tests
+        tests/structural_summary_tests.cpp
+        src/atom.cpp
+        src/residue.cpp
+        src/chain.cpp
+        src/capsid.cpp
+        src/pdb_parser.cpp
+        src/logger.cpp
+        src/structural_summary.cpp
+        src/summary_reporter.cpp
+    )
+
+    target_include_directories(capdat_structural_summary_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+    )
+
+    if(CAPDAT_ENABLE_WARNINGS)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(capdat_structural_summary_tests PRIVATE
+                -Wall
+                -Wextra
+                -Wpedantic
+                -Wconversion
+                -Wsign-conversion
+            )
+        elseif(MSVC)
+            target_compile_options(capdat_structural_summary_tests PRIVATE
+                /W4
+                /permissive-
+            )
+        endif()
+    endif()
+
+    add_test(NAME capdat_structural_summary_tests COMMAND capdat_structural_summary_tests)
 endif()
 
 # ------------------------------------------------------------------------------
@@ -104,5 +142,3 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "Build tests: ${CAPDAT_BUILD_TESTS}")
 message(STATUS "Warnings enabled: ${CAPDAT_ENABLE_WARNINGS}")
-
-

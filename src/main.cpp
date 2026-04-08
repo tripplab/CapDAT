@@ -1,5 +1,8 @@
+#include "accepted_structure_writer.hpp"
 #include "logger.hpp"
 #include "pdb_parser.hpp"
+#include "structural_summary.hpp"
+#include "summary_reporter.hpp"
 #include "timer.hpp"
 
 #include <exception>
@@ -21,6 +24,7 @@ void printHelp(const std::string& program_name) {
         << "  -l, --log <file>        Write log output to file\n"
         << "  -v, --verbose           Increase terminal verbosity\n"
         << "      --include-hetatm    Include HETATM records\n"
+        << "      --write-clean-pdb   Write accepted atoms to a clean PDB-like file\n"
         << "      --quiet             Reduce terminal output\n"
         << "  -h, --help              Show this help message\n"
         << "      --version           Show version information\n\n"
@@ -39,7 +43,10 @@ void printVersion() {
 /**
  * @brief Print a compact final summary for a successful run.
  */
-void printSummary(const Capsid& capsid, const ParseStats& stats, double elapsed_seconds) {
+void printSummary(const Capsid& capsid,
+                  const ParseStats& stats,
+                  const StructuralSummary& structural_summary,
+                  double elapsed_seconds) {
     std::cout << "\n=== CapDAT Summary ===\n";
     std::cout << "Input file:              " << capsid.sourcePath() << '\n';
     std::cout << "Total lines read:        " << stats.total_lines_read << '\n';
@@ -52,6 +59,8 @@ void printSummary(const Capsid& capsid, const ParseStats& stats, double elapsed_
     std::cout << "Malformed records:       " << stats.total_malformed_records << '\n';
     std::cout << "Skipped records:         " << capsid.skippedRecordCount() << '\n';
     std::cout << "Runtime (s):             " << elapsed_seconds << '\n';
+
+    printStructuralSummaryBlock(std::cout, structural_summary);
 }
 
 /**
@@ -67,6 +76,7 @@ void printSummary(const Capsid& capsid, const ParseStats& stats, double elapsed_
 int main(int argc, char* argv[]) {
     std::string input_path;
     std::string log_path;
+    std::string clean_pdb_output_path;
     bool verbose = false;
     bool quiet = false;
     bool include_hetatm = false;
@@ -120,6 +130,15 @@ int main(int argc, char* argv[]) {
 
         if (arg == "--include-hetatm") {
             include_hetatm = true;
+            continue;
+        }
+
+        if (arg == "--write-clean-pdb") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for " << arg << '\n';
+                return 1;
+            }
+            clean_pdb_output_path = argv[++i];
             continue;
         }
 
@@ -184,13 +203,34 @@ int main(int argc, char* argv[]) {
 
         logger.info(std::string("Include HETATM: ") + (include_hetatm ? "true" : "false"));
         logger.info(std::string("Protein only: true"));
+        if (!clean_pdb_output_path.empty()) {
+            logger.info("Accepted-coordinate export enabled");
+            logger.info("Accepted-coordinate export path: " + clean_pdb_output_path);
+        }
 
         PdbParser parser(config, &logger);
         Capsid capsid = parser.parseFile(input_path);
+        logger.info("Starting extended structural summary geometry");
+        StructuralSummary structural_summary = computeStructuralSummary(capsid);
+        logger.info("Completed extended structural summary geometry");
+
+        if (!clean_pdb_output_path.empty()) {
+            AcceptedStructureWriterConfig writer_config;
+            writer_config.output_path = clean_pdb_output_path;
+            writer_config.emit_header_comments = true;
+            writer_config.emit_ter_records = true;
+            writer_config.emit_end_record = true;
+            writer_config.preserve_atom_serial_numbers = true;
+            writer_config.coordinate_records_only = false;
+
+            AcceptedStructureWriter writer(&logger);
+            const AcceptedStructureWriteStats write_stats = writer.write(capsid, writer_config, config);
+            logger.info("Accepted-coordinate atoms written: " + std::to_string(write_stats.atoms_written));
+        }
 
         timer.stop();
 
-        printSummary(capsid, parser.stats(), timer.elapsedSeconds());
+        printSummary(capsid, parser.stats(), structural_summary, timer.elapsedSeconds());
 
         logger.info("Run completed successfully");
         return 0;
