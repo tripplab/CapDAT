@@ -34,6 +34,7 @@ set(CAPDAT_SOURCES
     src/chain.cpp
     src/capsid.cpp
     src/pdb_parser.cpp
+    src/accepted_structure_writer.cpp
     src/logger.cpp
     src/timer.cpp
 )
@@ -104,5 +105,4 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "Build tests: ${CAPDAT_BUILD_TESTS}")
 message(STATUS "Warnings enabled: ${CAPDAT_ENABLE_WARNINGS}")
-
 
