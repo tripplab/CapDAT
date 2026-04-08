@@ -1,6 +1,8 @@
 #include "accepted_structure_writer.hpp"
 #include "logger.hpp"
 #include "pdb_parser.hpp"
+#include "structural_summary.hpp"
+#include "summary_reporter.hpp"
 #include "timer.hpp"
 
 #include <exception>
@@ -41,7 +43,10 @@ void printVersion() {
 /**
  * @brief Print a compact final summary for a successful run.
  */
-void printSummary(const Capsid& capsid, const ParseStats& stats, double elapsed_seconds) {
+void printSummary(const Capsid& capsid,
+                  const ParseStats& stats,
+                  const StructuralSummary& structural_summary,
+                  double elapsed_seconds) {
     std::cout << "\n=== CapDAT Summary ===\n";
     std::cout << "Input file:              " << capsid.sourcePath() << '\n';
     std::cout << "Total lines read:        " << stats.total_lines_read << '\n';
@@ -54,6 +59,8 @@ void printSummary(const Capsid& capsid, const ParseStats& stats, double elapsed_
     std::cout << "Malformed records:       " << stats.total_malformed_records << '\n';
     std::cout << "Skipped records:         " << capsid.skippedRecordCount() << '\n';
     std::cout << "Runtime (s):             " << elapsed_seconds << '\n';
+
+    printStructuralSummaryBlock(std::cout, structural_summary);
 }
 
 /**
@@ -203,6 +210,9 @@ int main(int argc, char* argv[]) {
 
         PdbParser parser(config, &logger);
         Capsid capsid = parser.parseFile(input_path);
+        logger.info("Starting extended structural summary geometry");
+        StructuralSummary structural_summary = computeStructuralSummary(capsid);
+        logger.info("Completed extended structural summary geometry");
 
         if (!clean_pdb_output_path.empty()) {
             AcceptedStructureWriterConfig writer_config;
@@ -220,7 +230,7 @@ int main(int argc, char* argv[]) {
 
         timer.stop();
 
-        printSummary(capsid, parser.stats(), timer.elapsedSeconds());
+        printSummary(capsid, parser.stats(), structural_summary, timer.elapsedSeconds());
 
         logger.info("Run completed successfully");
         return 0;
