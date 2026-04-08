@@ -9,7 +9,18 @@ At this stage, CapDAT implements a lightweight object-oriented architecture cent
 
 CapDAT now also includes a post-parse geometry/symmetry foundation module (`geometry_symmetry`) that centralizes canonical icosahedral fold definitions, reusable angle and distance utilities, deterministic direction-alignment rotation math, and canonical IAU boundary helpers. This module is intentionally separate from `PdbParser` and the domain data holders so parsing remains focused on reconstruction while geometric analysis logic stays reusable and explicit.
 
-The program currently provides a command-line interface with support for input-file selection, optional log-file output, verbosity control, optional inclusion of `HETATM` records, optional export of accepted coordinates via `--write-clean-pdb <file>`, help output, and version reporting. During execution, it produces informative runtime messages and a final terminal summary that includes the input file name, total lines read, coordinate records detected, accepted atoms, accepted residues, internally reconstructed subunits, alternate-location counts, skipped or malformed records, and total runtime. Logging and timing are already integrated from the first version so runs remain traceable and easy to debug.
+The program currently provides a command-line interface with support for input-file selection, optional log-file output, verbosity control, optional inclusion of `HETATM` records, optional final export via `--export-final <file>`, and optional post-parse in-place reorientation workflows via `--reorient` plus either `--align-fold` or `--align-vector`. Reorientation may target axis `x`, `y`, or `z` through `--align-axis`, with `z` as the default when omitted. During execution, it produces informative runtime messages and a final terminal summary that includes the input file name, total lines read, coordinate records detected, accepted atoms, accepted residues, internally reconstructed subunits, alternate-location counts, skipped or malformed records, and total runtime. Logging and timing are already integrated from the first version so runs remain traceable and easy to debug.
+
+## Reorientation and final export semantics (v01)
+
+- `--write-clean-pdb` has been replaced by `--export-final <file>`.
+- Reorientation is opt-in and requires `--reorient` with exactly one source:
+  - `--align-fold <name>` for canonical folds (`2_0`, `2_1`, `3_0`, `3_1`, `5_0`), or
+  - `--align-vector <x,y,z>` for a custom origin-based direction vector.
+- Target axis selection accepts only `--align-axis x|y|z` and defaults to `z`.
+- Reorientation performs a pure rotation (no translation) and modifies current in-memory `Capsid` atom coordinates in place.
+- After reorientation, the `Capsid` orientation/frame state marks the structure as being in a derived frame rather than the original parsed input frame.
+- `export_capsid` writes the current accepted in-memory coordinates. If reorientation occurred, the export contains transformed coordinates and remarks documenting the applied alignment source and target axis.
 
 The main engineering goal of CapDAT v01 is to establish a trustworthy, maintainable, and performance-aware parsing foundation that can support future analytical modules. Planned later extensions may include geometric descriptors, inter-subunit distance analysis, symmetry-related grouping, shell thickness and radius distributions, local curvature and anisotropy metrics, batch processing, and OpenMP-enabled acceleration. In that sense, the present release is intentionally conservative: it prioritizes **correct parsing, clear hierarchy reconstruction, modular software organization, and future extensibility** over premature scientific complexity.
 
@@ -71,6 +82,5 @@ When the build was tested with the command `./build/capsid_analyzer -i data/1cwp
 `[2026-04-07 22:04:21] [INFO] Run completed successfully`
 
 This output indicates that the CapDAT v01 build completed and executed correctly on the sample input file, successfully parsing the structure, reconstructing the internal hierarchy, producing summary statistics, and completing the run without fatal errors.
-
 
 

@@ -39,6 +39,13 @@ const std::vector<Chain>& Capsid::chains() const {
 }
 
 /**
+ * @brief Return mutable access to reconstructed subunits.
+ */
+std::vector<Chain>& Capsid::mutableChains() {
+    return chains_;
+}
+
+/**
  * @brief Return mutable access to the most recently appended Chain.
  *
  * @throws std::out_of_range if the Capsid contains no chains.
@@ -168,6 +175,20 @@ void Capsid::finalizeCounts() {
         total_residues_ += chain.residueCount();
         total_atoms_ += chain.atomCount();
     }
+}
+
+/**
+ * @brief Return current orientation/frame state for the in-memory coordinates.
+ */
+const Capsid::OrientationState& Capsid::orientationState() const {
+    return orientation_state_;
+}
+
+/**
+ * @brief Overwrite orientation/frame state after reorientation workflow updates.
+ */
+void Capsid::setOrientationState(const OrientationState& state) {
+    orientation_state_ = state;
 }
 
 // NOTE ON PARSER-SAFE MUTATION:
