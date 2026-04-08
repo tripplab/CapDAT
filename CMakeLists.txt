@@ -105,6 +105,7 @@ if(CAPDAT_BUILD_TESTS)
         src/pdb_parser.cpp
         src/logger.cpp
         src/structural_summary.cpp
+        src/summary_reporter.cpp
     )
 
     target_include_directories(capdat_structural_summary_tests

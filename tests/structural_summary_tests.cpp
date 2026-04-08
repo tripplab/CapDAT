@@ -2,13 +2,16 @@
 #include "logger.hpp"
 #include "pdb_parser.hpp"
 #include "structural_summary.hpp"
+#include "summary_reporter.hpp"
 
 #include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -103,6 +106,62 @@ void testConstructedCapsidGeometry() {
     assertNear(summary.residues_per_subunit.min, 1.0, "residues_per_subunit.min");
     assertNear(summary.residues_per_subunit.max, 1.0, "residues_per_subunit.max");
     assertNear(summary.residues_per_subunit.mean, 1.0, "residues_per_subunit.mean");
+
+    if (summary.unique_original_label_count != 2) {
+        throw std::runtime_error("unique_original_label_count mismatch for constructed capsid");
+    }
+    if (summary.sorted_unique_original_labels != std::vector<char>{'A', 'B'}) {
+        throw std::runtime_error("sorted unique label set mismatch for constructed capsid");
+    }
+}
+
+void testUniqueOriginalLabelSummaryAndFormatting() {
+    Capsid capsid("labels");
+
+    Chain chain_1(1, 'B');
+    Residue res_1("ALA", 1, ' ', 'B', 1);
+    res_1.addAtom(Atom(1, "CA", ' ', "ALA", 'B', 1, ' ', 0.0, 0.0, 0.0, 1.0, 20.0, "C", "", false));
+    chain_1.addResidue(res_1);
+
+    Chain chain_2(2, ' ');
+    Residue res_2("GLY", 1, ' ', ' ', 2);
+    res_2.addAtom(Atom(2, "CA", ' ', "GLY", ' ', 1, ' ', 1.0, 0.0, 0.0, 1.0, 20.0, "C", "", false));
+    chain_2.addResidue(res_2);
+
+    Chain chain_3(3, 'A');
+    Residue res_3("SER", 1, ' ', 'A', 3);
+    res_3.addAtom(Atom(3, "CA", ' ', "SER", 'A', 1, ' ', 2.0, 0.0, 0.0, 1.0, 20.0, "C", "", false));
+    chain_3.addResidue(res_3);
+
+    Chain chain_4(4, 'B');
+    Residue res_4("VAL", 1, ' ', 'B', 4);
+    res_4.addAtom(Atom(4, "CA", ' ', "VAL", 'B', 1, ' ', 3.0, 0.0, 0.0, 1.0, 20.0, "C", "", false));
+    chain_4.addResidue(res_4);
+
+    capsid.addChain(chain_1);
+    capsid.addChain(chain_2);
+    capsid.addChain(chain_3);
+    capsid.addChain(chain_4);
+    capsid.finalizeCounts();
+
+    const StructuralSummary summary = computeStructuralSummary(capsid);
+    if (summary.unique_original_label_count != 3) {
+        throw std::runtime_error("unique original label count should deduplicate repeated labels");
+    }
+    if (summary.sorted_unique_original_labels != std::vector<char>{' ', 'A', 'B'}) {
+        throw std::runtime_error("sorted unique labels should be stable and include blank");
+    }
+
+    std::ostringstream output;
+    printStructuralSummaryBlock(output, summary);
+    const std::string rendered = output.str();
+
+    if (rendered.find("unique original labels: 3") == std::string::npos) {
+        throw std::runtime_error("report missing unique original labels line");
+    }
+    if (rendered.find("labels: <blank>, A, B") == std::string::npos) {
+        throw std::runtime_error("report missing compact sorted labels line with blank placeholder");
+    }
 }
 
 void testParserIntegrationAcceptedAtomsOnly() {
@@ -186,6 +245,7 @@ void testPolicySensitiveSummaryFollowsAcceptedSet() {
 int main() {
     try {
         testConstructedCapsidGeometry();
+        testUniqueOriginalLabelSummaryAndFormatting();
         testParserIntegrationAcceptedAtomsOnly();
         testPolicySensitiveSummaryFollowsAcceptedSet();
         std::cout << "All structural summary tests passed.\n";
