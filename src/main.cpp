@@ -1,6 +1,7 @@
-#include "accepted_structure_writer.hpp"
+#include "export_capsid.hpp"
 #include "logger.hpp"
 #include "pdb_parser.hpp"
+#include "reorientation_workflow.hpp"
 #include "structural_summary.hpp"
 #include "summary_reporter.hpp"
 #include "timer.hpp"
@@ -24,25 +25,29 @@ void printHelp(const std::string& program_name) {
         << "  -l, --log <file>        Write log output to file\n"
         << "  -v, --verbose           Increase terminal verbosity\n"
         << "      --include-hetatm    Include HETATM records\n"
-        << "      --write-clean-pdb   Write accepted atoms to a clean PDB-like file\n"
+        << "      --export-final <f>  Export current accepted Capsid coordinates to file\n"
+        << "      --reorient          Enable post-parse in-place reorientation workflow\n"
+        << "      --align-fold <name> Reorientation source: canonical fold (2_0,2_1,3_0,3_1,5_0)\n"
+        << "      --align-vector <v>  Reorientation source: custom direction x,y,z from origin\n"
+        << "      --align-axis <a>    Target alignment axis x|y|z (default: z)\n"
         << "      --quiet             Reduce terminal output\n"
         << "  -h, --help              Show this help message\n"
         << "      --version           Show version information\n\n"
+        << "Notes:\n"
+        << "  - --write-clean-pdb has been replaced by --export-final.\n"
+        << "  - Reorientation applies a pure rotation (no translation) in place to\n"
+        << "    current Capsid coordinates, changing frame identity from original\n"
+        << "    parsed frame to a derived frame tracked in Capsid orientation state.\n"
+        << "  - --align-axis defaults to positive Z when omitted.\n\n"
         << "Examples:\n"
-        << "  " << program_name << " --input capsid.pdb\n"
-        << "  " << program_name << " -i capsid.pdb --log run.log --verbose\n";
+        << "  " << program_name << " --input capsid.pdb --export-final accepted.pdb\n"
+        << "  " << program_name << " -i capsid.pdb --reorient --align-fold 5_0 --align-axis x --export-final aligned.pdb\n";
 }
 
-/**
- * @brief Print the CapDAT version string to standard output.
- */
 void printVersion() {
     std::cout << "CapDAT v" << CAPDAT_VERSION << '\n';
 }
 
-/**
- * @brief Print a compact final summary for a successful run.
- */
 void printSummary(const Capsid& capsid,
                   const ParseStats& stats,
                   const StructuralSummary& structural_summary,
@@ -63,29 +68,23 @@ void printSummary(const Capsid& capsid,
     printStructuralSummaryBlock(std::cout, structural_summary);
 }
 
-/**
- * @brief Program entry point for CapDAT v01.
- *
- * Exit-code policy:
- * - 0: success
- * - 1: user or argument error
- * - 2: file access error
- * - 3: parsing failure
- * - 4: unexpected internal failure
- */
 int main(int argc, char* argv[]) {
     std::string input_path;
     std::string log_path;
-    std::string clean_pdb_output_path;
+    std::string export_final_output_path;
     bool verbose = false;
     bool quiet = false;
     bool include_hetatm = false;
 
-    const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
+    // CLI flags for strict opt-in reorientation workflow.
+    bool reorient_requested = false;
+    bool align_fold_given = false;
+    bool align_vector_given = false;
+    std::string align_fold_name;
+    std::string align_vector_text;
+    char align_axis = 'z';
 
-    // -------------------------------------------------------------------------
-    // CLI parsing
-    // -------------------------------------------------------------------------
+    const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -94,12 +93,10 @@ int main(int argc, char* argv[]) {
             printHelp(program_name);
             return 0;
         }
-
         if (arg == "--version") {
             printVersion();
             return 0;
         }
-
         if (arg == "-i" || arg == "--input") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: missing value for " << arg << '\n';
@@ -108,7 +105,6 @@ int main(int argc, char* argv[]) {
             input_path = argv[++i];
             continue;
         }
-
         if (arg == "-l" || arg == "--log") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: missing value for " << arg << '\n';
@@ -117,28 +113,63 @@ int main(int argc, char* argv[]) {
             log_path = argv[++i];
             continue;
         }
-
         if (arg == "-v" || arg == "--verbose") {
             verbose = true;
             continue;
         }
-
         if (arg == "--quiet") {
             quiet = true;
             continue;
         }
-
         if (arg == "--include-hetatm") {
             include_hetatm = true;
             continue;
         }
-
-        if (arg == "--write-clean-pdb") {
+        if (arg == "--export-final") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: missing value for " << arg << '\n';
                 return 1;
             }
-            clean_pdb_output_path = argv[++i];
+            export_final_output_path = argv[++i];
+            continue;
+        }
+        if (arg == "--write-clean-pdb") {
+            std::cerr << "Error: --write-clean-pdb is deprecated. Use --export-final <file>.\n";
+            return 1;
+        }
+        if (arg == "--reorient") {
+            reorient_requested = true;
+            continue;
+        }
+        if (arg == "--align-fold") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --align-fold\n";
+                return 1;
+            }
+            align_fold_given = true;
+            align_fold_name = argv[++i];
+            continue;
+        }
+        if (arg == "--align-vector") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --align-vector\n";
+                return 1;
+            }
+            align_vector_given = true;
+            align_vector_text = argv[++i];
+            continue;
+        }
+        if (arg == "--align-axis") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --align-axis\n";
+                return 1;
+            }
+            const std::string axis_arg = argv[++i];
+            if (axis_arg.size() != 1 || (axis_arg[0] != 'x' && axis_arg[0] != 'y' && axis_arg[0] != 'z')) {
+                std::cerr << "Error: --align-axis must be one of x, y, z\n";
+                return 1;
+            }
+            align_axis = axis_arg[0];
             continue;
         }
 
@@ -151,12 +182,20 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // -------------------------------------------------------------------------
-    // Logger setup
-    // -------------------------------------------------------------------------
+    if (align_fold_given && align_vector_given) {
+        std::cerr << "Error: --align-fold and --align-vector are mutually exclusive.\n";
+        return 1;
+    }
+    if (reorient_requested && !align_fold_given && !align_vector_given) {
+        std::cerr << "Error: --reorient requires exactly one source: --align-fold or --align-vector.\n";
+        return 1;
+    }
+    if ((align_fold_given || align_vector_given) && !reorient_requested) {
+        std::cerr << "Error: --align-fold/--align-vector require --reorient.\n";
+        return 1;
+    }
 
     Logger logger;
-
     if (quiet) {
         logger.setVerbosity(LogLevel::WARNING);
     } else if (verbose) {
@@ -174,10 +213,6 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
-    // -------------------------------------------------------------------------
-    // Parser configuration
-    // -------------------------------------------------------------------------
-
     ParserConfig config;
     config.include_hetatm = include_hetatm;
     config.strict_mode = false;
@@ -186,72 +221,56 @@ int main(int argc, char* argv[]) {
     config.verbose_warnings = verbose;
     config.protein_only = true;
 
-    // -------------------------------------------------------------------------
-    // Execution
-    // -------------------------------------------------------------------------
-
     Timer timer;
     timer.start();
 
     try {
         logger.info("Starting CapDAT");
-        logger.info("Input file: " + input_path);
-
-        if (!log_path.empty()) {
-            logger.info("Log file: " + log_path);
-        }
-
-        logger.info(std::string("Include HETATM: ") + (include_hetatm ? "true" : "false"));
-        logger.info(std::string("Protein only: true"));
-        if (!clean_pdb_output_path.empty()) {
-            logger.info("Accepted-coordinate export enabled");
-            logger.info("Accepted-coordinate export path: " + clean_pdb_output_path);
-        }
 
         PdbParser parser(config, &logger);
         Capsid capsid = parser.parseFile(input_path);
+
+        ReorientationRequest reorient_request;
+        reorient_request.request_reorientation = reorient_requested;
+        reorient_request.source_mode = align_vector_given ? ReorientationSourceMode::custom_vector
+                                                          : ReorientationSourceMode::fold;
+        reorient_request.fold_name = align_fold_name;
+        reorient_request.custom_vector_text = align_vector_text;
+        reorient_request.target_axis = align_axis;
+        reorient_request.request_export = !export_final_output_path.empty();
+        reorient_request.export_path = export_final_output_path;
+        reorient_request.verbose = verbose;
+
+        const ReorientationResult reorient_result =
+            applyReorientationWorkflow(capsid, reorient_request, &logger);
+        (void)reorient_result;
+
         logger.info("Starting extended structural summary geometry");
         StructuralSummary structural_summary = computeStructuralSummary(capsid);
         logger.info("Completed extended structural summary geometry");
 
-        if (!clean_pdb_output_path.empty()) {
-            AcceptedStructureWriterConfig writer_config;
-            writer_config.output_path = clean_pdb_output_path;
+        if (!export_final_output_path.empty()) {
+            ExportCapsidConfig writer_config;
+            writer_config.output_path = export_final_output_path;
             writer_config.emit_header_comments = true;
             writer_config.emit_ter_records = true;
             writer_config.emit_end_record = true;
             writer_config.preserve_atom_serial_numbers = true;
             writer_config.coordinate_records_only = false;
 
-            AcceptedStructureWriter writer(&logger);
-            const AcceptedStructureWriteStats write_stats = writer.write(capsid, writer_config, config);
-            logger.info("Accepted-coordinate atoms written: " + std::to_string(write_stats.atoms_written));
+            ExportCapsidWriter writer(&logger);
+            const ExportCapsidStats write_stats = writer.write(capsid, writer_config, config);
+            logger.info("Final exported atoms written: " + std::to_string(write_stats.atoms_written));
+            logger.info("Final structure exported successfully: " + export_final_output_path);
         }
 
         timer.stop();
-
         printSummary(capsid, parser.stats(), structural_summary, timer.elapsedSeconds());
-
         logger.info("Run completed successfully");
         return 0;
     } catch (const std::runtime_error& e) {
         timer.stop();
         logger.error(e.what());
-
-        const std::string message = e.what();
-
-        // Simple v01 categorization of failure classes.
-        if (message.find("open input file") != std::string::npos ||
-            message.find("Input file is empty") != std::string::npos) {
-            return 2;
-        }
-
-        if (message.find("No valid coordinate records") != std::string::npos ||
-            message.find("parse") != std::string::npos ||
-            message.find("Parsing") != std::string::npos) {
-            return 3;
-        }
-
         return 4;
     } catch (const std::exception& e) {
         timer.stop();
@@ -263,32 +282,3 @@ int main(int argc, char* argv[]) {
         return 4;
     }
 }
-
-// NOTE ON MANUAL CLI PARSING:
-//
-// The technical design for v01 explicitly avoids external dependencies, so the
-// CLI is parsed manually here instead of using a library. This keeps the build
-// simple and portable for the foundation release.
-//
-// If later versions need richer argument handling, validation, or subcommands,
-// introducing a dedicated CLI library could become worthwhile.
-
-// NOTE ON EXIT-CODE MAPPING:
-//
-// The current runtime_error-to-exit-code mapping is intentionally simple and
-// string-based. This is acceptable for an early implementation skeleton, but it
-// is not the ideal long-term mechanism.
-//
-// A future refinement should likely introduce more explicit exception types or
-// a small error-category system so exit-code behavior becomes more structured
-// and less dependent on message text.
-
-// NOTE ON SUMMARY OUTPUT:
-//
-// The summary combines hierarchy-derived counts from Capsid with parser-event
-// counts from ParseStats. This split matches the design intent of v01: some
-// values describe the final stored structure, while others describe events that
-// occurred during parsing.
-//
-// That separation is useful and should probably be preserved in later versions
-// even if reporting becomes more sophisticated.

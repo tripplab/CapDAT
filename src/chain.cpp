@@ -75,6 +75,13 @@ const std::vector<Residue>& Chain::residues() const {
 }
 
 /**
+ * @brief Return mutable residue storage for post-parse workflow transforms.
+ */
+std::vector<Residue>& Chain::mutableResidues() {
+    return residues_;
+}
+
+/**
  * @brief Return the number of residues in this Chain.
  */
 std::size_t Chain::residueCount() const {

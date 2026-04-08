@@ -82,6 +82,13 @@ const std::vector<Atom>& Residue::atoms() const {
 }
 
 /**
+ * @brief Return mutable atom storage for in-place coordinate workflows.
+ */
+std::vector<Atom>& Residue::mutableAtoms() {
+    return atoms_;
+}
+
+/**
  * @brief Build and return a compact residue identity key.
  *
  * The v01 grouping logic is based primarily on:
