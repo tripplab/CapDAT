@@ -173,7 +173,6 @@ The current implementation explicitly enforces:
 - either source requires `--reorient`,
 - `--reorient` requires exactly one source,
 - `--align-axis` accepts only lowercase `x`, `y`, or `z`,
-- deprecated `--write-clean-pdb` is rejected in favor of `--export-final`.
 
 This is the expected style for future user-facing features: argument parsing and high-level invariants in `main.cpp`, detailed interpretation and action in a dedicated module.
 
@@ -242,7 +241,7 @@ Its responsibilities in the current release are intentionally limited to storing
 
 ## 6. Orientation and Frame State
 
-One of the most important recent architectural features is `Capsid::OrientationState`.
+One of the most important architectural features is `Capsid::OrientationState`.
 
 This state records whether the current in-memory coordinates still correspond to the original parsed input frame or to a derived frame produced by an explicit workflow.
 
@@ -416,7 +415,7 @@ New geometry logic should generally be added here rather than reimplemented in w
 
 ## 9. Reorientation Workflow Specification
 
-The current codebase includes a dedicated workflow layer in `reorientation_workflow`.
+The codebase includes a dedicated workflow layer in `reorientation_workflow`.
 
 ### 9.1 Request model
 
@@ -445,9 +444,7 @@ The current codebase includes a dedicated workflow layer in `reorientation_workf
 - whether coordinates changed,
 - messages for logging or inspection.
 
-### 9.3 Current workflow behavior
-
-The workflow currently:
+### 9.3 Workflow behavior
 
 1. resolves the source direction from either a canonical fold or a custom vector,
 2. resolves the target axis to `+X`, `+Y`, or `+Z`,
@@ -470,13 +467,13 @@ That distinction is central to the current design.
 
 ### 10.1 Export semantics
 
-The writer can currently:
+The writer:
 
-- emit header remarks,
-- emit `TER` records,
-- emit an `END` record,
-- preserve original atom serial numbers or renumber them,
-- write either coordinate-only output or richer PDB-like output.
+- emits header remarks,
+- emits `TER` records,
+- emits an `END` record,
+- preserves original atom serial numbers or renumber them,
+- writes either coordinate-only output or richer PDB-like output.
 
 ### 10.2 Orientation-aware export
 
@@ -747,55 +744,6 @@ The current test style is especially useful and should be preserved:
 ---
 
 ## 16. Recommended Near-Term Development Priorities
-
-Based on the current codebase, the most natural next functionality families are the following.
-
-### 16.1 Stronger internal subunit reconstruction
-
-This is likely the highest-priority structural-core improvement because many downstream geometric analyses will depend on correct subunit identity.
-
-### 16.2 Fold-centered local analysis
-
-Examples:
-
-- atom or residue classification by nearest fold,
-- angular patch extraction around canonical folds,
-- IAU-aware partitioning.
-
-### 16.3 Radial shell profiling
-
-A natural extension of the current structural summary would include:
-
-- shell distributions,
-- per-subunit radial ranges,
-- inner/outer shell statistics,
-- radial occupancy summaries.
-
-### 16.4 Local geometry descriptors
-
-Examples:
-
-- local thickness estimates,
-- local curvature scaffolding,
-- patch-level surface descriptors,
-- orientation-dependent local metrics.
-
-### 16.5 New machine-readable exports
-
-Examples:
-
-- CSV metric tables,
-- JSON summaries,
-- local-frame export bundles,
-- future mesh or field output once surface modules exist.
-
-### 16.6 Batch-processing support
-
-Examples:
-
-- processing multiple files per run,
-- standardized output directory layouts,
-- machine-readable summaries for later pipelines.
 
 ---
 
