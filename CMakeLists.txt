@@ -34,7 +34,9 @@ set(CAPDAT_SOURCES
     src/chain.cpp
     src/capsid.cpp
     src/pdb_parser.cpp
-    src/accepted_structure_writer.cpp
+    src/geometry_symmetry.cpp
+    src/export_capsid.cpp
+    src/reorientation_workflow.cpp
     src/logger.cpp
     src/structural_summary.cpp
     src/summary_reporter.cpp
@@ -131,6 +133,73 @@ if(CAPDAT_BUILD_TESTS)
     endif()
 
     add_test(NAME capdat_structural_summary_tests COMMAND capdat_structural_summary_tests)
+
+    add_executable(capdat_geometry_symmetry_tests
+        tests/geometry_symmetry_tests.cpp
+        src/geometry_symmetry.cpp
+    )
+
+    target_include_directories(capdat_geometry_symmetry_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+    )
+
+    if(CAPDAT_ENABLE_WARNINGS)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(capdat_geometry_symmetry_tests PRIVATE
+                -Wall
+                -Wextra
+                -Wpedantic
+                -Wconversion
+                -Wsign-conversion
+            )
+        elseif(MSVC)
+            target_compile_options(capdat_geometry_symmetry_tests PRIVATE
+                /W4
+                /permissive-
+            )
+        endif()
+    endif()
+
+    add_test(NAME capdat_geometry_symmetry_tests COMMAND capdat_geometry_symmetry_tests)
+
+    add_executable(capdat_reorientation_workflow_tests
+        tests/reorientation_workflow_tests.cpp
+        src/atom.cpp
+        src/residue.cpp
+        src/chain.cpp
+        src/capsid.cpp
+        src/geometry_symmetry.cpp
+        src/reorientation_workflow.cpp
+        src/logger.cpp
+    )
+    target_include_directories(capdat_reorientation_workflow_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    add_test(NAME capdat_reorientation_workflow_tests COMMAND capdat_reorientation_workflow_tests)
+
+    add_executable(capdat_export_capsid_tests
+        tests/export_capsid_tests.cpp
+        src/atom.cpp
+        src/residue.cpp
+        src/chain.cpp
+        src/capsid.cpp
+        src/export_capsid.cpp
+        src/logger.cpp
+    )
+    target_include_directories(capdat_export_capsid_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    target_compile_definitions(capdat_export_capsid_tests PRIVATE CAPDAT_VERSION="${PROJECT_VERSION}")
+    add_test(NAME capdat_export_capsid_tests COMMAND capdat_export_capsid_tests)
+
+    add_test(NAME capdat_cli_export_only
+             COMMAND capsid_analyzer --input ${PROJECT_SOURCE_DIR}/data/1cwp_full.vdb --export-final cli_export_only.pdb)
+    add_test(NAME capdat_cli_fold_to_z_export
+             COMMAND capsid_analyzer --input ${PROJECT_SOURCE_DIR}/data/1cwp_full.vdb --reorient --align-fold 5_0 --align-axis z --export-final cli_fold_z.pdb)
+    add_test(NAME capdat_cli_fold_to_x_export
+             COMMAND capsid_analyzer --input ${PROJECT_SOURCE_DIR}/data/1cwp_full.vdb --reorient --align-fold 5_0 --align-axis x --export-final cli_fold_x.pdb)
+    add_test(NAME capdat_cli_vector_to_y_export
+             COMMAND capsid_analyzer --input ${PROJECT_SOURCE_DIR}/data/1cwp_full.vdb --reorient --align-vector 1,1,1 --align-axis y --export-final cli_vec_y.pdb)
+    add_test(NAME capdat_cli_invalid_combo
+             COMMAND capsid_analyzer --input ${PROJECT_SOURCE_DIR}/data/1cwp_full.vdb --align-fold 5_0)
+    set_tests_properties(capdat_cli_invalid_combo PROPERTIES WILL_FAIL TRUE)
 endif()
 
 # ------------------------------------------------------------------------------

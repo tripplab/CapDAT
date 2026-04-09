@@ -1,6 +1,7 @@
 #ifndef CAPDAT_CAPSID_HPP
 #define CAPDAT_CAPSID_HPP
 
+#include <array>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -27,6 +28,45 @@
  */
 class Capsid {
 public:
+    /**
+     * @brief Explicit source mode used for the most recent in-place reorientation.
+     */
+    enum class OrientationSourceMode {
+        none,
+        fold,
+        custom_vector
+    };
+
+    /**
+     * @brief Explicit frame/orientation state for current in-memory coordinates.
+     *
+     * Important convention:
+     * - The parser initializes Capsid in the original parsed input frame.
+     * - Workflow operations may later rotate coordinates in place.
+     * - Once reoriented, this object no longer represents the original input
+     *   coordinate frame.
+     *
+     * Downstream code that cares about frame identity must consult this state
+     * instead of assuming coordinates are always still in the source frame.
+     */
+    struct OrientationState {
+        bool in_original_parsed_frame = true;
+        bool reoriented_in_place = false;
+        bool already_aligned_identity = false;
+        std::array<std::array<double, 3>, 3> applied_rotation_matrix = {{{1.0, 0.0, 0.0},
+                                                                          {0.0, 1.0, 0.0},
+                                                                          {0.0, 0.0, 1.0}}};
+        bool has_rotation_axis = false;
+        std::array<double, 3> rotation_axis = {0.0, 0.0, 1.0};
+        bool has_rotation_angle = false;
+        double rotation_angle_radians = 0.0;
+        OrientationSourceMode source_mode = OrientationSourceMode::none;
+        std::string source_description;
+        std::array<double, 3> source_direction = {0.0, 0.0, 1.0};
+        char requested_target_axis = 'z';
+        std::array<double, 3> target_direction = {0.0, 0.0, 1.0};
+    };
+
     /**
      * @brief Default constructor.
      */
@@ -66,6 +106,9 @@ public:
 
     /// @return Read-only access to all reconstructed subunits.
     [[nodiscard]] const std::vector<Chain>& chains() const;
+
+    /// @return Mutable access for workflow-stage in-place coordinate updates.
+    std::vector<Chain>& mutableChains();
 
     /**
      * @brief Return mutable access to the most recently appended Chain.
@@ -150,6 +193,16 @@ public:
      */
     void finalizeCounts();
 
+    /**
+     * @brief Read current authoritative orientation/frame state.
+     */
+    [[nodiscard]] const OrientationState& orientationState() const;
+
+    /**
+     * @brief Overwrite orientation/frame state after a successful workflow step.
+     */
+    void setOrientationState(const OrientationState& state);
+
 private:
     // -------------------------------------------------------------------------
     // Source metadata
@@ -162,6 +215,7 @@ private:
     // -------------------------------------------------------------------------
 
     std::vector<Chain> chains_;
+    OrientationState orientation_state_{};
 
     // -------------------------------------------------------------------------
     // Summary counters

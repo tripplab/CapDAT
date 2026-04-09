@@ -89,6 +89,14 @@ public:
     [[nodiscard]] const std::vector<Atom>& atoms() const;
 
     /**
+     * @brief Return mutable access to atoms for post-parse in-place workflows.
+     *
+     * Parser construction should continue to use addAtom(). This mutable view is
+     * reserved for explicit workflow-stage coordinate transformations.
+     */
+    std::vector<Atom>& mutableAtoms();
+
+    /**
      * @brief Build a compact residue key for reporting/debugging.
      *
      * The intended v01 logic is based primarily on:

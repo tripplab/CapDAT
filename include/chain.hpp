@@ -92,6 +92,14 @@ public:
     /// @return Read-only access to all residues in this Chain.
     [[nodiscard]] const std::vector<Residue>& residues() const;
 
+    /**
+     * @brief Return mutable residues for post-parse workflow transforms.
+     *
+     * This supports in-place coordinate rotation after parsing. It should not be
+     * used to rebuild topology or change residue identity metadata.
+     */
+    std::vector<Residue>& mutableResidues();
+
     /// @return Number of residues in this Chain.
     [[nodiscard]] std::size_t residueCount() const;
 

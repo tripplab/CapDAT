@@ -164,6 +164,15 @@ std::array<double, 3> Atom::position() const {
     return {x_, y_, z_};
 }
 
+/**
+ * @brief Overwrite Cartesian coordinates in place.
+ */
+void Atom::setPosition(double x, double y, double z) {
+    x_ = x;
+    y_ = y;
+    z_ = z;
+}
+
 // NOTE ON PASS-BY-VALUE + std::move:
 //
 // The constructor takes string-like fields by value and then moves them into

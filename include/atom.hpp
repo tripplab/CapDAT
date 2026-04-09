@@ -132,6 +132,15 @@ public:
      */
     [[nodiscard]] std::array<double, 3> position() const;
 
+    /**
+     * @brief Overwrite Cartesian coordinates in place.
+     *
+     * This mutator exists for post-parse workflow operations (for example
+     * reorientation) that intentionally rotate current in-memory coordinates
+     * without changing atom identity or non-coordinate metadata.
+     */
+    void setPosition(double x, double y, double z);
+
 private:
     // -------------------------------------------------------------------------
     // Stored PDB-derived fields
@@ -171,6 +180,5 @@ private:
 //
 // For v01, the added clarity and maintainability of std::string are considered
 // more important than premature micro-optimization.
-
 
 
