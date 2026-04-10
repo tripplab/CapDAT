@@ -197,6 +197,28 @@ if(CAPDAT_BUILD_TESTS)
     target_compile_definitions(capdat_export_capsid_tests PRIVATE CAPDAT_VERSION="${PROJECT_VERSION}")
     add_test(NAME capdat_export_capsid_tests COMMAND capdat_export_capsid_tests)
 
+    add_executable(capdat_fold_patch_stage2_tests
+        tests/fold_patch_stage2_tests.cpp
+        src/atom.cpp
+        src/residue.cpp
+        src/chain.cpp
+        src/capsid.cpp
+        src/pdb_parser.cpp
+        src/logger.cpp
+        src/geometry_symmetry.cpp
+        src/fold_patch_analysis.cpp
+        src/fold_patch_frame.cpp
+        src/fold_patch_extraction.cpp
+        src/fold_patch_contact.cpp
+        src/fold_patch_surface_fit.cpp
+        src/fold_patch_metrics.cpp
+        src/fold_patch_reporter.cpp
+        src/fold_patch_export.cpp
+    )
+    target_include_directories(capdat_fold_patch_stage2_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    target_compile_definitions(capdat_fold_patch_stage2_tests PRIVATE CAPDAT_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+    add_test(NAME capdat_fold_patch_stage2_tests COMMAND capdat_fold_patch_stage2_tests)
+
     add_test(NAME capdat_cli_export_only
              COMMAND capsid_analyzer --input ${PROJECT_SOURCE_DIR}/data/1cwp_full.vdb --export-final cli_export_only.pdb)
     add_test(NAME capdat_cli_fold_to_z_export
