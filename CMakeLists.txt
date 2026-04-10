@@ -41,6 +41,7 @@ set(CAPDAT_SOURCES
     src/structural_summary.cpp
     src/summary_reporter.cpp
     src/timer.cpp
+    src/geometry_analysis.cpp
 )
 
 # ------------------------------------------------------------------------------
@@ -175,6 +176,23 @@ if(CAPDAT_BUILD_TESTS)
     )
     target_include_directories(capdat_reorientation_workflow_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
     add_test(NAME capdat_reorientation_workflow_tests COMMAND capdat_reorientation_workflow_tests)
+
+
+    add_executable(capdat_geometry_analysis_tests
+        tests/geometry_analysis_tests.cpp
+        src/atom.cpp
+        src/residue.cpp
+        src/chain.cpp
+        src/capsid.cpp
+        src/geometry_symmetry.cpp
+        src/reorientation_workflow.cpp
+        src/export_capsid.cpp
+        src/logger.cpp
+        src/geometry_analysis.cpp
+    )
+    target_include_directories(capdat_geometry_analysis_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    target_compile_definitions(capdat_geometry_analysis_tests PRIVATE CAPDAT_VERSION="${PROJECT_VERSION}")
+    add_test(NAME capdat_geometry_analysis_tests COMMAND capdat_geometry_analysis_tests)
 
     add_executable(capdat_export_capsid_tests
         tests/export_capsid_tests.cpp
