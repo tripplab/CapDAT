@@ -48,6 +48,7 @@ struct FoldPatchAnalysisResult {
     int grid_ny = 0;
     int valid_nodes = 0;
     int invalid_nodes = 0;
+    std::vector<PatchAtom> patch_atoms;
     PatchContactGrid raw_grid;
     PatchReconstructedSurfaces surfaces;
     PatchMetrics metrics;
