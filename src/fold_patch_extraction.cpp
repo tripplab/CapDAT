@@ -65,7 +65,7 @@ std::vector<PatchAtom> extractPatch(const Capsid& capsid,
                 if ((lx * lx + ly * ly) > (config.R * config.R)) {
                     continue;
                 }
-                if (lz <= 0.0 || lz > config.z_margin) {
+                if (lz <= 0.0) {
                     continue;
                 }
 

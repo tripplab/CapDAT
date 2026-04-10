@@ -162,9 +162,10 @@ void testCylinderMembershipPredicate() {
     config.z_margin = 11.0;
 
     const std::vector<PatchAtom> patch = extractPatch(capsid, frame, config);
-    assertTrue(patch.size() == 2, "Expected exactly two atoms in cylinder");
+    assertTrue(patch.size() == 3, "Expected exactly three atoms in cylinder");
     assertTrue(patch[0].serial == 1, "First selected atom should be serial 1");
-    assertTrue(patch[1].serial == 5, "Second selected atom should be serial 5");
+    assertTrue(patch[1].serial == 4, "Second selected atom should be serial 4");
+    assertTrue(patch[2].serial == 5, "Third selected atom should be serial 5");
 }
 
 void testLocalFrameOrthonormality() {
@@ -213,7 +214,7 @@ void testIntegrationCoherentExtraction() {
         });
 
     assertTrue(zmin_it->z >= 0.0, "Patch z_min must be >= 0");
-    assertTrue(zmax_it->z <= config.z_margin, "Patch z_max must be <= z_margin");
+    assertTrue(zmax_it->z > 0.0, "Patch z_max must be > 0");
 
     for (const PatchAtom& atom : patch) {
         assertTrue(atom.vdw_radius > 0.0, "All vdW radii must be positive");
