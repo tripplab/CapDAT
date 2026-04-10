@@ -24,7 +24,7 @@ struct FoldPatchAnalysisConfig {
     double R_eval = 10.0;
     double min_valid_fraction = 0.70;
     double min_central_valid_fraction = 0.80;
-    int min_atoms_in_patch = 200;
+    int min_atoms_in_patch = 20;
     double max_invalid_central_fraction = 0.20;
     bool export_patch_pdb = true;
     bool export_grid_pdb = true;
