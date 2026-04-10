@@ -1,4 +1,5 @@
 #include "export_capsid.hpp"
+#include "fold_patch_analysis.hpp"
 #include "logger.hpp"
 #include "pdb_parser.hpp"
 #include "reorientation_workflow.hpp"
@@ -84,6 +85,15 @@ int main(int argc, char* argv[]) {
     std::string align_vector_text;
     char align_axis = 'z';
 
+    bool run_geometry = false;
+    bool geometry_fold_given = false;
+    bool geometry_R_given = false;
+    bool geometry_mesh_given = false;
+    bool geometry_soft_given = false;
+    bool geometry_R_eval_given = false;
+    bool geometry_out_given = false;
+    FoldPatchAnalysisConfig geometry_config;
+
     const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
 
     for (int i = 1; i < argc; ++i) {
@@ -141,6 +151,64 @@ int main(int argc, char* argv[]) {
             reorient_requested = true;
             continue;
         }
+        if (arg == "--geometry") {
+            run_geometry = true;
+            continue;
+        }
+        if (arg == "--geometry_fold") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_fold\n";
+                return 1;
+            }
+            geometry_fold_given = true;
+            geometry_config.fold_name = argv[++i];
+            continue;
+        }
+        if (arg == "--geometry_R") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_R\n";
+                return 1;
+            }
+            geometry_R_given = true;
+            geometry_config.R = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_mesh") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_mesh\n";
+                return 1;
+            }
+            geometry_mesh_given = true;
+            geometry_config.h = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_soft") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_soft\n";
+                return 1;
+            }
+            geometry_soft_given = true;
+            geometry_config.soft = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_R_eval") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_R_eval\n";
+                return 1;
+            }
+            geometry_R_eval_given = true;
+            geometry_config.R_eval = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_out") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_out\n";
+                return 1;
+            }
+            geometry_out_given = true;
+            geometry_config.out_prefix = argv[++i];
+            continue;
+        }
         if (arg == "--align-fold") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: missing value for --align-fold\n";
@@ -195,6 +263,20 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    const bool geometry_tuning_flag_given =
+        geometry_fold_given || geometry_R_given || geometry_mesh_given ||
+        geometry_soft_given || geometry_R_eval_given || geometry_out_given;
+    if (geometry_tuning_flag_given && !run_geometry) {
+        std::cerr << "Error: --geometry is required when using --geometry_* options.\n";
+        return 1;
+    }
+
+    // Geometry validation stubs (analysis logic intentionally deferred).
+    // TODO: implement fold name exists check.
+    // TODO: implement explicit --geometry dependency checks for any future flags.
+    // TODO: implement scalar checks: R > 0, h > 0, R_eval > 0, R_eval < R, 0 <= soft <= 1.
+    // TODO: implement non-fatal warnings for h > R, h < 0.5, R < 4.0, R > 40.0.
+
     Logger logger;
     if (quiet) {
         logger.setVerbosity(LogLevel::WARNING);
@@ -248,6 +330,10 @@ int main(int argc, char* argv[]) {
         logger.info("Starting extended structural summary geometry");
         StructuralSummary structural_summary = computeStructuralSummary(capsid);
         logger.info("Completed extended structural summary geometry");
+
+        if (run_geometry) {
+            // TODO: call runFoldPatchAnalysis(capsid, geometry_config);
+        }
 
         if (!export_final_output_path.empty()) {
             ExportCapsidConfig writer_config;

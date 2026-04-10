@@ -40,6 +40,14 @@ set(CAPDAT_SOURCES
     src/logger.cpp
     src/structural_summary.cpp
     src/summary_reporter.cpp
+    src/fold_patch_analysis.cpp
+    src/fold_patch_frame.cpp
+    src/fold_patch_extraction.cpp
+    src/fold_patch_contact.cpp
+    src/fold_patch_surface_fit.cpp
+    src/fold_patch_metrics.cpp
+    src/fold_patch_reporter.cpp
+    src/fold_patch_export.cpp
     src/timer.cpp
 )
 
