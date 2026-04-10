@@ -116,6 +116,13 @@ const std::vector<FoldDefinition>& canonicalFolds();
 const FoldDefinition& foldByName(const std::string& fold_name);
 
 /**
+ * @brief Look up canonical fold by fold-type/index pair.
+ *
+ * @throws std::runtime_error when type/index is not a canonical fold.
+ */
+const FoldDefinition& foldByTypeIndex(int fold_type, int fold_index);
+
+/**
  * @brief Return the exact documented reference vector for a canonical fold.
  */
 Vector3 foldReferenceVector(const std::string& fold_name);

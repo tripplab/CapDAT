@@ -1,4 +1,5 @@
 #include "export_capsid.hpp"
+#include "geometry_analysis.hpp"
 #include "logger.hpp"
 #include "pdb_parser.hpp"
 #include "reorientation_workflow.hpp"
@@ -30,6 +31,10 @@ void printHelp(const std::string& program_name) {
         << "      --align-fold <name> Reorientation source: canonical fold (2_0,2_1,3_0,3_1,5_0)\n"
         << "      --align-vector <v>  Reorientation source: custom direction x,y,z from origin\n"
         << "      --align-axis <a>    Target alignment axis x|y|z (default: z)\n"
+        << "      --geometry-analysis Run geometry analysis Stage 1 preparation\n"
+        << "      --geometry_fold_type <n>   Geometry fold type 2|3|5 (default: 2)\n"
+        << "      --geometry_fold_index <n>  Geometry fold index for selected type (default: 0)\n"
+        << "      --geometry_cylinder_radius <A>  Geometry cylinder radius in angstroms (default: 12.0)\n"
         << "      --quiet             Reduce terminal output\n"
         << "  -h, --help              Show this help message\n"
         << "      --version           Show version information\n\n"
@@ -83,6 +88,11 @@ int main(int argc, char* argv[]) {
     std::string align_fold_name;
     std::string align_vector_text;
     char align_axis = 'z';
+
+    bool geometry_analysis_requested = false;
+    int geometry_fold_type = 2;
+    int geometry_fold_index = 0;
+    double geometry_cylinder_radius = 12.0;
 
     const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
 
@@ -172,6 +182,34 @@ int main(int argc, char* argv[]) {
             align_axis = axis_arg[0];
             continue;
         }
+        if (arg == "--geometry-analysis") {
+            geometry_analysis_requested = true;
+            continue;
+        }
+        if (arg == "--geometry_fold_type") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_fold_type\n";
+                return 1;
+            }
+            geometry_fold_type = std::stoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_fold_index") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_fold_index\n";
+                return 1;
+            }
+            geometry_fold_index = std::stoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_cylinder_radius") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_cylinder_radius\n";
+                return 1;
+            }
+            geometry_cylinder_radius = std::stod(argv[++i]);
+            continue;
+        }
 
         std::cerr << "Error: unknown argument: " << arg << '\n';
         return 1;
@@ -192,6 +230,10 @@ int main(int argc, char* argv[]) {
     }
     if ((align_fold_given || align_vector_given) && !reorient_requested) {
         std::cerr << "Error: --align-fold/--align-vector require --reorient.\n";
+        return 1;
+    }
+    if (geometry_analysis_requested && reorient_requested) {
+        std::cerr << "Error: --geometry-analysis cannot be combined with --reorient.\n";
         return 1;
     }
 
@@ -244,6 +286,20 @@ int main(int argc, char* argv[]) {
         const ReorientationResult reorient_result =
             applyReorientationWorkflow(capsid, reorient_request, &logger);
         (void)reorient_result;
+
+        FoldPatchAnalysisConfig geometry_config;
+        geometry_config.enabled = geometry_analysis_requested;
+        geometry_config.fold_type = geometry_fold_type;
+        geometry_config.fold_index = geometry_fold_index;
+        geometry_config.cylinder_radius = geometry_cylinder_radius;
+        geometry_config.export_rotated_capsid = verbose;
+        geometry_config.output_prefix = "geometry";
+
+        const GeometryAnalysisResult geometry_result =
+            runFoldPatchGeometryAnalysis(capsid, geometry_config, config, &logger);
+        if (!geometry_result.success) {
+            throw std::runtime_error("Geometry analysis failed during Stage 1 preparation");
+        }
 
         logger.info("Starting extended structural summary geometry");
         StructuralSummary structural_summary = computeStructuralSummary(capsid);

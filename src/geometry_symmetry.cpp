@@ -182,6 +182,19 @@ const FoldDefinition& foldByName(const std::string& fold_name) {
     return foldRegistry()[it->second];
 }
 
+const FoldDefinition& foldByTypeIndex(int fold_type, int fold_index) {
+    for (const FoldDefinition& fold : foldRegistry()) {
+        if (fold.fold_type == fold_type && fold.fold_index == fold_index) {
+            return fold;
+        }
+    }
+
+    if (fold_type != 2 && fold_type != 3 && fold_type != 5) {
+        throw std::runtime_error("Invalid geometry fold type: expected one of 2, 3, 5");
+    }
+    throw std::runtime_error("Invalid geometry fold index for fold type " + std::to_string(fold_type));
+}
+
 Vector3 foldReferenceVector(const std::string& fold_name) {
     return foldByName(fold_name).reference_vector;
 }

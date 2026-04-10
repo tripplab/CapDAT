@@ -133,6 +133,31 @@ void testRotations() {
     assertTrue(threw, "zero-vector source should throw");
 }
 
+
+void testFoldTypeIndexLookup() {
+    assertTrue(geometry_symmetry::foldByTypeIndex(2, 0).name == "2_0", "(2,0) should resolve to 2_0");
+    assertTrue(geometry_symmetry::foldByTypeIndex(2, 1).name == "2_1", "(2,1) should resolve to 2_1");
+    assertTrue(geometry_symmetry::foldByTypeIndex(3, 0).name == "3_0", "(3,0) should resolve to 3_0");
+    assertTrue(geometry_symmetry::foldByTypeIndex(3, 1).name == "3_1", "(3,1) should resolve to 3_1");
+    assertTrue(geometry_symmetry::foldByTypeIndex(5, 0).name == "5_0", "(5,0) should resolve to 5_0");
+
+    bool invalid_type = false;
+    try {
+        (void)geometry_symmetry::foldByTypeIndex(4, 0);
+    } catch (const std::runtime_error&) {
+        invalid_type = true;
+    }
+    assertTrue(invalid_type, "invalid fold type should throw");
+
+    bool invalid_index = false;
+    try {
+        (void)geometry_symmetry::foldByTypeIndex(3, 9);
+    } catch (const std::runtime_error&) {
+        invalid_index = true;
+    }
+    assertTrue(invalid_index, "invalid fold index should throw");
+}
+
 void testIauHelpers() {
     const auto& iau = geometry_symmetry::canonicalIau();
     assertTrue(iau.boundary_fold_names[0] == "2_0", "IAU first fold should be 2_0");
@@ -171,6 +196,7 @@ int main() {
     try {
         testFoldDefinitions();
         testLookup();
+        testFoldTypeIndexLookup();
         testAngleDistance();
         testRotations();
         testIauHelpers();
