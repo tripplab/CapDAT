@@ -3,6 +3,8 @@ High-performance software tool for the structural analysis of viral capsids from
 
 by trippm@tripplab.com [04/2026]
 
+geometry branch
+
 **CapDAT (Capsid Data Analysis Toolkit)** is a C++ command-line software project for the structural analysis of viral capsids from atomic coordinate files in PDB-like format. The current **v01 foundation release** focuses on building a reliable and extensible structural core rather than advanced scientific analysis. Its main purpose is to read an input structure file, parse atomic coordinate records, filter the content so that only capsid protein atoms are retained internally, reconstruct the molecular hierarchy, and report summary statistics about the parsed assembly.
 
 At this stage, CapDAT implements a lightweight object-oriented architecture centered on the classes **Atom**, **Residue**, **Chain**, **Capsid**, **PdbParser**, **Logger**, and **Timer**. The internal hierarchy is reconstructed as **atoms grouped into residues, residues grouped into internally reconstructed subunits, and subunits grouped into the full capsid object**. A key design decision is that the original one-letter PDB chain label is preserved only as metadata and is **not** treated as a globally unique identifier, since large capsid structures may reuse chain labels across many independent proteins. This makes the software more suitable as a long-term base for capsid-specific structural analysis.
