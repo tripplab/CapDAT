@@ -331,22 +331,8 @@ int main(int argc, char* argv[]) {
         StructuralSummary structural_summary = computeStructuralSummary(capsid);
         logger.info("Completed extended structural summary geometry");
 
-        //if (run_geometry) {
-            // TODO: call runFoldPatchAnalysis(capsid, geometry_config);
-        //}
-
         if (run_geometry) {
-            logger.info("Starting fold patch analysis: " + geometry_config.fold_name);
-            FoldPatchAnalysisResult geo_result = runFoldPatchAnalysis(capsid, geometry_config);
-            if (geo_result.success) {
-                logger.info("Fold patch analysis completed. Atoms in patch: " +
-                            std::to_string(geo_result.atom_count));
-                for (const auto& f : geo_result.exported_files) {
-                    logger.info("Exported: " + f);
-                }
-            } else {
-                logger.error("Fold patch analysis failed: " + geo_result.error_message);
-            }
+            // TODO: call runFoldPatchAnalysis(capsid, geometry_config);
         }
 
         if (!export_final_output_path.empty()) {
