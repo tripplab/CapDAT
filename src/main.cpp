@@ -332,7 +332,19 @@ int main(int argc, char* argv[]) {
         logger.info("Completed extended structural summary geometry");
 
         if (run_geometry) {
-            // TODO: call runFoldPatchAnalysis(capsid, geometry_config);
+            logger.info("Starting fold patch geometry analysis");
+            const FoldPatchAnalysisResult geometry_result = runFoldPatchAnalysis(capsid, geometry_config);
+            if (!geometry_result.success) {
+                throw std::runtime_error("Geometry analysis failed: " + geometry_result.error_message);
+            }
+
+            if (!geometry_result.exported_files.empty()) {
+                logger.info("Geometry analysis exported files:");
+                for (const std::string& path : geometry_result.exported_files) {
+                    logger.info("  - " + path);
+                }
+            }
+            logger.info("Completed fold patch geometry analysis");
         }
 
         if (!export_final_output_path.empty()) {
