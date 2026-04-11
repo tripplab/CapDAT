@@ -16,6 +16,7 @@ Capsid makeCapsid() {
     Chain chain(1, 'A');
     Residue residue("ALA", 1, ' ', 'A', 1);
     residue.addAtom(Atom(1, "CA", ' ', "ALA", 'A', 1, ' ', 1.0, 2.0, 3.0, 1.0, 20.0, "C", "", false));
+    residue.addAtom(Atom(2, "N", 'A', "ALA", 'A', 1, ' ', 4.0, 5.0, 6.0, 0.5, 10.0, "N", "1+", false));
     chain.addResidue(residue);
     capsid.addChain(chain);
     capsid.finalizeCounts();
@@ -49,7 +50,6 @@ void testUntransformedRemark() {
 void testTransformedRemarkAndCoordinates() {
     Capsid capsid = makeCapsid();
 
-    // Simulate workflow-applied in-place transform and authoritative state.
     capsid.mutableChains()[0].mutableResidues()[0].mutableAtoms()[0].setPosition(9.0, 8.0, 7.0);
     Capsid::OrientationState state;
     state.in_original_parsed_frame = false;
@@ -80,12 +80,42 @@ void testTransformedRemarkAndCoordinates() {
     std::remove(cfg.output_path.c_str());
 }
 
+void testSubsetExport() {
+    Capsid capsid = makeCapsid();
+    capsid.mutableChains()[0].mutableResidues()[0].mutableAtoms()[1].setPosition(11.0, 12.0, 13.0);
+
+    const Atom* selected = &capsid.chains()[0].residues()[0].atoms()[1];
+    std::vector<const Atom*> subset{selected};
+
+    ParserConfig parser_config;
+    ExportCapsidConfig cfg;
+    cfg.output_path = "tmp_export_subset.pdb";
+    cfg.atom_subset = &subset;
+
+    ExportCapsidWriter writer(nullptr);
+    const ExportCapsidStats stats = writer.write(capsid, cfg, parser_config);
+
+    const std::string text = readFile(cfg.output_path);
+    assertTrue(stats.atoms_written == 1, "subset export should write only selected atom");
+    assertTrue(text.find(" 11.000  12.000  13.000") != std::string::npos,
+               "subset export should use current coordinates for selected atom");
+    assertTrue(text.find("  1.000   2.000   3.000") == std::string::npos,
+               "subset export should exclude unselected atoms");
+    assertTrue(text.find("1+") != std::string::npos,
+               "subset export should preserve charge metadata");
+    assertTrue(text.find(" N") != std::string::npos,
+               "subset export should preserve element metadata");
+
+    std::remove(cfg.output_path.c_str());
+}
+
 } // namespace
 
 int main() {
     try {
         testUntransformedRemark();
         testTransformedRemarkAndCoordinates();
+        testSubsetExport();
         std::cout << "All export capsid tests passed.\n";
         return 0;
     } catch (const std::exception& e) {
