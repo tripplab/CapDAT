@@ -77,6 +77,7 @@ GeometryPreparationResult prepareGeometryAnalysisStage1(Capsid& capsid,
     result.resolved_fold_reference_vector = fold.reference_vector;
     result.resolved_fold_unit_vector = fold.unit_vector;
 
+    result.messages.push_back("Geometry Stage 1");
     result.messages.push_back("Geometry Stage 1 request: fold_type=" + std::to_string(config.fold_type) +
                               ", fold_index=" + std::to_string(config.fold_index));
     result.messages.push_back("Geometry Stage 1 resolved canonical fold: " + fold.name);
@@ -148,6 +149,7 @@ GeometryPatchSelectionResult runGeometryAnalysisStage2PatchSelection(
 
     validateStage2Config(config);
 
+    result.messages.push_back("Geometry Stage 2");
     result.messages.push_back("Geometry analysis: starting Stage 2 cylindrical patch selection.");
     result.messages.push_back("Geometry Stage 2 cylinder radius: " + std::to_string(config.cylinder_radius));
 
@@ -230,9 +232,7 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
         return result;
     }
 
-    result.messages.push_back("Geometry analysis: starting Stage 1 geometric preparation.");
     result.preparation = prepareGeometryAnalysisStage1(capsid, config, parser_config, logger, tolerance);
-    result.messages.push_back("Geometry analysis: completed Stage 1 geometric preparation.");
     result.stage2_patch =
         runGeometryAnalysisStage2PatchSelection(capsid, config, parser_config, result.preparation, logger);
     result.success = result.preparation.success && result.stage2_patch.success;

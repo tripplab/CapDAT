@@ -58,9 +58,7 @@ void printVersion() {
 
 void printSummary(const Capsid& capsid,
                   const ParseStats& stats,
-                  const StructuralSummary& structural_summary,
-                  double elapsed_seconds) {
-    std::cout << "\n=== CapDAT Summary ===\n";
+                  const StructuralSummary& structural_summary) {
     std::cout << "Input file:              " << capsid.sourcePath() << '\n';
     std::cout << "Total lines read:        " << stats.total_lines_read << '\n';
     std::cout << "Coordinate records seen: " << stats.total_coordinate_records_detected << '\n';
@@ -71,8 +69,6 @@ void printSummary(const Capsid& capsid,
     std::cout << "Alternate locations:     " << capsid.altLocCount() << '\n';
     std::cout << "Malformed records:       " << stats.total_malformed_records << '\n';
     std::cout << "Skipped records:         " << capsid.skippedRecordCount() << '\n';
-    std::cout << "Runtime (s):             " << elapsed_seconds << '\n';
-
     printStructuralSummaryBlock(std::cout, structural_summary);
 }
 
@@ -293,6 +289,11 @@ int main(int argc, char* argv[]) {
         PdbParser parser(config, &logger);
         Capsid capsid = parser.parseFile(input_path);
 
+        logger.info("Starting extended structural summary geometry");
+        StructuralSummary structural_summary = computeStructuralSummary(capsid);
+        printSummary(capsid, parser.stats(), structural_summary);
+        logger.info("Completed extended structural summary geometry");
+
         ReorientationRequest reorient_request;
         reorient_request.request_reorientation = reorient_requested;
         reorient_request.source_mode = align_vector_given ? ReorientationSourceMode::custom_vector
@@ -323,10 +324,6 @@ int main(int argc, char* argv[]) {
             throw std::runtime_error("Geometry analysis failed during Stage 1 preparation");
         }
 
-        logger.info("Starting extended structural summary geometry");
-        StructuralSummary structural_summary = computeStructuralSummary(capsid);
-        logger.info("Completed extended structural summary geometry");
-
         if (!export_final_output_path.empty()) {
             ExportCapsidConfig writer_config;
             writer_config.output_path = export_final_output_path;
@@ -343,7 +340,7 @@ int main(int argc, char* argv[]) {
         }
 
         timer.stop();
-        printSummary(capsid, parser.stats(), structural_summary, timer.elapsedSeconds());
+        std::cout << "Runtime (s):             " << timer.elapsedSeconds() << '\n';
         logger.info("Run completed successfully");
         return 0;
     } catch (const std::runtime_error& e) {

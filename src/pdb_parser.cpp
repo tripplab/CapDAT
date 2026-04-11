@@ -105,9 +105,6 @@ Capsid PdbParser::parseFile(const std::string& path) {
 
     if (logger_ != nullptr) {
         logger_->info("Parsing completed successfully");
-        logger_->info("Accepted atoms: " + std::to_string(capsid.atomCount()));
-        logger_->info("Accepted residues: " + std::to_string(capsid.residueCount()));
-        logger_->info("Internal subunits: " + std::to_string(capsid.subunitCount()));
     }
 
     return capsid;
