@@ -8,7 +8,7 @@ void printStructuralSummaryBlock(std::ostream& out, const StructuralSummary& sum
     const auto old_flags = out.flags();
     const auto old_precision = out.precision();
 
-    out << "\nExtended structural summary (accepted atoms only)\n";
+    out << "\n";
     out << std::fixed << std::setprecision(3);
 
     out << "Geometric center (accepted atoms): "
