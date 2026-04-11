@@ -2,6 +2,7 @@
 
 #include "export_capsid.hpp"
 
+#include <cmath>
 #include <stdexcept>
 
 namespace {
@@ -34,7 +35,29 @@ void validateStage1Config(const FoldPatchAnalysisConfig& config) {
     }
 }
 
+void validateStage2Config(const FoldPatchAnalysisConfig& config) {
+    if (config.cylinder_radius <= 0.0) {
+        throw std::runtime_error("Geometry patch selection requires cylinder_radius > 0");
+    }
+    if (config.min_atoms_in_patch == 0) {
+        throw std::runtime_error("Geometry patch selection requires min_atoms_in_patch > 0");
+    }
+}
+
 } // namespace
+
+CylinderMembership classifyPatchCylinder(const geometry_symmetry::Vector3& position, double cylinder_radius) {
+    const double radial_xy = std::sqrt((position.x * position.x) + (position.y * position.y));
+    const bool in_positive_z = position.z > 0.0;
+    const bool in_cylinder_radius = radial_xy <= cylinder_radius;
+
+    CylinderMembership membership;
+    membership.radial_xy = radial_xy;
+    membership.in_positive_z = in_positive_z;
+    membership.in_cylinder_radius = in_cylinder_radius;
+    membership.selected = in_positive_z && in_cylinder_radius;
+    return membership;
+}
 
 GeometryPreparationResult prepareGeometryAnalysisStage1(Capsid& capsid,
                                                         const FoldPatchAnalysisConfig& config,
@@ -105,6 +128,96 @@ GeometryPreparationResult prepareGeometryAnalysisStage1(Capsid& capsid,
     return result;
 }
 
+GeometryPatchSelectionResult runGeometryAnalysisStage2PatchSelection(
+    const Capsid& capsid,
+    const FoldPatchAnalysisConfig& config,
+    const ParserConfig& parser_config,
+    const GeometryPreparationResult& stage1_result,
+    Logger* logger) {
+    GeometryPatchSelectionResult result;
+    result.cylinder_radius = config.cylinder_radius;
+    result.min_atoms_in_patch = config.min_atoms_in_patch;
+
+    if (!stage1_result.success) {
+        throw std::runtime_error("Stage 2 cannot run before successful Stage 1 geometry preparation");
+    }
+    const auto& orientation = capsid.orientationState();
+    if (!orientation.reoriented_in_place || orientation.requested_target_axis != 'z') {
+        throw std::runtime_error("Stage 2 cannot run before successful Stage 1 geometry preparation");
+    }
+
+    validateStage2Config(config);
+
+    result.messages.push_back("Geometry analysis: starting Stage 2 cylindrical patch selection.");
+    result.messages.push_back("Geometry Stage 2 cylinder radius: " + std::to_string(config.cylinder_radius));
+
+    for (const Chain& chain : capsid.chains()) {
+        for (const Residue& residue : chain.residues()) {
+            for (const Atom& atom : residue.atoms()) {
+                ++result.total_atoms_examined;
+                const geometry_symmetry::Vector3 position{atom.x(), atom.y(), atom.z()};
+                const CylinderMembership membership = classifyPatchCylinder(position, config.cylinder_radius);
+
+                if (!membership.in_positive_z) {
+                    ++result.rejected_non_positive_z_count;
+                }
+                if (!membership.in_cylinder_radius) {
+                    ++result.rejected_outside_radius_count;
+                }
+
+                if (!membership.selected) {
+                    continue;
+                }
+
+                PatchAtom patch_atom;
+                patch_atom.position = position;
+                patch_atom.element = atom.element();
+                patch_atom.radial_xy = membership.radial_xy;
+                patch_atom.in_positive_z = membership.in_positive_z;
+                patch_atom.in_cylinder_radius = membership.in_cylinder_radius;
+                patch_atom.original_atom = &atom;
+                result.patch_atoms.push_back(patch_atom);
+                result.selected_atom_refs.push_back(&atom);
+            }
+        }
+    }
+
+    result.selected_atoms_count = result.patch_atoms.size();
+    if (result.selected_atoms_count < config.min_atoms_in_patch) {
+        throw std::runtime_error("Patch selection produced " + std::to_string(result.selected_atoms_count) +
+                                 " atoms, below min_atoms_in_patch=" + std::to_string(config.min_atoms_in_patch));
+    }
+
+    ExportCapsidConfig writer_config;
+    writer_config.output_path = config.output_prefix + "_patch_atoms.pdb";
+    writer_config.emit_header_comments = true;
+    writer_config.emit_ter_records = true;
+    writer_config.emit_end_record = true;
+    writer_config.preserve_atom_serial_numbers = true;
+    writer_config.coordinate_records_only = false;
+    writer_config.atom_subset = &result.selected_atom_refs;
+
+    try {
+        ExportCapsidWriter writer(logger);
+        (void)writer.write(capsid, writer_config, parser_config);
+    } catch (const std::exception&) {
+        throw std::runtime_error("Failed to export patch atom subset to PDB");
+    }
+
+    result.export_path = writer_config.output_path;
+    result.messages.push_back("Geometry Stage 2 examined atoms: " + std::to_string(result.total_atoms_examined));
+    result.messages.push_back("Geometry Stage 2 selected atoms: " + std::to_string(result.selected_atoms_count));
+    result.messages.push_back("Geometry Stage 2 rejected z<=0: " + std::to_string(result.rejected_non_positive_z_count));
+    result.messages.push_back("Geometry Stage 2 rejected radial cutoff: " +
+                              std::to_string(result.rejected_outside_radius_count));
+    result.messages.push_back("Geometry Stage 2 min_atoms_in_patch: " + std::to_string(result.min_atoms_in_patch));
+    result.messages.push_back("Geometry Stage 2 exported patch atoms: " + result.export_path);
+    result.messages.push_back("Geometry analysis: completed Stage 2 cylindrical patch selection.");
+    result.success = true;
+    logMessages(result.messages, logger);
+    return result;
+}
+
 GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                                                     const FoldPatchAnalysisConfig& config,
                                                     const ParserConfig& parser_config,
@@ -120,7 +233,9 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
     result.messages.push_back("Geometry analysis: starting Stage 1 geometric preparation.");
     result.preparation = prepareGeometryAnalysisStage1(capsid, config, parser_config, logger, tolerance);
     result.messages.push_back("Geometry analysis: completed Stage 1 geometric preparation.");
-    result.success = result.preparation.success;
+    result.stage2_patch =
+        runGeometryAnalysisStage2PatchSelection(capsid, config, parser_config, result.preparation, logger);
+    result.success = result.preparation.success && result.stage2_patch.success;
     logMessages(result.messages, logger);
 
     return result;

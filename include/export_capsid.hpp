@@ -3,7 +3,9 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
+#include "atom.hpp"
 #include "capsid.hpp"
 #include "logger.hpp"
 #include "pdb_parser.hpp"
@@ -24,6 +26,7 @@ struct ExportCapsidConfig {
     bool emit_end_record = true;
     bool preserve_atom_serial_numbers = true;
     bool coordinate_records_only = false;
+    const std::vector<const Atom*>* atom_subset = nullptr;
 };
 
 /**

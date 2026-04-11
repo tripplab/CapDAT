@@ -6,6 +6,7 @@
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace {
 
@@ -44,10 +45,14 @@ ExportCapsidStats ExportCapsidWriter::write(const Capsid& capsid,
     }
 
     ExportCapsidStats stats;
-    stats.subunits_written = capsid.chains().size();
-    stats.residues_written = capsid.residueCount();
+    stats.subunits_written = 0;
+    stats.residues_written = 0;
 
     std::map<char, std::size_t> chain_id_frequency;
+    std::unordered_set<const Atom*> subset_lookup;
+    if (config.atom_subset != nullptr) {
+        subset_lookup.insert(config.atom_subset->begin(), config.atom_subset->end());
+    }
 
     if (config.emit_header_comments && !config.coordinate_records_only) {
         const std::time_t now = std::time(nullptr);
@@ -90,12 +95,19 @@ ExportCapsidStats ExportCapsidWriter::write(const Capsid& capsid,
     int next_serial = 1;
 
     for (const Chain& chain : capsid.chains()) {
+        bool chain_wrote_any_atoms = false;
         for (const Residue& residue : chain.residues()) {
+            bool residue_wrote_any_atoms = false;
             for (const Atom& atom : residue.atoms()) {
+                if (!subset_lookup.empty() && subset_lookup.count(&atom) == 0U) {
+                    continue;
+                }
                 const int serial_to_write = config.preserve_atom_serial_numbers ? atom.serial() : next_serial;
                 output << formatAtomRecord(atom, serial_to_write) << '\n';
 
                 ++stats.atoms_written;
+                residue_wrote_any_atoms = true;
+                chain_wrote_any_atoms = true;
                 if (atom.isHetatm()) {
                     ++stats.hetatm_written;
                 }
@@ -109,10 +121,16 @@ ExportCapsidStats ExportCapsidWriter::write(const Capsid& capsid,
                 ++chain_id_frequency[atom.chainId()];
                 ++next_serial;
             }
+            if (residue_wrote_any_atoms) {
+                ++stats.residues_written;
+            }
         }
 
-        if (config.emit_ter_records) {
+        if (config.emit_ter_records && chain_wrote_any_atoms) {
             output << "TER\n";
+        }
+        if (chain_wrote_any_atoms) {
+            ++stats.subunits_written;
         }
     }
 

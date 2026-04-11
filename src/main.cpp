@@ -9,6 +9,7 @@
 
 #include <exception>
 #include <iostream>
+#include <cstddef>
 #include <string>
 
 /**
@@ -35,6 +36,8 @@ void printHelp(const std::string& program_name) {
         << "      --geometry_fold_type <n>   Geometry fold type 2|3|5 (default: 2)\n"
         << "      --geometry_fold_index <n>  Geometry fold index for selected type (default: 0)\n"
         << "      --geometry_cylinder_radius <A>  Geometry cylinder radius in angstroms (default: 12.0)\n"
+        << "      --geometry_min_atoms_in_patch <n>  Minimum selected atoms required (default: 20)\n"
+        << "      --geometry_out_prefix <path>  Prefix for geometry analysis outputs (default: geometry)\n"
         << "      --quiet             Reduce terminal output\n"
         << "  -h, --help              Show this help message\n"
         << "      --version           Show version information\n\n"
@@ -93,6 +96,8 @@ int main(int argc, char* argv[]) {
     int geometry_fold_type = 2;
     int geometry_fold_index = 0;
     double geometry_cylinder_radius = 12.0;
+    std::size_t geometry_min_atoms_in_patch = 20;
+    std::string geometry_output_prefix = "geometry";
 
     const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
 
@@ -210,6 +215,22 @@ int main(int argc, char* argv[]) {
             geometry_cylinder_radius = std::stod(argv[++i]);
             continue;
         }
+        if (arg == "--geometry_min_atoms_in_patch") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_min_atoms_in_patch\n";
+                return 1;
+            }
+            geometry_min_atoms_in_patch = static_cast<std::size_t>(std::stoul(argv[++i]));
+            continue;
+        }
+        if (arg == "--geometry_out_prefix") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_out_prefix\n";
+                return 1;
+            }
+            geometry_output_prefix = argv[++i];
+            continue;
+        }
 
         std::cerr << "Error: unknown argument: " << arg << '\n';
         return 1;
@@ -292,8 +313,9 @@ int main(int argc, char* argv[]) {
         geometry_config.fold_type = geometry_fold_type;
         geometry_config.fold_index = geometry_fold_index;
         geometry_config.cylinder_radius = geometry_cylinder_radius;
+        geometry_config.min_atoms_in_patch = geometry_min_atoms_in_patch;
         geometry_config.export_rotated_capsid = verbose;
-        geometry_config.output_prefix = "geometry";
+        geometry_config.output_prefix = geometry_output_prefix;
 
         const GeometryAnalysisResult geometry_result =
             runFoldPatchGeometryAnalysis(capsid, geometry_config, config, &logger);
