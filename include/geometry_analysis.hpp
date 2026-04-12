@@ -37,6 +37,7 @@ struct PatchAtom {
 
 struct FoldPatchAnalysisConfig {
     bool enabled = false;
+    bool debug = false;
     int fold_type = 2;
     int fold_index = 0;
     double cylinder_radius = 12.0;

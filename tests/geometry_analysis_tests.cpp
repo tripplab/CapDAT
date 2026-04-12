@@ -410,6 +410,7 @@ void testStage4RoleClassificationAndCsvAndPdb() {
     config.cylinder_radius = 2.0;
     config.grid_spacing = 2.0;
     config.min_atoms_in_patch = 2;
+    config.debug = true;
     config.output_prefix = "stage4_contacts";
 
     GeometryPreparationResult stage1;
@@ -512,6 +513,7 @@ void testStage4DeterministicOutputs() {
     config.cylinder_radius = 2.0;
     config.grid_spacing = 1.0;
     config.min_atoms_in_patch = 2;
+    config.debug = true;
     config.output_prefix = "stage4_deterministic";
 
     const auto first = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
@@ -570,6 +572,7 @@ void testStage1ToStage4Integration() {
     config.cylinder_radius = 2.0;
     config.grid_spacing = 1.0;
     config.min_atoms_in_patch = 2;
+    config.debug = true;
     config.output_prefix = "stage4_integration";
 
     const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
