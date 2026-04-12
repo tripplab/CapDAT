@@ -691,6 +691,14 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
 
     std::vector<const Atom*> contact_atom_subset;
     contact_atom_subset.reserve(stage3_result.analytical_patch.atoms.size());
+    geometry_symmetry::Vector3 contact_min_position{
+        std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity()};
+    geometry_symmetry::Vector3 contact_max_position{
+        -std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity()};
     for (std::size_t idx = 0; idx < stage3_result.analytical_patch.atoms.size(); ++idx) {
         result.atom_roles[idx] = classifyContactRole(used_as_outer[idx], used_as_inner[idx]);
         if (used_as_outer[idx] && used_as_inner[idx]) {
@@ -704,6 +712,13 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
         }
         if (used_as_outer[idx] || used_as_inner[idx]) {
             ++result.unique_contact_atom_count;
+            const geometry_symmetry::Vector3& position = stage3_result.analytical_patch.atoms[idx].position;
+            contact_min_position.x = std::min(contact_min_position.x, position.x);
+            contact_min_position.y = std::min(contact_min_position.y, position.y);
+            contact_min_position.z = std::min(contact_min_position.z, position.z);
+            contact_max_position.x = std::max(contact_max_position.x, position.x);
+            contact_max_position.y = std::max(contact_max_position.y, position.y);
+            contact_max_position.z = std::max(contact_max_position.z, position.z);
             contact_atom_subset.push_back(stage3_result.analytical_patch.atoms[idx].original_atom);
         }
     }
@@ -755,6 +770,13 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
                               std::to_string(result.unique_both_contact_atom_count));
     result.messages.push_back("Geometry Stage 4 unique contact atoms (outer U inner): " +
                               std::to_string(result.unique_contact_atom_count));
+    result.messages.push_back("Geometry Stage 4 unique contact atom bounds x:[" +
+                              std::to_string(contact_min_position.x) + ", " +
+                              std::to_string(contact_max_position.x) + "] y:[" +
+                              std::to_string(contact_min_position.y) + ", " +
+                              std::to_string(contact_max_position.y) + "] z:[" +
+                              std::to_string(contact_min_position.z) + ", " +
+                              std::to_string(contact_max_position.z) + "]");
     result.messages.push_back("Geometry Stage 4 outer CSV: " + result.outer_csv_path);
     result.messages.push_back("Geometry Stage 4 inner CSV: " + result.inner_csv_path);
     result.messages.push_back("Geometry Stage 4 valid mask CSV: " + result.valid_mask_csv_path);
