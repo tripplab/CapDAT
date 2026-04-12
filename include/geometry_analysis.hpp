@@ -19,11 +19,18 @@ struct CylinderMembership {
 };
 
 struct PatchAtom {
+    /// Rotated working-frame position used by analytical geometry stages.
     geometry_symmetry::Vector3 position;
+    /// Normalized element symbol (uppercase, trimmed, parser-safe).
     std::string element;
+    /// Van der Waals radius (Å) resolved from normalized element.
+    double vdw_radius = 0.0;
+    /// Stage 2 cylinder-membership facts preserved for traceability/audits.
+    CylinderMembership membership;
     double radial_xy = 0.0;
     bool in_positive_z = false;
     bool in_cylinder_radius = false;
+    /// Stable pointer to the original selected atom in the Capsid.
     const Atom* original_atom = nullptr;
 };
 
@@ -69,15 +76,37 @@ struct GeometryPatchSelectionResult {
     std::vector<std::string> messages;
 };
 
+struct AnalyticalPatch {
+    std::vector<PatchAtom> atoms;
+    std::vector<const Atom*> original_atom_refs;
+    double cylinder_radius = 0.0;
+    std::size_t atom_count = 0;
+    std::size_t explicit_vdw_radius_count = 0;
+    std::size_t fallback_vdw_radius_count = 0;
+    std::string export_path;
+};
+
+struct GeometryPatchNormalizationResult {
+    bool success = false;
+    AnalyticalPatch analytical_patch;
+    std::vector<std::string> messages;
+};
+
 struct GeometryAnalysisResult {
     bool success = false;
     GeometryPreparationResult preparation;
     GeometryPatchSelectionResult stage2_patch;
+    GeometryPatchNormalizationResult stage3_patch;
     std::vector<std::string> messages;
 };
 
 CylinderMembership classifyPatchCylinder(const geometry_symmetry::Vector3& position,
                                          double cylinder_radius);
+std::string normalizeElementSymbol(const std::string& raw_element);
+double vdwRadius(const std::string& normalized_element);
+PatchAtom makePatchAtom(const Atom& atom,
+                        const geometry_symmetry::Vector3& rotated_position,
+                        const CylinderMembership& membership);
 
 GeometryPreparationResult prepareGeometryAnalysisStage1(Capsid& capsid,
                                                         const FoldPatchAnalysisConfig& config,
@@ -90,6 +119,10 @@ GeometryPatchSelectionResult runGeometryAnalysisStage2PatchSelection(
     const FoldPatchAnalysisConfig& config,
     const ParserConfig& parser_config,
     const GeometryPreparationResult& stage1_result,
+    Logger* logger);
+
+GeometryPatchNormalizationResult runGeometryAnalysisStage3PatchNormalization(
+    const GeometryPatchSelectionResult& stage2_result,
     Logger* logger);
 
 GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
