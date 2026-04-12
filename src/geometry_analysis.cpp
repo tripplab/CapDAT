@@ -742,14 +742,16 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.messages.push_back("Geometry analysis: starting Stage 4 raw outer/inner sheet detection.");
     result.messages.push_back("Geometry Stage 4 grid spacing: " + std::to_string(config.grid_spacing));
     result.messages.push_back("Geometry Stage 4 cylinder radius: " + std::to_string(config.cylinder_radius));
-    result.stage3_normalized_atoms_csv_path = config.output_prefix + "_stage3_normalized_atoms.csv";
-    if (!writeStage3NormalizedAtomsCsv(result.stage3_normalized_atoms_csv_path, stage3_result)) {
-        throw std::runtime_error("Failed to write Stage 3 normalized atoms CSV for Stage 4 input traceability");
+    if (config.debug) {
+        result.stage3_normalized_atoms_csv_path = config.output_prefix + "_stage3_normalized_atoms.csv";
+        if (!writeStage3NormalizedAtomsCsv(result.stage3_normalized_atoms_csv_path, stage3_result)) {
+            throw std::runtime_error("Failed to write Stage 3 normalized atoms CSV for Stage 4 input traceability");
+        }
+        result.messages.push_back("Geometry Stage 4 Stage 3 normalized atom input CSV: " +
+                                  result.stage3_normalized_atoms_csv_path);
+        result.messages.push_back("Geometry Stage 4 Stage 3 normalized atom rows: " +
+                                  std::to_string(stage3_result.analytical_patch.atoms.size()));
     }
-    result.messages.push_back("Geometry Stage 4 Stage 3 normalized atom input CSV: " +
-                              result.stage3_normalized_atoms_csv_path);
-    result.messages.push_back("Geometry Stage 4 Stage 3 normalized atom rows: " +
-                              std::to_string(stage3_result.analytical_patch.atoms.size()));
 
     result.grid = buildStage4RegularGrid(config.cylinder_radius, config.grid_spacing, tolerance);
     result.contact_search_patch_atom_count = stage3_result.analytical_patch.atoms.size();
@@ -874,33 +876,37 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
         }
     }
 
-    result.outer_csv_path = config.output_prefix + "_outer_raw.csv";
-    result.inner_csv_path = config.output_prefix + "_inner_raw.csv";
-    result.valid_mask_csv_path = config.output_prefix + "_valid_mask_raw.csv";
-    result.outer_only_mask_csv_path = config.output_prefix + "_outer_only_mask_raw.csv";
-    result.inner_only_mask_csv_path = config.output_prefix + "_inner_only_mask_raw.csv";
-    result.negative_thickness_mask_csv_path = config.output_prefix + "_negative_thickness_mask_raw.csv";
-    result.summary_csv_path = config.output_prefix + "_stage4_summary.csv";
+    if (config.debug) {
+        result.outer_csv_path = config.output_prefix + "_outer_raw.csv";
+        result.inner_csv_path = config.output_prefix + "_inner_raw.csv";
+        result.valid_mask_csv_path = config.output_prefix + "_valid_mask_raw.csv";
+        result.outer_only_mask_csv_path = config.output_prefix + "_outer_only_mask_raw.csv";
+        result.inner_only_mask_csv_path = config.output_prefix + "_inner_only_mask_raw.csv";
+        result.negative_thickness_mask_csv_path = config.output_prefix + "_negative_thickness_mask_raw.csv";
+        result.summary_csv_path = config.output_prefix + "_stage4_summary.csv";
+    }
     result.contact_atoms_pdb_path = config.output_prefix + "_raw_contact_atoms.pdb";
 
-    if (!writeStage4CsvOuter(result)) {
-        throw std::runtime_error("Failed to write raw outer grid CSV");
-    }
-    if (!writeStage4CsvInner(result)) {
-        throw std::runtime_error("Failed to write raw inner grid CSV");
-    }
-    if (!writeStage4CsvValidMask(result)) {
-        throw std::runtime_error("Failed to write raw valid-mask grid CSV");
-    }
-    if (!writeStage4CsvBinaryMask(result, result.outer_only_mask_csv_path, "outer_only", outer_only_mask)) {
-        throw std::runtime_error("Failed to write raw outer-only mask CSV");
-    }
-    if (!writeStage4CsvBinaryMask(result, result.inner_only_mask_csv_path, "inner_only", inner_only_mask)) {
-        throw std::runtime_error("Failed to write raw inner-only mask CSV");
-    }
-    if (!writeStage4CsvBinaryMask(
-            result, result.negative_thickness_mask_csv_path, "negative_thickness", negative_thickness_mask)) {
-        throw std::runtime_error("Failed to write raw negative-thickness mask CSV");
+    if (config.debug) {
+        if (!writeStage4CsvOuter(result)) {
+            throw std::runtime_error("Failed to write raw outer grid CSV");
+        }
+        if (!writeStage4CsvInner(result)) {
+            throw std::runtime_error("Failed to write raw inner grid CSV");
+        }
+        if (!writeStage4CsvValidMask(result)) {
+            throw std::runtime_error("Failed to write raw valid-mask grid CSV");
+        }
+        if (!writeStage4CsvBinaryMask(result, result.outer_only_mask_csv_path, "outer_only", outer_only_mask)) {
+            throw std::runtime_error("Failed to write raw outer-only mask CSV");
+        }
+        if (!writeStage4CsvBinaryMask(result, result.inner_only_mask_csv_path, "inner_only", inner_only_mask)) {
+            throw std::runtime_error("Failed to write raw inner-only mask CSV");
+        }
+        if (!writeStage4CsvBinaryMask(
+                result, result.negative_thickness_mask_csv_path, "negative_thickness", negative_thickness_mask)) {
+            throw std::runtime_error("Failed to write raw negative-thickness mask CSV");
+        }
     }
 
     ExportCapsidConfig writer_config;
@@ -922,7 +928,7 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     stage4_timer.stop();
     result.stage4_end_timestamp_utc = utcTimestampNowIso8601();
     result.stage4_runtime_seconds = stage4_timer.elapsedSeconds();
-    if (!writeStage4SummaryCsv(result)) {
+    if (config.debug && !writeStage4SummaryCsv(result)) {
         throw std::runtime_error("Failed to write Stage 4 summary CSV");
     }
 
@@ -956,14 +962,16 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
                               std::to_string(contact_max_position.y) + "] z:[" +
                               std::to_string(contact_min_position.z) + ", " +
                               std::to_string(contact_max_position.z) + "]");
-    result.messages.push_back("Geometry Stage 4 outer CSV: " + result.outer_csv_path);
-    result.messages.push_back("Geometry Stage 4 inner CSV: " + result.inner_csv_path);
-    result.messages.push_back("Geometry Stage 4 valid mask CSV: " + result.valid_mask_csv_path);
-    result.messages.push_back("Geometry Stage 4 outer-only mask CSV: " + result.outer_only_mask_csv_path);
-    result.messages.push_back("Geometry Stage 4 inner-only mask CSV: " + result.inner_only_mask_csv_path);
-    result.messages.push_back("Geometry Stage 4 negative-thickness mask CSV: " +
-                              result.negative_thickness_mask_csv_path);
-    result.messages.push_back("Geometry Stage 4 summary CSV: " + result.summary_csv_path);
+    if (config.debug) {
+        result.messages.push_back("Geometry Stage 4 outer CSV: " + result.outer_csv_path);
+        result.messages.push_back("Geometry Stage 4 inner CSV: " + result.inner_csv_path);
+        result.messages.push_back("Geometry Stage 4 valid mask CSV: " + result.valid_mask_csv_path);
+        result.messages.push_back("Geometry Stage 4 outer-only mask CSV: " + result.outer_only_mask_csv_path);
+        result.messages.push_back("Geometry Stage 4 inner-only mask CSV: " + result.inner_only_mask_csv_path);
+        result.messages.push_back("Geometry Stage 4 negative-thickness mask CSV: " +
+                                  result.negative_thickness_mask_csv_path);
+        result.messages.push_back("Geometry Stage 4 summary CSV: " + result.summary_csv_path);
+    }
     result.messages.push_back("Geometry Stage 4 contact atoms PDB: " + result.contact_atoms_pdb_path);
     result.messages.push_back("Geometry Stage 4 start timestamp (UTC): " + result.stage4_start_timestamp_utc);
     result.messages.push_back("Geometry Stage 4 end timestamp (UTC): " + result.stage4_end_timestamp_utc);

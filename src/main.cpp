@@ -33,10 +33,11 @@ void printHelp(const std::string& program_name) {
         << "      --align-vector <v>  Reorientation source: custom direction x,y,z from origin\n"
         << "      --align-axis <a>    Target alignment axis x|y|z (default: z)\n"
         << "      --geometry-analysis Run geometry analysis Stage 1 preparation\n"
+        << "      --debug             Enable geometry debug artifact exports\n"
         << "      --geometry_fold_type <n>   Geometry fold type 2|3|5 (default: 2)\n"
         << "      --geometry_fold_index <n>  Geometry fold index for selected type (default: 0)\n"
         << "      --geometry_cylinder_radius <A>  Geometry cylinder radius in angstroms (default: 12.0)\n"
-        << "      --dvwd <A>  Delta added to all assigned vdW radii in angstroms (default: 0.0)\n"
+        << "      --dvdW <A>  Delta added to all assigned vdW radii in angstroms (default: 0.0)\n"
         << "      --geometry_grid_spacing <A>  Geometry Stage 4 XY grid spacing in angstroms (default: 2.0)\n"
         << "      --geometry_min_atoms_in_patch <n>  Minimum selected atoms required (default: 20)\n"
         << "      --geometry_out_prefix <path>  Prefix for geometry analysis outputs (default: geometry)\n"
@@ -91,6 +92,7 @@ int main(int argc, char* argv[]) {
     char align_axis = 'z';
 
     bool geometry_analysis_requested = false;
+    bool debug = false;
     int geometry_fold_type = 2;
     int geometry_fold_index = 0;
     double geometry_cylinder_radius = 12.0;
@@ -191,6 +193,10 @@ int main(int argc, char* argv[]) {
             geometry_analysis_requested = true;
             continue;
         }
+        if (arg == "--debug") {
+            debug = true;
+            continue;
+        }
         if (arg == "--geometry_fold_type") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: missing value for --geometry_fold_type\n";
@@ -215,9 +221,9 @@ int main(int argc, char* argv[]) {
             geometry_cylinder_radius = std::stod(argv[++i]);
             continue;
         }
-        if (arg == "--dvwd") {
+        if (arg == "--dvdW") {
             if (i + 1 >= argc) {
-                std::cerr << "Error: missing value for --dvwd\n";
+                std::cerr << "Error: missing value for --dvdW\n";
                 return 1;
             }
             delta_vdw = std::stod(argv[++i]);
@@ -331,13 +337,14 @@ int main(int argc, char* argv[]) {
 
         FoldPatchAnalysisConfig geometry_config;
         geometry_config.enabled = geometry_analysis_requested;
+        geometry_config.debug = debug;
         geometry_config.fold_type = geometry_fold_type;
         geometry_config.fold_index = geometry_fold_index;
         geometry_config.cylinder_radius = geometry_cylinder_radius;
         geometry_config.delta_vdw = delta_vdw;
         geometry_config.grid_spacing = geometry_grid_spacing;
         geometry_config.min_atoms_in_patch = geometry_min_atoms_in_patch;
-        geometry_config.export_rotated_capsid = verbose;
+        geometry_config.export_rotated_capsid = debug;
         geometry_config.output_prefix = geometry_output_prefix;
 
         const GeometryAnalysisResult geometry_result =
