@@ -20,6 +20,12 @@ void assertTrue(bool condition, const std::string& message) {
     }
 }
 
+void removeIfExists(const std::string& path) {
+    if (!path.empty()) {
+        std::filesystem::remove(path);
+    }
+}
+
 Capsid makeSimpleCapsid() {
     Capsid capsid("constructed");
     Chain chain(1, 'A');
@@ -596,6 +602,7 @@ void testStage4RoleClassificationAndCsvAndPdb() {
     std::filesystem::remove(stage4.negative_thickness_mask_csv_path);
     std::filesystem::remove(stage4.summary_csv_path);
     std::filesystem::remove(stage4.contact_atoms_pdb_path);
+    removeIfExists(stage4.stage3_normalized_atoms_csv_path);
 }
 
 void testStage4DeterministicOutputs() {
@@ -633,6 +640,23 @@ void testStage4DeterministicOutputs() {
     std::filesystem::remove(first.stage4_raw.negative_thickness_mask_csv_path);
     std::filesystem::remove(first.stage4_raw.summary_csv_path);
     std::filesystem::remove(first.stage4_raw.contact_atoms_pdb_path);
+    removeIfExists(first.stage4_raw.stage3_normalized_atoms_csv_path);
+    removeIfExists(first.stage5_prep.outer_seed_csv_path);
+    removeIfExists(first.stage5_prep.inner_seed_csv_path);
+    removeIfExists(first.stage5_prep.paired_seed_mask_csv_path);
+    removeIfExists(first.stage5_prep.boundary_exclusion_mask_csv_path);
+    removeIfExists(first.stage5_prep.interp_allowed_mask_csv_path);
+    removeIfExists(first.stage5_prep.hard_invalid_mask_csv_path);
+    removeIfExists(first.stage5_prep.reliable_core_mask_csv_path);
+    removeIfExists(first.stage5_prep.summary_csv_path);
+    removeIfExists(first.stage6_surfaces.outer_reconstructed_csv_path);
+    removeIfExists(first.stage6_surfaces.inner_reconstructed_csv_path);
+    removeIfExists(first.stage6_surfaces.reconstructed_mask_csv_path);
+    removeIfExists(first.stage6_surfaces.final_valid_analysis_mask_csv_path);
+    removeIfExists(first.stage6_surfaces.non_crossing_adjustment_mask_csv_path);
+    removeIfExists(first.stage6_surfaces.summary_csv_path);
+    removeIfExists(first.stage6_surfaces.outer_obj_path);
+    removeIfExists(first.stage6_surfaces.inner_obj_path);
 }
 
 void testStage1NonIdentityFor3_0() {
@@ -687,6 +711,23 @@ void testStage1ToStage4Integration() {
     std::filesystem::remove(result.stage4_raw.negative_thickness_mask_csv_path);
     std::filesystem::remove(result.stage4_raw.summary_csv_path);
     std::filesystem::remove(result.stage4_raw.contact_atoms_pdb_path);
+    removeIfExists(result.stage4_raw.stage3_normalized_atoms_csv_path);
+    removeIfExists(result.stage5_prep.outer_seed_csv_path);
+    removeIfExists(result.stage5_prep.inner_seed_csv_path);
+    removeIfExists(result.stage5_prep.paired_seed_mask_csv_path);
+    removeIfExists(result.stage5_prep.boundary_exclusion_mask_csv_path);
+    removeIfExists(result.stage5_prep.interp_allowed_mask_csv_path);
+    removeIfExists(result.stage5_prep.hard_invalid_mask_csv_path);
+    removeIfExists(result.stage5_prep.reliable_core_mask_csv_path);
+    removeIfExists(result.stage5_prep.summary_csv_path);
+    removeIfExists(result.stage6_surfaces.outer_reconstructed_csv_path);
+    removeIfExists(result.stage6_surfaces.inner_reconstructed_csv_path);
+    removeIfExists(result.stage6_surfaces.reconstructed_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.final_valid_analysis_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.non_crossing_adjustment_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.summary_csv_path);
+    removeIfExists(result.stage6_surfaces.outer_obj_path);
+    removeIfExists(result.stage6_surfaces.inner_obj_path);
 }
 
 void testStage5RequiresSuccessfulStage4() {
@@ -820,6 +861,7 @@ void testStage4SummaryCsvIncludesExplicitPatchAndSerialProvenanceColumns() {
     std::filesystem::remove(result.stage4_raw.negative_thickness_mask_csv_path);
     std::filesystem::remove(result.stage4_raw.summary_csv_path);
     std::filesystem::remove(result.stage4_raw.contact_atoms_pdb_path);
+    removeIfExists(result.stage4_raw.stage3_normalized_atoms_csv_path);
     std::filesystem::remove(result.stage5_prep.outer_seed_csv_path);
     std::filesystem::remove(result.stage5_prep.inner_seed_csv_path);
     std::filesystem::remove(result.stage5_prep.paired_seed_mask_csv_path);
@@ -828,6 +870,14 @@ void testStage4SummaryCsvIncludesExplicitPatchAndSerialProvenanceColumns() {
     std::filesystem::remove(result.stage5_prep.hard_invalid_mask_csv_path);
     std::filesystem::remove(result.stage5_prep.reliable_core_mask_csv_path);
     std::filesystem::remove(result.stage5_prep.summary_csv_path);
+    removeIfExists(result.stage6_surfaces.outer_reconstructed_csv_path);
+    removeIfExists(result.stage6_surfaces.inner_reconstructed_csv_path);
+    removeIfExists(result.stage6_surfaces.reconstructed_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.final_valid_analysis_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.non_crossing_adjustment_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.summary_csv_path);
+    removeIfExists(result.stage6_surfaces.outer_obj_path);
+    removeIfExists(result.stage6_surfaces.inner_obj_path);
 }
 
 void testStage5SeedProvenanceSeparatesPatchIndicesFromSerials() {
@@ -983,6 +1033,7 @@ void testStage1ToStage5Integration() {
     std::filesystem::remove(result.stage4_raw.negative_thickness_mask_csv_path);
     std::filesystem::remove(result.stage4_raw.summary_csv_path);
     std::filesystem::remove(result.stage4_raw.contact_atoms_pdb_path);
+    removeIfExists(result.stage4_raw.stage3_normalized_atoms_csv_path);
     std::filesystem::remove(result.stage5_prep.outer_seed_csv_path);
     std::filesystem::remove(result.stage5_prep.inner_seed_csv_path);
     std::filesystem::remove(result.stage5_prep.paired_seed_mask_csv_path);
@@ -991,6 +1042,283 @@ void testStage1ToStage5Integration() {
     std::filesystem::remove(result.stage5_prep.hard_invalid_mask_csv_path);
     std::filesystem::remove(result.stage5_prep.reliable_core_mask_csv_path);
     std::filesystem::remove(result.stage5_prep.summary_csv_path);
+    removeIfExists(result.stage6_surfaces.outer_reconstructed_csv_path);
+    removeIfExists(result.stage6_surfaces.inner_reconstructed_csv_path);
+    removeIfExists(result.stage6_surfaces.reconstructed_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.final_valid_analysis_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.non_crossing_adjustment_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.summary_csv_path);
+    removeIfExists(result.stage6_surfaces.outer_obj_path);
+    removeIfExists(result.stage6_surfaces.inner_obj_path);
+}
+
+GeometryStage5SurfacePrepResult makeSyntheticStage5ResultForStage6() {
+    GeometryStage5SurfacePrepResult stage5;
+    stage5.success = true;
+    stage5.grid = buildStage4RegularGrid(2.0, 1.0);
+    stage5.node_count = stage5.grid.nx * stage5.grid.ny;
+    stage5.inside_disk_mask.assign(stage5.node_count, 0);
+    stage5.paired_seed_mask.assign(stage5.node_count, 0);
+    stage5.paired_interp_allowed_mask.assign(stage5.node_count, 0);
+    stage5.hard_invalid_mask.assign(stage5.node_count, 0);
+    stage5.reliable_core_mask.assign(stage5.node_count, 0);
+    stage5.z_outer_seed.assign(stage5.node_count, std::numeric_limits<double>::quiet_NaN());
+    stage5.z_inner_seed.assign(stage5.node_count, std::numeric_limits<double>::quiet_NaN());
+
+    for (std::size_t j = 0; j < stage5.grid.ny; ++j) {
+        for (std::size_t i = 0; i < stage5.grid.nx; ++i) {
+            const std::size_t idx = nodeIndex(i, j, stage5.grid.nx);
+            const double x = stage5.grid.x_values[i];
+            const double y = stage5.grid.y_values[j];
+            if ((x * x) + (y * y) <= 4.0 + 1e-12) {
+                stage5.inside_disk_mask[idx] = 1;
+                ++stage5.inside_disk_count;
+            }
+        }
+    }
+
+    auto setSeed = [&](std::size_t i, std::size_t j, double zo, double zi) {
+        const std::size_t idx = nodeIndex(i, j, stage5.grid.nx);
+        stage5.paired_seed_mask[idx] = 1;
+        stage5.z_outer_seed[idx] = zo;
+        stage5.z_inner_seed[idx] = zi;
+        ++stage5.paired_seed_node_count;
+    };
+    setSeed(2, 2, 10.0, 6.0);
+    setSeed(1, 2, 9.0, 5.0);
+    setSeed(3, 2, 9.0, 5.0);
+    setSeed(2, 1, 9.0, 5.0);
+    setSeed(2, 3, 9.0, 5.0);
+
+    const std::size_t center_gap = nodeIndex(1, 1, stage5.grid.nx);
+    stage5.paired_interp_allowed_mask[center_gap] = 1;
+    stage5.paired_interp_allowed_node_count = 1;
+    return stage5;
+}
+
+void testStage6RequiresSuccessfulStage5() {
+    GeometryStage5SurfacePrepResult stage5;
+    stage5.success = false;
+    FoldPatchAnalysisConfig config;
+    bool threw = false;
+    try {
+        (void)runGeometryAnalysisStage6SurfaceReconstruction(stage5, config, nullptr);
+    } catch (const std::runtime_error& e) {
+        threw = std::string(e.what()).find("before successful Stage 5") != std::string::npos;
+    }
+    assertTrue(threw, "Stage 6 should require successful Stage 5");
+}
+
+void testStage6SeedPreservationAndInterpolation() {
+    const GeometryStage5SurfacePrepResult stage5 = makeSyntheticStage5ResultForStage6();
+    FoldPatchAnalysisConfig config;
+    config.stage6_smoothing_weight = 1.0;
+    config.stage6_max_iterations = 200;
+    config.stage6_convergence_tolerance = 1e-8;
+    config.stage6_export_obj_meshes = false;
+
+    const auto stage6 = runGeometryAnalysisStage6SurfaceReconstruction(stage5, config, nullptr);
+    assertTrue(stage6.success, "Stage 6 should succeed on synthetic Stage 5");
+
+    for (std::size_t idx = 0; idx < stage5.node_count; ++idx) {
+        if (stage5.paired_seed_mask[idx] == 0) {
+            continue;
+        }
+        assertTrue(stage6.z_outer_reconstructed[idx] == stage5.z_outer_seed[idx], "outer seed nodes must remain fixed");
+        assertTrue(stage6.z_inner_reconstructed[idx] == stage5.z_inner_seed[idx], "inner seed nodes must remain fixed");
+    }
+
+    const std::size_t center_gap = nodeIndex(1, 1, stage5.grid.nx);
+    assertTrue(std::isfinite(stage6.z_outer_reconstructed[center_gap]), "center interpolation node should be solved");
+    assertTrue(std::isfinite(stage6.z_inner_reconstructed[center_gap]), "center interpolation node should be solved");
+    assertTrue(near(stage6.z_outer_reconstructed[center_gap], 9.0, 1e-6),
+               "center outer reconstruction should approach neighbor average");
+    assertTrue(near(stage6.z_inner_reconstructed[center_gap], 5.0, 1e-6),
+               "center inner reconstruction should approach neighbor average");
+}
+
+void testStage6HardInvalidAndMasks() {
+    GeometryStage5SurfacePrepResult stage5 = makeSyntheticStage5ResultForStage6();
+    const std::size_t center_gap = nodeIndex(1, 1, stage5.grid.nx);
+    stage5.hard_invalid_mask[center_gap] = 1;
+    FoldPatchAnalysisConfig config;
+    config.stage6_export_obj_meshes = false;
+    const auto stage6 = runGeometryAnalysisStage6SurfaceReconstruction(stage5, config, nullptr);
+    assertTrue(std::isnan(stage6.z_outer_reconstructed[center_gap]), "hard-invalid outer node should remain NaN");
+    assertTrue(std::isnan(stage6.z_inner_reconstructed[center_gap]), "hard-invalid inner node should remain NaN");
+    assertTrue(stage6.reconstructed_mask[center_gap] == 0, "hard-invalid node should not be reconstructed");
+    assertTrue(stage6.final_valid_analysis_mask[center_gap] == 0, "hard-invalid node should not be final-valid");
+}
+
+void testStage6NonCrossingEnforcementAndConvergenceMetadata() {
+    GeometryStage5SurfacePrepResult stage5 = makeSyntheticStage5ResultForStage6();
+    const std::size_t idx = nodeIndex(2, 2, stage5.grid.nx);
+    stage5.z_outer_seed[idx] = 4.0;
+    stage5.z_inner_seed[idx] = 8.0;
+
+    FoldPatchAnalysisConfig config;
+    config.stage6_min_separation = 1.5;
+    config.stage6_enforce_non_crossing = true;
+    config.stage6_export_obj_meshes = false;
+    const auto stage6 = runGeometryAnalysisStage6SurfaceReconstruction(stage5, config, nullptr);
+
+    assertTrue(stage6.non_crossing_adjustment_mask[idx] == 1, "violating node should be adjusted");
+    assertTrue(stage6.z_outer_reconstructed[idx] >= stage6.z_inner_reconstructed[idx] + config.stage6_min_separation - 1e-12,
+               "enforced separation should hold");
+    assertTrue(stage6.outer_iterations_used > 0, "outer iterations should be recorded");
+    assertTrue(stage6.inner_iterations_used > 0, "inner iterations should be recorded");
+    assertTrue(std::isfinite(stage6.outer_final_max_update), "outer final update should be finite");
+    assertTrue(std::isfinite(stage6.inner_final_max_update), "inner final update should be finite");
+    assertTrue(stage6.outer_iterations_used <= config.stage6_max_iterations, "outer iterations should honor cap");
+    assertTrue(stage6.inner_iterations_used <= config.stage6_max_iterations, "inner iterations should honor cap");
+}
+
+void testStage6DebugCsvArtifactsAndObjExportAndDeterminism() {
+    GeometryStage5SurfacePrepResult stage5 = makeSyntheticStage5ResultForStage6();
+    const std::size_t promoted_seed = nodeIndex(1, 1, stage5.grid.nx);
+    stage5.paired_interp_allowed_mask[promoted_seed] = 0;
+    stage5.paired_seed_mask[promoted_seed] = 1;
+    stage5.z_outer_seed[promoted_seed] = 9.0;
+    stage5.z_inner_seed[promoted_seed] = 5.0;
+    stage5.paired_interp_allowed_node_count = 0;
+    ++stage5.paired_seed_node_count;
+    // Enable enough vertices/faces for a valid mesh.
+    const std::size_t interp_extra = nodeIndex(3, 1, stage5.grid.nx);
+    stage5.paired_interp_allowed_mask[interp_extra] = 1;
+    ++stage5.paired_interp_allowed_node_count;
+
+    FoldPatchAnalysisConfig config;
+    config.debug = true;
+    config.output_prefix = "stage6_debug";
+    config.stage6_export_obj_meshes = true;
+    const auto first = runGeometryAnalysisStage6SurfaceReconstruction(stage5, config, nullptr);
+    assertTrue(std::filesystem::exists(first.outer_reconstructed_csv_path), "outer reconstructed csv should exist");
+    assertTrue(std::filesystem::exists(first.inner_reconstructed_csv_path), "inner reconstructed csv should exist");
+    assertTrue(std::filesystem::exists(first.reconstructed_mask_csv_path), "reconstructed mask csv should exist");
+    assertTrue(std::filesystem::exists(first.final_valid_analysis_mask_csv_path), "final valid mask csv should exist");
+    assertTrue(std::filesystem::exists(first.non_crossing_adjustment_mask_csv_path),
+               "non-crossing adjustment mask csv should exist");
+    assertTrue(std::filesystem::exists(first.summary_csv_path), "Stage 6 summary csv should exist");
+    assertTrue(std::filesystem::exists(first.outer_obj_path), "outer obj should exist");
+    assertTrue(std::filesystem::exists(first.inner_obj_path), "inner obj should exist");
+    assertTrue(first.outer_obj_vertex_count > 0 && first.inner_obj_vertex_count > 0, "OBJ vertex counts should be nonzero");
+    assertTrue(first.outer_obj_face_count >= 0 && first.inner_obj_face_count >= 0, "OBJ face counts should be tracked");
+
+    std::ifstream outer_csv(first.outer_reconstructed_csv_path);
+    std::string header;
+    std::getline(outer_csv, header);
+    assertTrue(header ==
+                   "i,j,x,y,inside_disk,paired_seed,paired_interp_allowed,hard_invalid,reconstructed,z_outer_reconstructed",
+               "Stage 6 outer reconstructed CSV header should match");
+
+    std::ifstream obj_file(first.outer_obj_path);
+    std::string line;
+    bool found_v = false;
+    bool found_f = false;
+    while (std::getline(obj_file, line)) {
+        if (line.rfind("v ", 0) == 0) {
+            found_v = true;
+        }
+        if (line.rfind("f ", 0) == 0) {
+            found_f = true;
+        }
+    }
+    assertTrue(found_v, "OBJ should contain at least one vertex line");
+    assertTrue(found_f, "OBJ should contain at least one face line when valid cells exist");
+
+    const auto second = runGeometryAnalysisStage6SurfaceReconstruction(stage5, config, nullptr);
+    std::ifstream csv1(first.outer_reconstructed_csv_path);
+    std::ifstream csv2(second.outer_reconstructed_csv_path);
+    const std::string csv_first((std::istreambuf_iterator<char>(csv1)), std::istreambuf_iterator<char>());
+    const std::string csv_second((std::istreambuf_iterator<char>(csv2)), std::istreambuf_iterator<char>());
+    assertTrue(csv_first == csv_second, "Stage 6 CSV output should be deterministic");
+    std::ifstream obj1(first.outer_obj_path);
+    std::ifstream obj2(second.outer_obj_path);
+    const std::string obj_first((std::istreambuf_iterator<char>(obj1)), std::istreambuf_iterator<char>());
+    const std::string obj_second((std::istreambuf_iterator<char>(obj2)), std::istreambuf_iterator<char>());
+    assertTrue(obj_first == obj_second, "Stage 6 OBJ output should be deterministic");
+
+    GeometryStage5SurfacePrepResult with_hole = stage5;
+    const std::size_t hole_idx = nodeIndex(2, 1, with_hole.grid.nx);
+    with_hole.hard_invalid_mask[hole_idx] = 1;
+    const auto hole_result = runGeometryAnalysisStage6SurfaceReconstruction(with_hole, config, nullptr);
+    assertTrue(hole_result.outer_obj_face_count < first.outer_obj_face_count,
+               "introducing an invalid hole should reduce emitted faces by suppressing partial invalid cells");
+    std::ifstream hole_obj(hole_result.outer_obj_path);
+    std::string hole_line;
+    while (std::getline(hole_obj, hole_line)) {
+        if (hole_line.rfind("f ", 0) == 0) {
+            assertTrue(hole_line.find("-1") == std::string::npos, "OBJ faces should never reference invalid vertices");
+        }
+    }
+
+    std::filesystem::remove(first.outer_reconstructed_csv_path);
+    std::filesystem::remove(first.inner_reconstructed_csv_path);
+    std::filesystem::remove(first.reconstructed_mask_csv_path);
+    std::filesystem::remove(first.final_valid_analysis_mask_csv_path);
+    std::filesystem::remove(first.non_crossing_adjustment_mask_csv_path);
+    std::filesystem::remove(first.summary_csv_path);
+    std::filesystem::remove(first.outer_obj_path);
+    std::filesystem::remove(first.inner_obj_path);
+    std::filesystem::remove(hole_result.outer_reconstructed_csv_path);
+    std::filesystem::remove(hole_result.inner_reconstructed_csv_path);
+    std::filesystem::remove(hole_result.reconstructed_mask_csv_path);
+    std::filesystem::remove(hole_result.final_valid_analysis_mask_csv_path);
+    std::filesystem::remove(hole_result.non_crossing_adjustment_mask_csv_path);
+    std::filesystem::remove(hole_result.summary_csv_path);
+    std::filesystem::remove(hole_result.outer_obj_path);
+    std::filesystem::remove(hole_result.inner_obj_path);
+}
+
+void testStage1ToStage6Integration() {
+    Capsid capsid = makeSimpleCapsid();
+    FoldPatchAnalysisConfig config;
+    config.enabled = true;
+    config.fold_type = 2;
+    config.fold_index = 0;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    config.min_atoms_in_patch = 2;
+    config.debug = true;
+    config.stage6_export_obj_meshes = true;
+    config.output_prefix = "stage6_integration";
+
+    const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
+    assertTrue(result.success, "Stage 1-6 integration should succeed");
+    assertTrue(result.stage6_surfaces.success, "Stage 6 should succeed in full pipeline");
+    assertTrue(result.stage6_surfaces.reconstructed_node_count > 0, "Stage 6 should reconstruct nodes");
+    assertTrue(result.stage6_surfaces.final_valid_analysis_node_count > 0, "Stage 6 should produce final-valid nodes");
+    assertTrue(std::isfinite(result.stage6_surfaces.mean_reconstructed_separation), "Stage 6 mean separation should be finite");
+    assertTrue(std::filesystem::exists(result.stage6_surfaces.summary_csv_path), "Stage 6 summary csv should exist");
+    assertTrue(std::filesystem::exists(result.stage6_surfaces.outer_obj_path), "Stage 6 outer obj should exist");
+    assertTrue(std::filesystem::exists(result.stage6_surfaces.inner_obj_path), "Stage 6 inner obj should exist");
+
+    std::filesystem::remove(result.stage2_patch.export_path);
+    std::filesystem::remove(result.stage4_raw.outer_csv_path);
+    std::filesystem::remove(result.stage4_raw.inner_csv_path);
+    std::filesystem::remove(result.stage4_raw.valid_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.outer_only_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.inner_only_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.negative_thickness_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.summary_csv_path);
+    std::filesystem::remove(result.stage4_raw.contact_atoms_pdb_path);
+    removeIfExists(result.stage4_raw.stage3_normalized_atoms_csv_path);
+    std::filesystem::remove(result.stage5_prep.outer_seed_csv_path);
+    std::filesystem::remove(result.stage5_prep.inner_seed_csv_path);
+    std::filesystem::remove(result.stage5_prep.paired_seed_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.boundary_exclusion_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.interp_allowed_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.hard_invalid_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.reliable_core_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.summary_csv_path);
+    std::filesystem::remove(result.stage6_surfaces.outer_reconstructed_csv_path);
+    std::filesystem::remove(result.stage6_surfaces.inner_reconstructed_csv_path);
+    std::filesystem::remove(result.stage6_surfaces.reconstructed_mask_csv_path);
+    std::filesystem::remove(result.stage6_surfaces.final_valid_analysis_mask_csv_path);
+    std::filesystem::remove(result.stage6_surfaces.non_crossing_adjustment_mask_csv_path);
+    std::filesystem::remove(result.stage6_surfaces.summary_csv_path);
+    std::filesystem::remove(result.stage6_surfaces.outer_obj_path);
+    std::filesystem::remove(result.stage6_surfaces.inner_obj_path);
 }
 
 } // namespace
@@ -1025,7 +1353,13 @@ int main() {
         testStage5ReliableCoreBehavior();
         testStage5DebugCsvExportAndDeterminism();
         testStage1ToStage5Integration();
-        std::cout << "All geometry analysis Stage 1/2/3/4/5 tests passed.\n";
+        testStage6RequiresSuccessfulStage5();
+        testStage6SeedPreservationAndInterpolation();
+        testStage6HardInvalidAndMasks();
+        testStage6NonCrossingEnforcementAndConvergenceMetadata();
+        testStage6DebugCsvArtifactsAndObjExportAndDeterminism();
+        testStage1ToStage6Integration();
+        std::cout << "All geometry analysis Stage 1/2/3/4/5/6 tests passed.\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Geometry analysis test failure: " << e.what() << '\n';

@@ -313,6 +313,265 @@ bool writeStage5SummaryCsv(const GeometryStage5SurfacePrepResult& result) {
     return out.good();
 }
 
+struct Stage6FieldSolveResult {
+    std::vector<double> values;
+    std::vector<uint8_t> solved_interp_mask;
+    std::size_t iterations_used = 0;
+    double final_max_update = 0.0;
+};
+
+std::vector<std::size_t> stage6FourNeighborIndices(std::size_t i, std::size_t j, std::size_t nx, std::size_t ny) {
+    std::vector<std::size_t> neighbors;
+    neighbors.reserve(4);
+    if (i > 0) {
+        neighbors.push_back(stage4NodeIndex(i - 1, j, nx));
+    }
+    if ((i + 1) < nx) {
+        neighbors.push_back(stage4NodeIndex(i + 1, j, nx));
+    }
+    if (j > 0) {
+        neighbors.push_back(stage4NodeIndex(i, j - 1, nx));
+    }
+    if ((j + 1) < ny) {
+        neighbors.push_back(stage4NodeIndex(i, j + 1, nx));
+    }
+    return neighbors;
+}
+
+Stage6FieldSolveResult runStage6FieldReconstruction(const Stage4GridDescriptor& grid,
+                                                     const std::vector<double>& seed_values,
+                                                     const std::vector<uint8_t>& inside_disk_mask,
+                                                     const std::vector<uint8_t>& paired_seed_mask,
+                                                     const std::vector<uint8_t>& paired_interp_allowed_mask,
+                                                     const std::vector<uint8_t>& hard_invalid_mask,
+                                                     const FoldPatchAnalysisConfig& config) {
+    const std::size_t node_count = grid.nx * grid.ny;
+    Stage6FieldSolveResult solve_result;
+    solve_result.values.assign(node_count, std::numeric_limits<double>::quiet_NaN());
+    solve_result.solved_interp_mask.assign(node_count, 0);
+
+    // Stage 6 v1 algorithm:
+    // 1) keep paired seeds as immutable anchors,
+    // 2) initialize interpolation-allowed nodes from local 4-neighbor averages when possible,
+    // 3) perform deterministic Jacobi relaxation using only 4-neighbor finite values.
+    const double alpha = config.stage6_smoothing_weight / (1.0 + config.stage6_smoothing_weight);
+    for (std::size_t idx = 0; idx < node_count; ++idx) {
+        if (paired_seed_mask[idx] != 0) {
+            solve_result.values[idx] = seed_values[idx];
+        }
+    }
+
+    for (std::size_t j = 0; j < grid.ny; ++j) {
+        for (std::size_t i = 0; i < grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, grid.nx);
+            if (paired_interp_allowed_mask[idx] == 0 || inside_disk_mask[idx] == 0 || hard_invalid_mask[idx] != 0) {
+                continue;
+            }
+            const auto neighbors = stage6FourNeighborIndices(i, j, grid.nx, grid.ny);
+            double sum = 0.0;
+            std::size_t count = 0;
+            for (const std::size_t nidx : neighbors) {
+                const double value = solve_result.values[nidx];
+                if (std::isfinite(value)) {
+                    sum += value;
+                    ++count;
+                }
+            }
+            if (count > 0) {
+                solve_result.values[idx] = sum / static_cast<double>(count);
+            }
+        }
+    }
+
+    std::vector<double> current = solve_result.values;
+    std::vector<double> next = current;
+    std::size_t iterations = 0;
+    double final_max_update = 0.0;
+    for (; iterations < config.stage6_max_iterations; ++iterations) {
+        double iteration_max_update = 0.0;
+        bool any_updated = false;
+        next = current;
+
+        for (std::size_t j = 0; j < grid.ny; ++j) {
+            for (std::size_t i = 0; i < grid.nx; ++i) {
+                const std::size_t idx = stage4NodeIndex(i, j, grid.nx);
+                if (paired_interp_allowed_mask[idx] == 0 || inside_disk_mask[idx] == 0 || hard_invalid_mask[idx] != 0) {
+                    continue;
+                }
+
+                const auto neighbors = stage6FourNeighborIndices(i, j, grid.nx, grid.ny);
+                double sum = 0.0;
+                std::size_t count = 0;
+                for (const std::size_t nidx : neighbors) {
+                    const double value = current[nidx];
+                    if (std::isfinite(value)) {
+                        sum += value;
+                        ++count;
+                    }
+                }
+                if (count == 0) {
+                    continue;
+                }
+
+                const double average = sum / static_cast<double>(count);
+                const double previous = current[idx];
+                if (!std::isfinite(previous)) {
+                    next[idx] = average;
+                    iteration_max_update = std::max(iteration_max_update, std::fabs(average));
+                    any_updated = true;
+                    continue;
+                }
+                const double updated = previous + (alpha * (average - previous));
+                next[idx] = updated;
+                iteration_max_update = std::max(iteration_max_update, std::fabs(updated - previous));
+                any_updated = true;
+            }
+        }
+
+        current.swap(next);
+        final_max_update = iteration_max_update;
+        if (!any_updated || iteration_max_update < config.stage6_convergence_tolerance) {
+            ++iterations;
+            break;
+        }
+    }
+
+    solve_result.values = std::move(current);
+    solve_result.iterations_used = iterations;
+    solve_result.final_max_update = final_max_update;
+    for (std::size_t idx = 0; idx < node_count; ++idx) {
+        if (paired_interp_allowed_mask[idx] != 0 && std::isfinite(solve_result.values[idx])) {
+            solve_result.solved_interp_mask[idx] = 1;
+        }
+    }
+    return solve_result;
+}
+
+bool writeStage6FieldCsv(const GeometryStage6SurfaceReconstructionResult& result,
+                         const std::string& path,
+                         const char* value_header_name,
+                         const std::vector<double>& values) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,inside_disk,paired_seed,paired_interp_allowed,hard_invalid,reconstructed," << value_header_name
+        << "\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.inside_disk_mask[idx]) << ',' << static_cast<int>(result.paired_seed_mask[idx])
+                << ',' << static_cast<int>(result.paired_interp_allowed_mask[idx]) << ','
+                << static_cast<int>(result.hard_invalid_mask[idx]) << ',' << static_cast<int>(result.reconstructed_mask[idx])
+                << ',';
+            if (std::isfinite(values[idx])) {
+                out << values[idx];
+            } else {
+                out << "nan";
+            }
+            out << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage6MaskCsv(const GeometryStage6SurfaceReconstructionResult& result,
+                        const std::string& path,
+                        const char* header_name,
+                        const std::vector<uint8_t>& mask) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,inside_disk," << header_name << "\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.inside_disk_mask[idx]) << ',' << static_cast<int>(mask[idx]) << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage6SummaryCsv(const GeometryStage6SurfaceReconstructionResult& result) {
+    std::ofstream out(result.summary_csv_path);
+    if (!out) {
+        return false;
+    }
+    out << "node_count,seed_nodes,interp_nodes,reconstructed_nodes,final_valid_analysis_nodes,unresolved_nodes,"
+           "outer_iterations_used,inner_iterations_used,outer_final_max_update,inner_final_max_update,"
+           "non_crossing_adjusted_nodes,min_reconstructed_separation,max_reconstructed_separation,"
+           "mean_reconstructed_separation,outer_obj_vertex_count,outer_obj_face_count,inner_obj_vertex_count,"
+           "inner_obj_face_count\n";
+    out << result.node_count << ',' << result.seed_node_count << ',' << result.interp_node_count << ','
+        << result.reconstructed_node_count << ',' << result.final_valid_analysis_node_count << ','
+        << result.unresolved_node_count << ',' << result.outer_iterations_used << ',' << result.inner_iterations_used
+        << ',' << result.outer_final_max_update << ',' << result.inner_final_max_update << ','
+        << result.non_crossing_adjusted_node_count << ',' << result.min_reconstructed_separation << ','
+        << result.max_reconstructed_separation << ',' << result.mean_reconstructed_separation << ','
+        << result.outer_obj_vertex_count << ',' << result.outer_obj_face_count << ',' << result.inner_obj_vertex_count
+        << ',' << result.inner_obj_face_count << '\n';
+    return out.good();
+}
+
+struct Stage6ObjExportResult {
+    std::size_t vertex_count = 0;
+    std::size_t face_count = 0;
+};
+
+Stage6ObjExportResult writeStage6ObjMesh(const Stage4GridDescriptor& grid,
+                                         const std::vector<uint8_t>& obj_vertex_mask,
+                                         const std::vector<double>& values,
+                                         const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        throw std::runtime_error("Failed to open Stage 6 OBJ path for writing: " + path);
+    }
+
+    Stage6ObjExportResult export_result;
+    std::vector<int> vertex_indices(grid.nx * grid.ny, -1);
+    int next_vertex_index = 1;
+    for (std::size_t j = 0; j < grid.ny; ++j) {
+        for (std::size_t i = 0; i < grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, grid.nx);
+            if (obj_vertex_mask[idx] == 0 || !std::isfinite(values[idx])) {
+                continue;
+            }
+            out << "v " << grid.x_values[i] << ' ' << grid.y_values[j] << ' ' << values[idx] << '\n';
+            vertex_indices[idx] = next_vertex_index;
+            ++next_vertex_index;
+            ++export_result.vertex_count;
+        }
+    }
+
+    for (std::size_t j = 0; (j + 1) < grid.ny; ++j) {
+        for (std::size_t i = 0; (i + 1) < grid.nx; ++i) {
+            const std::size_t idx00 = stage4NodeIndex(i, j, grid.nx);
+            const std::size_t idx10 = stage4NodeIndex(i + 1, j, grid.nx);
+            const std::size_t idx01 = stage4NodeIndex(i, j + 1, grid.nx);
+            const std::size_t idx11 = stage4NodeIndex(i + 1, j + 1, grid.nx);
+            if (obj_vertex_mask[idx00] == 0 || obj_vertex_mask[idx10] == 0 || obj_vertex_mask[idx01] == 0 ||
+                obj_vertex_mask[idx11] == 0 || !std::isfinite(values[idx00]) || !std::isfinite(values[idx10]) ||
+                !std::isfinite(values[idx01]) || !std::isfinite(values[idx11])) {
+                continue;
+            }
+            const int v00 = vertex_indices[idx00];
+            const int v10 = vertex_indices[idx10];
+            const int v01 = vertex_indices[idx01];
+            const int v11 = vertex_indices[idx11];
+            out << "f " << v00 << ' ' << v10 << ' ' << v01 << '\n';
+            out << "f " << v10 << ' ' << v11 << ' ' << v01 << '\n';
+            export_result.face_count += 2;
+        }
+    }
+    if (!out.good()) {
+        throw std::runtime_error("Failed while writing Stage 6 OBJ mesh: " + path);
+    }
+    return export_result;
+}
+
 const char* toVdwSourceLabel(VdwResolutionSource source) {
     switch (source) {
     case VdwResolutionSource::explicit_element:
@@ -1482,6 +1741,234 @@ GeometryStage5SurfacePrepResult runGeometryAnalysisStage5SurfacePreparation(
     return result;
 }
 
+GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceReconstruction(
+    const GeometryStage5SurfacePrepResult& stage5_result,
+    const FoldPatchAnalysisConfig& config,
+    Logger* logger,
+    double tolerance) {
+    (void)tolerance;
+    GeometryStage6SurfaceReconstructionResult result;
+    if (!stage5_result.success) {
+        throw std::runtime_error("Stage 6 cannot run before successful Stage 5 surface preparation");
+    }
+    if (stage5_result.grid.nx == 0 || stage5_result.grid.ny == 0 || stage5_result.node_count == 0) {
+        throw std::runtime_error("Stage 6 requires a non-empty Stage 5 grid");
+    }
+    if (stage5_result.paired_seed_node_count == 0) {
+        throw std::runtime_error("Stage 6 requires Stage 5 paired_seed_node_count > 0");
+    }
+    if (stage5_result.paired_seed_node_count + stage5_result.paired_interp_allowed_node_count == 0) {
+        throw std::runtime_error("Stage 6 requires Stage 5 seeds and/or interpolation-allowed nodes");
+    }
+    if (config.stage6_max_iterations == 0) {
+        throw std::runtime_error("Stage 6 requires stage6_max_iterations > 0");
+    }
+    if (config.stage6_convergence_tolerance <= 0.0) {
+        throw std::runtime_error("Stage 6 requires stage6_convergence_tolerance > 0");
+    }
+    if (config.stage6_smoothing_weight <= 0.0) {
+        throw std::runtime_error("Stage 6 requires stage6_smoothing_weight > 0");
+    }
+
+    result.messages.push_back("Geometry Stage 6");
+    result.messages.push_back("Geometry analysis: starting Stage 6 smooth surface reconstruction.");
+
+    result.grid = stage5_result.grid;
+    result.node_count = stage5_result.node_count;
+    result.seed_node_count = stage5_result.paired_seed_node_count;
+    result.interp_node_count = stage5_result.paired_interp_allowed_node_count;
+    result.inside_disk_mask = stage5_result.inside_disk_mask;
+    result.paired_seed_mask = stage5_result.paired_seed_mask;
+    result.paired_interp_allowed_mask = stage5_result.paired_interp_allowed_mask;
+    result.hard_invalid_mask = stage5_result.hard_invalid_mask;
+    result.z_outer_reconstructed.assign(result.node_count, std::numeric_limits<double>::quiet_NaN());
+    result.z_inner_reconstructed.assign(result.node_count, std::numeric_limits<double>::quiet_NaN());
+    result.reconstructed_mask.assign(result.node_count, 0);
+    result.final_valid_analysis_mask.assign(result.node_count, 0);
+    result.non_crossing_adjustment_mask.assign(result.node_count, 0);
+    result.obj_vertex_mask.assign(result.node_count, 0);
+
+    const Stage6FieldSolveResult outer = runStage6FieldReconstruction(result.grid,
+                                                                       stage5_result.z_outer_seed,
+                                                                       stage5_result.inside_disk_mask,
+                                                                       stage5_result.paired_seed_mask,
+                                                                       stage5_result.paired_interp_allowed_mask,
+                                                                       stage5_result.hard_invalid_mask,
+                                                                       config);
+    const Stage6FieldSolveResult inner = runStage6FieldReconstruction(result.grid,
+                                                                       stage5_result.z_inner_seed,
+                                                                       stage5_result.inside_disk_mask,
+                                                                       stage5_result.paired_seed_mask,
+                                                                       stage5_result.paired_interp_allowed_mask,
+                                                                       stage5_result.hard_invalid_mask,
+                                                                       config);
+    result.z_outer_reconstructed = outer.values;
+    result.z_inner_reconstructed = inner.values;
+    result.outer_iterations_used = outer.iterations_used;
+    result.inner_iterations_used = inner.iterations_used;
+    result.outer_final_max_update = outer.final_max_update;
+    result.inner_final_max_update = inner.final_max_update;
+
+    for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+        const bool is_seed = result.paired_seed_mask[idx] != 0;
+        const bool is_interp = result.paired_interp_allowed_mask[idx] != 0;
+        if (!is_seed && !is_interp) {
+            result.z_outer_reconstructed[idx] = std::numeric_limits<double>::quiet_NaN();
+            result.z_inner_reconstructed[idx] = std::numeric_limits<double>::quiet_NaN();
+            continue;
+        }
+        if (result.inside_disk_mask[idx] == 0 || result.hard_invalid_mask[idx] != 0) {
+            result.z_outer_reconstructed[idx] = std::numeric_limits<double>::quiet_NaN();
+            result.z_inner_reconstructed[idx] = std::numeric_limits<double>::quiet_NaN();
+            continue;
+        }
+        if (config.stage6_enforce_non_crossing && std::isfinite(result.z_outer_reconstructed[idx]) &&
+            std::isfinite(result.z_inner_reconstructed[idx]) &&
+            result.z_outer_reconstructed[idx] < (result.z_inner_reconstructed[idx] + config.stage6_min_separation)) {
+            const double mid = 0.5 * (result.z_outer_reconstructed[idx] + result.z_inner_reconstructed[idx]);
+            result.z_inner_reconstructed[idx] = mid - (0.5 * config.stage6_min_separation);
+            result.z_outer_reconstructed[idx] = mid + (0.5 * config.stage6_min_separation);
+            result.non_crossing_adjustment_mask[idx] = 1;
+            ++result.non_crossing_adjusted_node_count;
+        }
+    }
+
+    double separation_sum = 0.0;
+    std::size_t separation_count = 0;
+    bool first_separation = true;
+    for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+        const bool in_domain = result.paired_seed_mask[idx] != 0 || result.paired_interp_allowed_mask[idx] != 0;
+        const bool finite_pair =
+            std::isfinite(result.z_outer_reconstructed[idx]) && std::isfinite(result.z_inner_reconstructed[idx]);
+        if (in_domain && finite_pair) {
+            result.reconstructed_mask[idx] = 1;
+            ++result.reconstructed_node_count;
+            const double separation = result.z_outer_reconstructed[idx] - result.z_inner_reconstructed[idx];
+            separation_sum += separation;
+            if (first_separation) {
+                result.min_reconstructed_separation = separation;
+                result.max_reconstructed_separation = separation;
+                first_separation = false;
+            } else {
+                result.min_reconstructed_separation = std::min(result.min_reconstructed_separation, separation);
+                result.max_reconstructed_separation = std::max(result.max_reconstructed_separation, separation);
+            }
+            ++separation_count;
+        }
+        if (result.reconstructed_mask[idx] != 0 && result.inside_disk_mask[idx] != 0 && result.hard_invalid_mask[idx] == 0) {
+            result.final_valid_analysis_mask[idx] = 1;
+            result.obj_vertex_mask[idx] = 1;
+            ++result.final_valid_analysis_node_count;
+        }
+    }
+    result.unresolved_node_count = result.interp_node_count > 0 ? (result.interp_node_count - std::min(result.interp_node_count,
+                                                                                                       result.reconstructed_node_count > result.seed_node_count
+                                                                                                           ? result.reconstructed_node_count - result.seed_node_count
+                                                                                                           : static_cast<std::size_t>(0)))
+                                                                 : 0;
+
+    if (result.reconstructed_node_count == 0 || separation_count == 0) {
+        throw std::runtime_error("Stage 6 produced zero reconstructed nodes");
+    }
+    result.mean_reconstructed_separation = separation_sum / static_cast<double>(separation_count);
+
+    if (config.debug) {
+        result.outer_reconstructed_csv_path = config.output_prefix + "_outer_reconstructed.csv";
+        result.inner_reconstructed_csv_path = config.output_prefix + "_inner_reconstructed.csv";
+        result.reconstructed_mask_csv_path = config.output_prefix + "_reconstructed_mask.csv";
+        result.final_valid_analysis_mask_csv_path = config.output_prefix + "_final_valid_analysis_mask.csv";
+        result.non_crossing_adjustment_mask_csv_path = config.output_prefix + "_non_crossing_adjustment_mask.csv";
+        result.summary_csv_path = config.output_prefix + "_stage6_summary.csv";
+
+        if (!writeStage6FieldCsv(
+                result, result.outer_reconstructed_csv_path, "z_outer_reconstructed", result.z_outer_reconstructed)) {
+            throw std::runtime_error("Failed to write Stage 6 outer reconstructed CSV");
+        }
+        if (!writeStage6FieldCsv(
+                result, result.inner_reconstructed_csv_path, "z_inner_reconstructed", result.z_inner_reconstructed)) {
+            throw std::runtime_error("Failed to write Stage 6 inner reconstructed CSV");
+        }
+        if (!writeStage6MaskCsv(result, result.reconstructed_mask_csv_path, "reconstructed", result.reconstructed_mask)) {
+            throw std::runtime_error("Failed to write Stage 6 reconstructed mask CSV");
+        }
+        if (!writeStage6MaskCsv(result,
+                                result.final_valid_analysis_mask_csv_path,
+                                "final_valid_analysis",
+                                result.final_valid_analysis_mask)) {
+            throw std::runtime_error("Failed to write Stage 6 final-valid-analysis mask CSV");
+        }
+        if (!writeStage6MaskCsv(result,
+                                result.non_crossing_adjustment_mask_csv_path,
+                                "non_crossing_adjusted",
+                                result.non_crossing_adjustment_mask)) {
+            throw std::runtime_error("Failed to write Stage 6 non-crossing-adjustment mask CSV");
+        }
+        if (!writeStage6SummaryCsv(result)) {
+            throw std::runtime_error("Failed to write Stage 6 summary CSV");
+        }
+    }
+
+    if (config.stage6_export_obj_meshes) {
+        result.outer_obj_path = config.output_prefix + "_stage6_outer_surface.obj";
+        result.inner_obj_path = config.output_prefix + "_stage6_inner_surface.obj";
+        const Stage6ObjExportResult outer_obj =
+            writeStage6ObjMesh(result.grid, result.obj_vertex_mask, result.z_outer_reconstructed, result.outer_obj_path);
+        const Stage6ObjExportResult inner_obj =
+            writeStage6ObjMesh(result.grid, result.obj_vertex_mask, result.z_inner_reconstructed, result.inner_obj_path);
+        result.outer_obj_vertex_count = outer_obj.vertex_count;
+        result.outer_obj_face_count = outer_obj.face_count;
+        result.inner_obj_vertex_count = inner_obj.vertex_count;
+        result.inner_obj_face_count = inner_obj.face_count;
+    }
+
+    result.messages.push_back("Geometry Stage 6 smoothing weight: " + std::to_string(config.stage6_smoothing_weight));
+    result.messages.push_back("Geometry Stage 6 max iterations: " + std::to_string(config.stage6_max_iterations));
+    result.messages.push_back("Geometry Stage 6 convergence tolerance: " +
+                              std::to_string(config.stage6_convergence_tolerance));
+    result.messages.push_back("Geometry Stage 6 enforce non-crossing: " +
+                              std::to_string(config.stage6_enforce_non_crossing ? 1 : 0));
+    result.messages.push_back("Geometry Stage 6 minimum separation: " + std::to_string(config.stage6_min_separation));
+    result.messages.push_back("Geometry Stage 6 seed nodes: " + std::to_string(result.seed_node_count));
+    result.messages.push_back("Geometry Stage 6 interpolation nodes: " + std::to_string(result.interp_node_count));
+    result.messages.push_back("Geometry Stage 6 reconstructed nodes: " + std::to_string(result.reconstructed_node_count));
+    result.messages.push_back("Geometry Stage 6 unresolved nodes: " + std::to_string(result.unresolved_node_count));
+    result.messages.push_back("Geometry Stage 6 outer iterations used: " + std::to_string(result.outer_iterations_used));
+    result.messages.push_back("Geometry Stage 6 inner iterations used: " + std::to_string(result.inner_iterations_used));
+    result.messages.push_back("Geometry Stage 6 outer final max update: " + std::to_string(result.outer_final_max_update));
+    result.messages.push_back("Geometry Stage 6 inner final max update: " + std::to_string(result.inner_final_max_update));
+    result.messages.push_back("Geometry Stage 6 non-crossing adjusted nodes: " +
+                              std::to_string(result.non_crossing_adjusted_node_count));
+    result.messages.push_back("Geometry Stage 6 min reconstructed separation: " +
+                              std::to_string(result.min_reconstructed_separation));
+    result.messages.push_back("Geometry Stage 6 max reconstructed separation: " +
+                              std::to_string(result.max_reconstructed_separation));
+    result.messages.push_back("Geometry Stage 6 mean reconstructed separation: " +
+                              std::to_string(result.mean_reconstructed_separation));
+    if (config.debug) {
+        result.messages.push_back("Geometry Stage 6 outer reconstructed CSV: " + result.outer_reconstructed_csv_path);
+        result.messages.push_back("Geometry Stage 6 inner reconstructed CSV: " + result.inner_reconstructed_csv_path);
+        result.messages.push_back("Geometry Stage 6 reconstructed mask CSV: " + result.reconstructed_mask_csv_path);
+        result.messages.push_back("Geometry Stage 6 final-valid-analysis mask CSV: " +
+                                  result.final_valid_analysis_mask_csv_path);
+        result.messages.push_back("Geometry Stage 6 non-crossing-adjustment mask CSV: " +
+                                  result.non_crossing_adjustment_mask_csv_path);
+        result.messages.push_back("Geometry Stage 6 summary CSV: " + result.summary_csv_path);
+    }
+    if (config.stage6_export_obj_meshes) {
+        result.messages.push_back("Geometry Stage 6 outer OBJ: " + result.outer_obj_path +
+                                  " (v=" + std::to_string(result.outer_obj_vertex_count) +
+                                  ", f=" + std::to_string(result.outer_obj_face_count) + ")");
+        result.messages.push_back("Geometry Stage 6 inner OBJ: " + result.inner_obj_path +
+                                  " (v=" + std::to_string(result.inner_obj_vertex_count) +
+                                  ", f=" + std::to_string(result.inner_obj_face_count) + ")");
+    }
+    result.messages.push_back("Geometry analysis: completed Stage 6 smooth surface reconstruction.");
+
+    result.success = true;
+    logMessages(result.messages, logger);
+    return result;
+}
+
 GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                                                     const FoldPatchAnalysisConfig& config,
                                                     const ParserConfig& parser_config,
@@ -1501,8 +1988,9 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
     result.stage4_raw =
         runGeometryAnalysisStage4RawSheetDetection(capsid, config, parser_config, result.stage3_patch, logger);
     result.stage5_prep = runGeometryAnalysisStage5SurfacePreparation(result.stage4_raw, config, logger);
+    result.stage6_surfaces = runGeometryAnalysisStage6SurfaceReconstruction(result.stage5_prep, config, logger);
     result.success = result.preparation.success && result.stage2_patch.success && result.stage3_patch.success &&
-                     result.stage4_raw.success && result.stage5_prep.success;
+                     result.stage4_raw.success && result.stage5_prep.success && result.stage6_surfaces.success;
     logMessages(result.messages, logger);
 
     return result;
