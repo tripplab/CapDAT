@@ -148,6 +148,11 @@ struct GeometryStage4RawSheetResult {
     std::size_t inside_disk_count = 0;
     std::size_t valid_node_count = 0;
     std::size_t invalid_node_count = 0;
+    std::size_t outer_only_node_count = 0;
+    std::size_t inner_only_node_count = 0;
+    std::size_t both_hit_node_count = 0;
+    std::size_t zero_thickness_node_count = 0;
+    std::size_t negative_thickness_node_count = 0;
     std::size_t unique_outer_contact_atom_count = 0;
     std::size_t unique_inner_contact_atom_count = 0;
     std::size_t unique_both_contact_atom_count = 0;
@@ -155,7 +160,14 @@ struct GeometryStage4RawSheetResult {
     std::string outer_csv_path;
     std::string inner_csv_path;
     std::string valid_mask_csv_path;
+    std::string outer_only_mask_csv_path;
+    std::string inner_only_mask_csv_path;
+    std::string negative_thickness_mask_csv_path;
     std::string contact_atoms_pdb_path;
+    std::string summary_csv_path;
+    std::string stage4_start_timestamp_utc;
+    std::string stage4_end_timestamp_utc;
+    double stage4_runtime_seconds = 0.0;
     std::vector<std::string> messages;
 };
 
