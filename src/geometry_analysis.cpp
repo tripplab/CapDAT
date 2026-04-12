@@ -83,6 +83,13 @@ const std::unordered_map<std::string, double>& vdwRadiusLookupTable() {
     return table;
 }
 
+enum class VdwResolutionSource : uint8_t { explicit_element = 0, inferred_from_atom_name = 1, fallback_unknown = 2 };
+
+struct VdwResolution {
+    std::string normalized_element;
+    VdwResolutionSource source = VdwResolutionSource::fallback_unknown;
+};
+
 std::size_t stage4NodeIndex(std::size_t i, std::size_t j, std::size_t nx) {
     return (j * nx) + i;
 }
@@ -163,6 +170,39 @@ PatchAtomContactRole classifyContactRole(bool used_as_outer, bool used_as_inner)
     return PatchAtomContactRole::none;
 }
 
+std::string inferElementSymbolFromAtomName(const std::string& atom_name) {
+    std::string letters;
+    letters.reserve(atom_name.size());
+    for (const char ch : atom_name) {
+        if (std::isalpha(static_cast<unsigned char>(ch)) != 0) {
+            letters.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
+        }
+    }
+    if (letters.empty()) {
+        return "";
+    }
+
+    if (letters.size() >= 2 && letters[0] == 'S' && letters[1] == 'E') {
+        return "SE";
+    }
+    return std::string(1, letters[0]);
+}
+
+VdwResolution resolveVdwElement(const Atom& atom) {
+    const auto& table = vdwRadiusLookupTable();
+    const std::string explicit_element = normalizeElementSymbol(atom.element());
+    if (!explicit_element.empty() && table.find(explicit_element) != table.end()) {
+        return VdwResolution{explicit_element, VdwResolutionSource::explicit_element};
+    }
+
+    const std::string inferred_element = inferElementSymbolFromAtomName(atom.name());
+    if (!inferred_element.empty() && table.find(inferred_element) != table.end()) {
+        return VdwResolution{inferred_element, VdwResolutionSource::inferred_from_atom_name};
+    }
+
+    return VdwResolution{"", VdwResolutionSource::fallback_unknown};
+}
+
 } // namespace
 
 CylinderMembership classifyPatchCylinder(const geometry_symmetry::Vector3& position, double cylinder_radius) {
@@ -211,9 +251,11 @@ double vdwRadius(const std::string& normalized_element) {
 PatchAtom makePatchAtom(const Atom& atom,
                         const geometry_symmetry::Vector3& rotated_position,
                         const CylinderMembership& membership) {
+    const VdwResolution resolved = resolveVdwElement(atom);
+
     PatchAtom patch_atom;
     patch_atom.position = rotated_position;
-    patch_atom.element = normalizeElementSymbol(atom.element());
+    patch_atom.element = resolved.normalized_element;
     patch_atom.vdw_radius = vdwRadius(patch_atom.element);
     patch_atom.membership = membership;
     patch_atom.radial_xy = membership.radial_xy;
@@ -497,6 +539,16 @@ GeometryPatchNormalizationResult runGeometryAnalysisStage3PatchNormalization(
 
     result.analytical_patch.atoms.reserve(stage2_result.patch_atoms.size());
     result.analytical_patch.original_atom_refs.reserve(stage2_result.selected_atom_refs.size());
+    geometry_symmetry::Vector3 min_position{
+        std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity(),
+    };
+    geometry_symmetry::Vector3 max_position{
+        -std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity(),
+    };
 
     for (std::size_t idx = 0; idx < stage2_result.patch_atoms.size(); ++idx) {
         const PatchAtom& selected = stage2_result.patch_atoms[idx];
@@ -506,14 +558,23 @@ GeometryPatchNormalizationResult runGeometryAnalysisStage3PatchNormalization(
         }
 
         const PatchAtom normalized = makePatchAtom(*original_ref, selected.position, selected.membership);
-        if (vdwRadiusLookupTable().find(normalized.element) == vdwRadiusLookupTable().end()) {
-            ++result.analytical_patch.fallback_vdw_radius_count;
-        } else {
+        const VdwResolution vdw_resolution = resolveVdwElement(*original_ref);
+        if (vdw_resolution.source == VdwResolutionSource::explicit_element) {
             ++result.analytical_patch.explicit_vdw_radius_count;
+        } else if (vdw_resolution.source == VdwResolutionSource::inferred_from_atom_name) {
+            ++result.analytical_patch.inferred_vdw_radius_count;
+        } else {
+            ++result.analytical_patch.fallback_vdw_radius_count;
         }
 
         result.analytical_patch.atoms.push_back(normalized);
         result.analytical_patch.original_atom_refs.push_back(original_ref);
+        min_position.x = std::min(min_position.x, normalized.position.x);
+        min_position.y = std::min(min_position.y, normalized.position.y);
+        min_position.z = std::min(min_position.z, normalized.position.z);
+        max_position.x = std::max(max_position.x, normalized.position.x);
+        max_position.y = std::max(max_position.y, normalized.position.y);
+        max_position.z = std::max(max_position.z, normalized.position.z);
     }
 
     result.analytical_patch.atom_count = result.analytical_patch.atoms.size();
@@ -526,8 +587,14 @@ GeometryPatchNormalizationResult runGeometryAnalysisStage3PatchNormalization(
 
     result.messages.push_back("Geometry Stage 3 explicit element vdW assignments: " +
                               std::to_string(result.analytical_patch.explicit_vdw_radius_count));
+    result.messages.push_back("Geometry Stage 3 inferred-from-name vdW assignments: " +
+                              std::to_string(result.analytical_patch.inferred_vdw_radius_count));
     result.messages.push_back("Geometry Stage 3 fallback vdW assignments: " +
                               std::to_string(result.analytical_patch.fallback_vdw_radius_count));
+    result.messages.push_back("Geometry Stage 3 patch atom bounds x:[" + std::to_string(min_position.x) + ", " +
+                              std::to_string(max_position.x) + "] y:[" + std::to_string(min_position.y) + ", " +
+                              std::to_string(max_position.y) + "] z:[" + std::to_string(min_position.z) + ", " +
+                              std::to_string(max_position.z) + "]");
     result.messages.push_back("Geometry Stage 3 patch export path (Stage 2 canonical): " +
                               result.analytical_patch.export_path);
     result.messages.push_back("Geometry analysis: completed Stage 3 analytical patch normalization.");
@@ -559,6 +626,7 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.messages.push_back("Geometry Stage 4 cylinder radius: " + std::to_string(config.cylinder_radius));
 
     result.grid = buildStage4RegularGrid(config.cylinder_radius, config.grid_spacing, tolerance);
+    result.contact_search_patch_atom_count = stage3_result.analytical_patch.atoms.size();
     result.node_count = result.grid.nx * result.grid.ny;
     result.z_outer_raw.assign(result.node_count, std::numeric_limits<double>::quiet_NaN());
     result.z_inner_raw.assign(result.node_count, std::numeric_limits<double>::quiet_NaN());
@@ -625,6 +693,9 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     contact_atom_subset.reserve(stage3_result.analytical_patch.atoms.size());
     for (std::size_t idx = 0; idx < stage3_result.analytical_patch.atoms.size(); ++idx) {
         result.atom_roles[idx] = classifyContactRole(used_as_outer[idx], used_as_inner[idx]);
+        if (used_as_outer[idx] && used_as_inner[idx]) {
+            ++result.unique_both_contact_atom_count;
+        }
         if (used_as_outer[idx]) {
             ++result.unique_outer_contact_atom_count;
         }
@@ -632,6 +703,7 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
             ++result.unique_inner_contact_atom_count;
         }
         if (used_as_outer[idx] || used_as_inner[idx]) {
+            ++result.unique_contact_atom_count;
             contact_atom_subset.push_back(stage3_result.analytical_patch.atoms[idx].original_atom);
         }
     }
@@ -673,10 +745,16 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.messages.push_back("Geometry Stage 4 nodes inside disk: " + std::to_string(result.inside_disk_count));
     result.messages.push_back("Geometry Stage 4 valid nodes: " + std::to_string(result.valid_node_count));
     result.messages.push_back("Geometry Stage 4 invalid nodes: " + std::to_string(result.invalid_node_count));
+    result.messages.push_back("Geometry Stage 4 patch atoms used for contact search: " +
+                              std::to_string(result.contact_search_patch_atom_count));
     result.messages.push_back("Geometry Stage 4 unique outer-contact atoms: " +
                               std::to_string(result.unique_outer_contact_atom_count));
     result.messages.push_back("Geometry Stage 4 unique inner-contact atoms: " +
                               std::to_string(result.unique_inner_contact_atom_count));
+    result.messages.push_back("Geometry Stage 4 unique both-contact atoms: " +
+                              std::to_string(result.unique_both_contact_atom_count));
+    result.messages.push_back("Geometry Stage 4 unique contact atoms (outer U inner): " +
+                              std::to_string(result.unique_contact_atom_count));
     result.messages.push_back("Geometry Stage 4 outer CSV: " + result.outer_csv_path);
     result.messages.push_back("Geometry Stage 4 inner CSV: " + result.inner_csv_path);
     result.messages.push_back("Geometry Stage 4 valid mask CSV: " + result.valid_mask_csv_path);

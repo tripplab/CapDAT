@@ -57,7 +57,7 @@ Capsid makeStage2CapsidWithUnknownElement() {
     Capsid capsid("stage2_unknown_element");
     Chain chain(1, 'A');
     Residue residue("GLY", 11, ' ', 'A', 1);
-    residue.addAtom(Atom(1, "N", ' ', "GLY", 'A', 11, ' ', 0.5, 0.5, 1.0, 1.0, 20.0, "N", "", false));
+    residue.addAtom(Atom(1, "N", ' ', "GLY", 'A', 11, ' ', 0.5, 0.5, 1.0, 1.0, 20.0, "", "", false));
     residue.addAtom(Atom(2, "X1", ' ', "GLY", 'A', 11, ' ', 1.0, 0.0, 1.5, 1.0, 20.0, " Xx ", "", false));
     chain.addResidue(residue);
     capsid.addChain(chain);
@@ -288,6 +288,16 @@ void testPatchAtomBuilderNormalization() {
     assertTrue(patch_atom.membership.selected == membership.selected, "builder should preserve membership facts");
 }
 
+void testPatchAtomBuilderInfersElementFromNameWhenMissing() {
+    const Atom atom(101, "NZ", ' ', "LYS", 'A', 3, ' ', 1.0, 2.0, 3.0, 1.0, 20.0, "", "", false);
+    const geometry_symmetry::Vector3 rotated{1.0, 2.0, 3.0};
+    const CylinderMembership membership = classifyPatchCylinder(rotated, 5.0);
+
+    const PatchAtom patch_atom = makePatchAtom(atom, rotated, membership);
+    assertTrue(patch_atom.element == "N", "builder should infer N from atom name when element is missing");
+    assertTrue(near(patch_atom.vdw_radius, 1.55), "inferred N should get N vdW radius");
+}
+
 void testStage3FailsWithoutSuccessfulStage2() {
     GeometryPatchSelectionResult stage2_result;
     stage2_result.success = false;
@@ -319,12 +329,41 @@ void testStage2ToStage3Integration() {
                "Stage 3 atom count should match selected refs count");
     assertTrue(stage3.analytical_patch.atoms.size() == stage3.analytical_patch.original_atom_refs.size(),
                "Stage 3 atom/reference counts should match");
+    assertTrue(stage3.analytical_patch.explicit_vdw_radius_count > 0,
+               "Stage 3 should classify explicit vdW assignments");
+    assertTrue(stage3.analytical_patch.fallback_vdw_radius_count == 0,
+               "known explicit elements should not require fallback assignments");
     for (const PatchAtom& atom : stage3.analytical_patch.atoms) {
         assertTrue(atom.original_atom != nullptr, "each Stage 3 PatchAtom should keep original reference");
         assertTrue(atom.vdw_radius > 0.0, "each Stage 3 PatchAtom should have positive vdW radius");
     }
 
     assertTrue(std::filesystem::exists(stage2.export_path), "Stage 2 canonical patch export should exist");
+    std::filesystem::remove(stage2.export_path);
+}
+
+void testStage3InfersAndFallsBackWhenElementMissing() {
+    Capsid capsid = makeStage2CapsidWithUnknownElement();
+    FoldPatchAnalysisConfig config;
+    config.enabled = true;
+    config.cylinder_radius = 2.0;
+    config.min_atoms_in_patch = 2;
+    config.output_prefix = "stage3_unknown";
+
+    GeometryPreparationResult stage1;
+    stage1.success = true;
+
+    const auto stage2 = runGeometryAnalysisStage2PatchSelection(capsid, config, makeParserConfig(), stage1, nullptr);
+    const auto stage3 = runGeometryAnalysisStage3PatchNormalization(stage2, nullptr);
+
+    assertTrue(stage3.success, "Stage 3 should succeed with missing/unknown element symbols");
+    assertTrue(stage3.analytical_patch.explicit_vdw_radius_count == 0,
+               "blank element fields should not be counted as explicit assignments");
+    assertTrue(stage3.analytical_patch.inferred_vdw_radius_count == 1,
+               "missing element should be inferred from supported atom name");
+    assertTrue(stage3.analytical_patch.fallback_vdw_radius_count == 1,
+               "unsupported unknown element should fall back");
+
     std::filesystem::remove(stage2.export_path);
 }
 
@@ -457,6 +496,7 @@ int main() {
         testCylinderClassifier();
         testVdwRadiusLookupAndNormalization();
         testPatchAtomBuilderNormalization();
+        testPatchAtomBuilderInfersElementFromNameWhenMissing();
         testLineSphereIntersectionHelper();
         testSingleNodeFirstContact();
         testGridConstruction();
@@ -467,6 +507,7 @@ int main() {
         testStage2RequiresStage1();
         testStage3FailsWithoutSuccessfulStage2();
         testStage2ToStage3Integration();
+        testStage3InfersAndFallsBackWhenElementMissing();
         testStage4RoleClassificationAndCsvAndPdb();
         testStage1ToStage4Integration();
         std::cout << "All geometry analysis Stage 1/2/3/4 tests passed.\n";
