@@ -151,13 +151,20 @@ bool writeStage4CsvValidMask(const GeometryStage4RawSheetResult& result) {
     if (!out) {
         return false;
     }
-    out << "i,j,x,y,inside_disk,valid\n";
+    out << "i,j,x,y,inside_disk,valid,candidate_patch_atom_count,inner_contact_serial_number,"
+           "outer_contact_serial_number\n";
     for (std::size_t j = 0; j < result.grid.ny; ++j) {
         for (std::size_t i = 0; i < result.grid.nx; ++i) {
             const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
             out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
                 << static_cast<int>(result.inside_disk_mask[idx]) << ',' << static_cast<int>(result.valid_mask[idx])
-                << '\n';
+                << ',' << result.candidate_patch_atom_counts[idx] << ',';
+            if (result.valid_mask[idx] != 0) {
+                out << result.inner_contact_serial_numbers[idx] << ',' << result.outer_contact_serial_numbers[idx];
+            } else {
+                out << "nan,nan";
+            }
+            out << '\n';
         }
     }
     return out.good();
@@ -396,8 +403,8 @@ Stage4NodeFirstContact detectRawFirstContactAtNode(double x,
                                                     double tie_tolerance) {
     Stage4NodeFirstContact result;
     bool any_intersection = false;
-    double best_outer = std::numeric_limits<double>::infinity();
-    double best_inner = -std::numeric_limits<double>::infinity();
+    double best_outer = -std::numeric_limits<double>::infinity();
+    double best_inner = std::numeric_limits<double>::infinity();
 
     for (std::size_t idx = 0; idx < patch_atoms.size(); ++idx) {
         const LineSphereIntersection intersection =
@@ -405,14 +412,15 @@ Stage4NodeFirstContact detectRawFirstContactAtNode(double x,
         if (!intersection.intersects) {
             continue;
         }
+        ++result.candidate_patch_atom_count;
 
-        if (!any_intersection || (intersection.z_high < best_outer - tie_tolerance)) {
-            best_outer = intersection.z_high;
+        if (!any_intersection || (patch_atoms[idx].position.z > best_outer + tie_tolerance)) {
+            best_outer = patch_atoms[idx].position.z;
             result.outer_patch_atom_index = idx;
         }
 
-        if (!any_intersection || (intersection.z_low > best_inner + tie_tolerance)) {
-            best_inner = intersection.z_low;
+        if (!any_intersection || (patch_atoms[idx].position.z < best_inner - tie_tolerance)) {
+            best_inner = patch_atoms[idx].position.z;
             result.inner_patch_atom_index = idx;
         }
 
@@ -746,6 +754,9 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.z_inner_raw.assign(result.node_count, std::numeric_limits<double>::quiet_NaN());
     result.inside_disk_mask.assign(result.node_count, 0);
     result.valid_mask.assign(result.node_count, 0);
+    result.candidate_patch_atom_counts.assign(result.node_count, 0);
+    result.inner_contact_serial_numbers.assign(result.node_count, 0);
+    result.outer_contact_serial_numbers.assign(result.node_count, 0);
     result.atom_roles.assign(stage3_result.analytical_patch.atoms.size(), PatchAtomContactRole::none);
     std::vector<uint8_t> outer_only_mask(result.node_count, 0);
     std::vector<uint8_t> inner_only_mask(result.node_count, 0);
@@ -773,12 +784,21 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
             const Stage4NodeFirstContact node =
                 detectRawFirstContactAtNode(x, y, stage3_result.analytical_patch.atoms, tolerance);
             if (!node.valid) {
+                result.candidate_patch_atom_counts[idx] = node.candidate_patch_atom_count;
                 continue;
             }
 
             result.valid_mask[idx] = 1;
+            result.candidate_patch_atom_counts[idx] = node.candidate_patch_atom_count;
             result.z_outer_raw[idx] = node.z_outer_raw;
             result.z_inner_raw[idx] = node.z_inner_raw;
+            const Atom* outer_atom = stage3_result.analytical_patch.atoms[node.outer_patch_atom_index].original_atom;
+            const Atom* inner_atom = stage3_result.analytical_patch.atoms[node.inner_patch_atom_index].original_atom;
+            if (outer_atom == nullptr || inner_atom == nullptr) {
+                throw std::runtime_error("Stage 4 encountered null original atom while writing node contacts");
+            }
+            result.outer_contact_serial_numbers[idx] = outer_atom->serial();
+            result.inner_contact_serial_numbers[idx] = inner_atom->serial();
             ++result.valid_node_count;
             ++result.both_hit_node_count;
 
