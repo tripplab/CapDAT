@@ -4,11 +4,13 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace {
 
 bool near(double a, double b, double eps = 1e-8) { return std::fabs(a - b) <= eps; }
+std::size_t nodeIndex(std::size_t i, std::size_t j, std::size_t nx) { return (j * nx) + i; }
 
 void assertTrue(bool condition, const std::string& message) {
     if (!condition) {
@@ -84,6 +86,55 @@ ParserConfig makeParserConfig() {
     config.verbose_warnings = false;
     config.protein_only = true;
     return config;
+}
+
+GeometryStage4RawSheetResult makeSyntheticStage4ResultForStage5() {
+    GeometryStage4RawSheetResult stage4;
+    stage4.success = true;
+    stage4.grid = buildStage4RegularGrid(2.0, 1.0);
+    stage4.node_count = stage4.grid.nx * stage4.grid.ny;
+    stage4.z_outer_raw.assign(stage4.node_count, std::numeric_limits<double>::quiet_NaN());
+    stage4.z_inner_raw.assign(stage4.node_count, std::numeric_limits<double>::quiet_NaN());
+    stage4.inside_disk_mask.assign(stage4.node_count, 0);
+    stage4.valid_mask.assign(stage4.node_count, 0);
+    stage4.outer_contact_serial_numbers.assign(stage4.node_count, 0);
+    stage4.inner_contact_serial_numbers.assign(stage4.node_count, 0);
+    stage4.candidate_patch_atom_counts.assign(stage4.node_count, 0);
+
+    const double radius2 = 4.0;
+    for (std::size_t j = 0; j < stage4.grid.ny; ++j) {
+        for (std::size_t i = 0; i < stage4.grid.nx; ++i) {
+            const std::size_t idx = nodeIndex(i, j, stage4.grid.nx);
+            const double x = stage4.grid.x_values[i];
+            const double y = stage4.grid.y_values[j];
+            if ((x * x) + (y * y) <= radius2 + 1e-12) {
+                stage4.inside_disk_mask[idx] = 1;
+                ++stage4.inside_disk_count;
+            }
+        }
+    }
+
+    auto markValid = [&](std::size_t i, std::size_t j, double z_outer, double z_inner, int outer_serial,
+                         int inner_serial) {
+        const std::size_t idx = nodeIndex(i, j, stage4.grid.nx);
+        stage4.valid_mask[idx] = 1;
+        stage4.z_outer_raw[idx] = z_outer;
+        stage4.z_inner_raw[idx] = z_inner;
+        stage4.outer_contact_serial_numbers[idx] = outer_serial;
+        stage4.inner_contact_serial_numbers[idx] = inner_serial;
+        ++stage4.valid_node_count;
+    };
+
+    markValid(2, 2, 8.0, 4.0, 101, 201);
+    markValid(1, 2, 8.1, 4.1, 102, 202);
+    markValid(3, 2, 8.2, 4.2, 103, 203);
+    markValid(2, 1, 8.3, 4.3, 104, 204);
+    markValid(2, 3, 8.4, 4.4, 105, 205);
+    markValid(1, 1, 8.5, 4.5, 101, 201);
+    markValid(3, 3, 8.6, 4.6, 103, 203);
+
+    stage4.invalid_node_count = stage4.inside_disk_count - stage4.valid_node_count;
+    return stage4;
 }
 
 void testCylinderClassifier() {
@@ -595,6 +646,189 @@ void testStage1ToStage4Integration() {
     std::filesystem::remove(result.stage4_raw.contact_atoms_pdb_path);
 }
 
+void testStage5RequiresSuccessfulStage4() {
+    GeometryStage4RawSheetResult stage4;
+    stage4.success = false;
+    FoldPatchAnalysisConfig config;
+    bool threw = false;
+    try {
+        (void)runGeometryAnalysisStage5SurfacePreparation(stage4, config, nullptr);
+    } catch (const std::runtime_error& e) {
+        threw = std::string(e.what()).find("before successful Stage 4") != std::string::npos;
+    }
+    assertTrue(threw, "Stage 5 should require successful Stage 4");
+}
+
+void testStage5SeedPromotionAndUniqueSerials() {
+    const GeometryStage4RawSheetResult stage4 = makeSyntheticStage4ResultForStage5();
+    FoldPatchAnalysisConfig config;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    const auto stage5 = runGeometryAnalysisStage5SurfacePreparation(stage4, config, nullptr);
+
+    assertTrue(stage5.success, "Stage 5 should succeed");
+    const std::size_t center = nodeIndex(2, 2, stage4.grid.nx);
+    assertTrue(stage5.paired_seed_mask[center] == 1, "valid Stage 4 node should be a paired seed");
+    assertTrue(near(stage5.z_outer_seed[center], stage4.z_outer_raw[center]),
+               "outer seed value should match Stage 4 raw value");
+    assertTrue(near(stage5.z_inner_seed[center], stage4.z_inner_raw[center]),
+               "inner seed value should match Stage 4 raw value");
+
+    const std::size_t invalid_idx = nodeIndex(0, 2, stage4.grid.nx);
+    assertTrue(stage5.paired_seed_mask[invalid_idx] == 0, "invalid Stage 4 node should not be a paired seed");
+    assertTrue(std::isnan(stage5.z_outer_seed[invalid_idx]), "invalid node outer seed should remain NaN");
+    assertTrue(std::isnan(stage5.z_inner_seed[invalid_idx]), "invalid node inner seed should remain NaN");
+
+    assertTrue(stage5.unique_outer_seed_atom_serials.size() == 5,
+               "outer seed serials should be unique and deduplicated");
+    assertTrue(stage5.unique_inner_seed_atom_serials.size() == 5,
+               "inner seed serials should be unique and deduplicated");
+    assertTrue(stage5.unique_outer_seed_atom_serials.front() == 101 &&
+                   stage5.unique_outer_seed_atom_serials.back() == 105,
+               "outer serial list should be sorted ascending");
+    assertTrue(stage5.unique_inner_seed_atom_serials.front() == 201 &&
+                   stage5.unique_inner_seed_atom_serials.back() == 205,
+               "inner serial list should be sorted ascending");
+}
+
+void testStage5BoundaryExclusionBehavior() {
+    const GeometryStage4RawSheetResult stage4 = makeSyntheticStage4ResultForStage5();
+    FoldPatchAnalysisConfig config;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    config.stage5_boundary_margin = 0.5;
+    const auto stage5 = runGeometryAnalysisStage5SurfacePreparation(stage4, config, nullptr);
+
+    const std::size_t edge = nodeIndex(2, 0, stage4.grid.nx); // x=0, y=-2, r=2
+    const std::size_t center = nodeIndex(2, 2, stage4.grid.nx); // r=0
+    assertTrue(stage5.boundary_exclusion_mask[edge] == 1, "node with r > R-boundary_margin should be excluded");
+    assertTrue(stage5.boundary_exclusion_mask[center] == 0, "center node should not be boundary-excluded");
+}
+
+void testStage5InterpolationAdmissibilityBehavior() {
+    GeometryStage4RawSheetResult stage4 = makeSyntheticStage4ResultForStage5();
+    FoldPatchAnalysisConfig config;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    config.stage5_boundary_margin = 0.1;
+    config.stage5_support_radius = 2.1;
+    config.stage5_min_support_nodes = 4;
+    const auto stage5 = runGeometryAnalysisStage5SurfacePreparation(stage4, config, nullptr);
+
+    const std::size_t fillable = nodeIndex(3, 1, stage4.grid.nx);
+    assertTrue(stage5.paired_seed_mask[fillable] == 0, "target node should be non-seed");
+    assertTrue(stage5.paired_interp_allowed_mask[fillable] == 1,
+               "supported interior non-seed node should be interpolation-allowed");
+    assertTrue(stage5.hard_invalid_mask[fillable] == 0, "supported node should not be hard-invalid");
+
+    const std::size_t unsupported = nodeIndex(0, 2, stage4.grid.nx);
+    assertTrue(stage5.paired_interp_allowed_mask[unsupported] == 0,
+               "unsupported non-seed node should not be interpolation-allowed");
+    assertTrue(stage5.hard_invalid_mask[unsupported] == 1, "unsupported node should be hard-invalid");
+}
+
+void testStage5ReliableCoreBehavior() {
+    const GeometryStage4RawSheetResult stage4 = makeSyntheticStage4ResultForStage5();
+    FoldPatchAnalysisConfig config;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    config.stage5_boundary_margin = 0.1;
+    config.stage5_support_radius = 1.5;
+    config.stage5_min_support_nodes = 4;
+    config.stage5_reliable_radius = 1.0;
+    const auto stage5 = runGeometryAnalysisStage5SurfacePreparation(stage4, config, nullptr);
+
+    const std::size_t center = nodeIndex(2, 2, stage4.grid.nx);
+    const std::size_t outer_ring = nodeIndex(2, 0, stage4.grid.nx);
+    const std::size_t hard_invalid = nodeIndex(0, 2, stage4.grid.nx);
+    assertTrue(stage5.reliable_core_mask[center] == 1, "center valid seed should be in reliable core");
+    assertTrue(stage5.reliable_core_mask[outer_ring] == 0, "node outside reliable radius should be excluded");
+    assertTrue(stage5.hard_invalid_mask[hard_invalid] == 1, "sanity: chosen node should be hard-invalid");
+    assertTrue(stage5.reliable_core_mask[hard_invalid] == 0, "hard-invalid node should not be reliable core");
+}
+
+void testStage5DebugCsvExportAndDeterminism() {
+    const GeometryStage4RawSheetResult stage4 = makeSyntheticStage4ResultForStage5();
+    FoldPatchAnalysisConfig config;
+    config.debug = true;
+    config.output_prefix = "stage5_debug";
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    config.stage5_support_radius = 1.5;
+    config.stage5_min_support_nodes = 4;
+
+    const auto first = runGeometryAnalysisStage5SurfacePreparation(stage4, config, nullptr);
+    assertTrue(std::filesystem::exists(first.outer_seed_csv_path), "outer seed csv should exist");
+    assertTrue(std::filesystem::exists(first.inner_seed_csv_path), "inner seed csv should exist");
+    assertTrue(std::filesystem::exists(first.paired_seed_mask_csv_path), "paired seed mask csv should exist");
+    assertTrue(std::filesystem::exists(first.boundary_exclusion_mask_csv_path),
+               "boundary exclusion mask csv should exist");
+    assertTrue(std::filesystem::exists(first.interp_allowed_mask_csv_path), "interp allowed mask csv should exist");
+    assertTrue(std::filesystem::exists(first.hard_invalid_mask_csv_path), "hard invalid mask csv should exist");
+    assertTrue(std::filesystem::exists(first.reliable_core_mask_csv_path), "reliable core mask csv should exist");
+    assertTrue(std::filesystem::exists(first.summary_csv_path), "summary csv should exist");
+
+    std::ifstream outer_seed(first.outer_seed_csv_path);
+    std::string header;
+    std::getline(outer_seed, header);
+    assertTrue(header == "i,j,x,y,inside_disk,raw_valid,paired_seed,z_outer_seed",
+               "outer seed csv header should match exactly");
+
+    std::ifstream f1(first.interp_allowed_mask_csv_path);
+    const std::string csv1((std::istreambuf_iterator<char>(f1)), std::istreambuf_iterator<char>());
+    const auto second = runGeometryAnalysisStage5SurfacePreparation(stage4, config, nullptr);
+    std::ifstream f2(second.interp_allowed_mask_csv_path);
+    const std::string csv2((std::istreambuf_iterator<char>(f2)), std::istreambuf_iterator<char>());
+    assertTrue(csv1 == csv2, "Stage 5 interpolation mask csv should be byte-stable across identical runs");
+
+    std::filesystem::remove(first.outer_seed_csv_path);
+    std::filesystem::remove(first.inner_seed_csv_path);
+    std::filesystem::remove(first.paired_seed_mask_csv_path);
+    std::filesystem::remove(first.boundary_exclusion_mask_csv_path);
+    std::filesystem::remove(first.interp_allowed_mask_csv_path);
+    std::filesystem::remove(first.hard_invalid_mask_csv_path);
+    std::filesystem::remove(first.reliable_core_mask_csv_path);
+    std::filesystem::remove(first.summary_csv_path);
+}
+
+void testStage1ToStage5Integration() {
+    Capsid capsid = makeSimpleCapsid();
+    FoldPatchAnalysisConfig config;
+    config.enabled = true;
+    config.fold_type = 2;
+    config.fold_index = 0;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    config.min_atoms_in_patch = 2;
+    config.debug = true;
+    config.output_prefix = "stage5_integration";
+
+    const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
+    assertTrue(result.success, "Stage 1-5 integration should succeed");
+    assertTrue(result.stage5_prep.success, "Stage 5 should succeed in full pipeline");
+    assertTrue(result.stage5_prep.paired_seed_node_count > 0, "Stage 5 should contain paired seed nodes");
+    assertTrue(result.stage5_prep.reliable_core_node_count > 0, "Stage 5 should contain reliable-core nodes");
+    assertTrue(std::filesystem::exists(result.stage5_prep.summary_csv_path), "Stage 5 summary csv should exist");
+
+    std::filesystem::remove(result.stage2_patch.export_path);
+    std::filesystem::remove(result.stage4_raw.outer_csv_path);
+    std::filesystem::remove(result.stage4_raw.inner_csv_path);
+    std::filesystem::remove(result.stage4_raw.valid_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.outer_only_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.inner_only_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.negative_thickness_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.summary_csv_path);
+    std::filesystem::remove(result.stage4_raw.contact_atoms_pdb_path);
+    std::filesystem::remove(result.stage5_prep.outer_seed_csv_path);
+    std::filesystem::remove(result.stage5_prep.inner_seed_csv_path);
+    std::filesystem::remove(result.stage5_prep.paired_seed_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.boundary_exclusion_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.interp_allowed_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.hard_invalid_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.reliable_core_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.summary_csv_path);
+}
+
 } // namespace
 
 int main() {
@@ -617,7 +851,14 @@ int main() {
         testStage4RoleClassificationAndCsvAndPdb();
         testStage4DeterministicOutputs();
         testStage1ToStage4Integration();
-        std::cout << "All geometry analysis Stage 1/2/3/4 tests passed.\n";
+        testStage5RequiresSuccessfulStage4();
+        testStage5SeedPromotionAndUniqueSerials();
+        testStage5BoundaryExclusionBehavior();
+        testStage5InterpolationAdmissibilityBehavior();
+        testStage5ReliableCoreBehavior();
+        testStage5DebugCsvExportAndDeterminism();
+        testStage1ToStage5Integration();
+        std::cout << "All geometry analysis Stage 1/2/3/4/5 tests passed.\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Geometry analysis test failure: " << e.what() << '\n';
