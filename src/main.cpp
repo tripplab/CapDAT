@@ -40,6 +40,10 @@ void printHelp(const std::string& program_name) {
         << "      --dvdW <A>  Delta added to all assigned vdW radii in angstroms (default: 0.0)\n"
         << "      --geometry_grid_spacing <A>  Geometry Stage 4 XY grid spacing in angstroms (default: 2.0)\n"
         << "      --geometry_min_atoms_in_patch <n>  Minimum selected atoms required (default: 20)\n"
+        << "      --geometry_boundary_margin <A>  Stage 5 boundary exclusion margin (default: auto)\n"
+        << "      --geometry_support_radius <A>  Stage 5 interpolation support radius (default: auto)\n"
+        << "      --geometry_min_support_nodes <n>  Stage 5 minimum nearby support seeds (default: 4)\n"
+        << "      --geometry_reliable_radius <A>  Stage 5 reliable core radius (default: auto)\n"
         << "      --geometry_out_prefix <path>  Prefix for geometry analysis outputs (default: geometry)\n"
         << "      --quiet             Reduce terminal output\n"
         << "  -h, --help              Show this help message\n"
@@ -99,6 +103,10 @@ int main(int argc, char* argv[]) {
     double delta_vdw = 0.0;
     double geometry_grid_spacing = 2.0;
     std::size_t geometry_min_atoms_in_patch = 20;
+    double geometry_boundary_margin = 0.0;
+    double geometry_support_radius = 0.0;
+    std::size_t geometry_min_support_nodes = 4;
+    double geometry_reliable_radius = 0.0;
     std::string geometry_output_prefix = "geometry";
 
     const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
@@ -245,6 +253,38 @@ int main(int argc, char* argv[]) {
             geometry_min_atoms_in_patch = static_cast<std::size_t>(std::stoul(argv[++i]));
             continue;
         }
+        if (arg == "--geometry_boundary_margin") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_boundary_margin\n";
+                return 1;
+            }
+            geometry_boundary_margin = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_support_radius") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_support_radius\n";
+                return 1;
+            }
+            geometry_support_radius = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_min_support_nodes") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_min_support_nodes\n";
+                return 1;
+            }
+            geometry_min_support_nodes = static_cast<std::size_t>(std::stoul(argv[++i]));
+            continue;
+        }
+        if (arg == "--geometry_reliable_radius") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_reliable_radius\n";
+                return 1;
+            }
+            geometry_reliable_radius = std::stod(argv[++i]);
+            continue;
+        }
         if (arg == "--geometry_out_prefix") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: missing value for --geometry_out_prefix\n";
@@ -344,13 +384,17 @@ int main(int argc, char* argv[]) {
         geometry_config.delta_vdw = delta_vdw;
         geometry_config.grid_spacing = geometry_grid_spacing;
         geometry_config.min_atoms_in_patch = geometry_min_atoms_in_patch;
+        geometry_config.stage5_boundary_margin = geometry_boundary_margin;
+        geometry_config.stage5_support_radius = geometry_support_radius;
+        geometry_config.stage5_min_support_nodes = geometry_min_support_nodes;
+        geometry_config.stage5_reliable_radius = geometry_reliable_radius;
         geometry_config.export_rotated_capsid = debug;
         geometry_config.output_prefix = geometry_output_prefix;
 
         const GeometryAnalysisResult geometry_result =
             runFoldPatchGeometryAnalysis(capsid, geometry_config, config, &logger);
         if (!geometry_result.success) {
-            throw std::runtime_error("Geometry analysis failed in Stage 1/2/3/4 pipeline");
+            throw std::runtime_error("Geometry analysis failed in Stage 1/2/3/4/5 pipeline");
         }
 
         if (!export_final_output_path.empty()) {

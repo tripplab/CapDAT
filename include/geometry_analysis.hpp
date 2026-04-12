@@ -44,6 +44,10 @@ struct FoldPatchAnalysisConfig {
     double delta_vdw = 0.0;
     double grid_spacing = 2.0;
     std::size_t min_atoms_in_patch = 20;
+    double stage5_boundary_margin = 0.0;
+    double stage5_support_radius = 0.0;
+    std::size_t stage5_min_support_nodes = 4;
+    double stage5_reliable_radius = 0.0;
     bool export_rotated_capsid = false;
     std::string output_prefix = "geometry";
 };
@@ -178,12 +182,71 @@ struct GeometryStage4RawSheetResult {
     std::vector<std::string> messages;
 };
 
+struct GeometryStage5SurfacePrepResult {
+    bool success = false;
+
+    Stage4GridDescriptor grid;
+
+    std::vector<double> z_outer_seed;
+    std::vector<double> z_inner_seed;
+
+    std::vector<uint8_t> inside_disk_mask;
+    std::vector<uint8_t> raw_valid_mask;
+
+    std::vector<uint8_t> outer_seed_mask;
+    std::vector<uint8_t> inner_seed_mask;
+    std::vector<uint8_t> paired_seed_mask;
+
+    std::vector<uint8_t> boundary_exclusion_mask;
+    std::vector<uint8_t> interp_allowed_outer_mask;
+    std::vector<uint8_t> interp_allowed_inner_mask;
+    std::vector<uint8_t> paired_interp_allowed_mask;
+    std::vector<uint8_t> hard_invalid_mask;
+    std::vector<uint8_t> reliable_core_mask;
+
+    std::vector<int> outer_contact_serial_numbers;
+    std::vector<int> inner_contact_serial_numbers;
+
+    std::vector<int> unique_outer_seed_atom_serials;
+    std::vector<int> unique_inner_seed_atom_serials;
+
+    std::size_t node_count = 0;
+    std::size_t inside_disk_count = 0;
+    std::size_t raw_valid_node_count = 0;
+    std::size_t raw_invalid_node_count = 0;
+    std::size_t outer_seed_node_count = 0;
+    std::size_t inner_seed_node_count = 0;
+    std::size_t paired_seed_node_count = 0;
+    std::size_t boundary_excluded_node_count = 0;
+    std::size_t interp_allowed_outer_node_count = 0;
+    std::size_t interp_allowed_inner_node_count = 0;
+    std::size_t paired_interp_allowed_node_count = 0;
+    std::size_t hard_invalid_node_count = 0;
+    std::size_t reliable_core_node_count = 0;
+
+    double boundary_margin = 0.0;
+    double support_radius = 0.0;
+    double reliable_radius = 0.0;
+
+    std::string outer_seed_csv_path;
+    std::string inner_seed_csv_path;
+    std::string paired_seed_mask_csv_path;
+    std::string boundary_exclusion_mask_csv_path;
+    std::string interp_allowed_mask_csv_path;
+    std::string hard_invalid_mask_csv_path;
+    std::string reliable_core_mask_csv_path;
+    std::string summary_csv_path;
+
+    std::vector<std::string> messages;
+};
+
 struct GeometryAnalysisResult {
     bool success = false;
     GeometryPreparationResult preparation;
     GeometryPatchSelectionResult stage2_patch;
     GeometryPatchNormalizationResult stage3_patch;
     GeometryStage4RawSheetResult stage4_raw;
+    GeometryStage5SurfacePrepResult stage5_prep;
     std::vector<std::string> messages;
 };
 
@@ -233,6 +296,12 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     const FoldPatchAnalysisConfig& config,
     const ParserConfig& parser_config,
     const GeometryPatchNormalizationResult& stage3_result,
+    Logger* logger,
+    double tolerance = 1e-12);
+
+GeometryStage5SurfacePrepResult runGeometryAnalysisStage5SurfacePreparation(
+    const GeometryStage4RawSheetResult& stage4_result,
+    const FoldPatchAnalysisConfig& config,
     Logger* logger,
     double tolerance = 1e-12);
 

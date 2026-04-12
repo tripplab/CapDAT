@@ -8,6 +8,7 @@
 #include <chrono>
 #include <fstream>
 #include <iomanip>
+#include <algorithm>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -231,6 +232,77 @@ bool writeStage4SummaryCsv(const GeometryStage4RawSheetResult& result) {
         << result.negative_thickness_node_count << ',' << result.unique_outer_contact_atom_count << ','
         << result.unique_inner_contact_atom_count << ',' << result.unique_both_contact_atom_count << ','
         << result.unique_contact_atom_count << ',' << result.stage4_runtime_seconds << '\n';
+    return out.good();
+}
+
+double stage5NodeRadius(const Stage4GridDescriptor& grid, std::size_t i, std::size_t j) {
+    const double x = grid.x_values[i];
+    const double y = grid.y_values[j];
+    return std::sqrt((x * x) + (y * y));
+}
+
+bool writeStage5SeedCsv(const GeometryStage5SurfacePrepResult& result,
+                        const std::string& path,
+                        const char* value_header_name,
+                        const std::vector<double>& values) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,inside_disk,raw_valid,paired_seed," << value_header_name << "\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.inside_disk_mask[idx]) << ',' << static_cast<int>(result.raw_valid_mask[idx])
+                << ',' << static_cast<int>(result.paired_seed_mask[idx]) << ',';
+            if (result.paired_seed_mask[idx] != 0) {
+                out << values[idx];
+            } else {
+                out << "nan";
+            }
+            out << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage5MaskCsv(const GeometryStage5SurfacePrepResult& result,
+                        const std::string& path,
+                        const char* mask_header_name,
+                        const std::vector<uint8_t>& mask) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,inside_disk," << mask_header_name << "\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.inside_disk_mask[idx]) << ',' << static_cast<int>(mask[idx]) << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage5SummaryCsv(const GeometryStage5SurfacePrepResult& result) {
+    std::ofstream out(result.summary_csv_path);
+    if (!out) {
+        return false;
+    }
+    out << "boundary_margin,support_radius,reliable_radius,total_nodes,inside_disk_nodes,raw_valid_nodes,"
+           "raw_invalid_nodes,outer_seed_nodes,inner_seed_nodes,paired_seed_nodes,boundary_excluded_nodes,"
+           "interp_allowed_outer_nodes,interp_allowed_inner_nodes,paired_interp_allowed_nodes,hard_invalid_nodes,"
+           "reliable_core_nodes,unique_outer_seed_atoms,unique_inner_seed_atoms\n";
+    out << result.boundary_margin << ',' << result.support_radius << ',' << result.reliable_radius << ','
+        << result.node_count << ',' << result.inside_disk_count << ',' << result.raw_valid_node_count << ','
+        << result.raw_invalid_node_count << ',' << result.outer_seed_node_count << ',' << result.inner_seed_node_count
+        << ',' << result.paired_seed_node_count << ',' << result.boundary_excluded_node_count << ','
+        << result.interp_allowed_outer_node_count << ',' << result.interp_allowed_inner_node_count << ','
+        << result.paired_interp_allowed_node_count << ',' << result.hard_invalid_node_count << ','
+        << result.reliable_core_node_count << ',' << result.unique_outer_seed_atom_serials.size() << ','
+        << result.unique_inner_seed_atom_serials.size() << '\n';
     return out.good();
 }
 
@@ -1031,6 +1103,277 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     return result;
 }
 
+GeometryStage5SurfacePrepResult runGeometryAnalysisStage5SurfacePreparation(
+    const GeometryStage4RawSheetResult& stage4_result,
+    const FoldPatchAnalysisConfig& config,
+    Logger* logger,
+    double tolerance) {
+    GeometryStage5SurfacePrepResult result;
+    if (!stage4_result.success) {
+        throw std::runtime_error("Stage 5 cannot run before successful Stage 4 raw sheet detection");
+    }
+    if (stage4_result.grid.nx == 0 || stage4_result.grid.ny == 0) {
+        throw std::runtime_error("Stage 5 requires a non-empty Stage 4 grid");
+    }
+    if (stage4_result.node_count == 0) {
+        throw std::runtime_error("Stage 5 requires Stage 4 node_count > 0");
+    }
+    if (stage4_result.inside_disk_count == 0) {
+        throw std::runtime_error("Stage 5 requires Stage 4 inside-disk node_count > 0");
+    }
+    if (stage4_result.valid_node_count == 0) {
+        throw std::runtime_error("Stage 5 requires Stage 4 valid_node_count > 0");
+    }
+
+    result.messages.push_back("Geometry Stage 5");
+    result.messages.push_back("Geometry analysis: starting Stage 5 surface preparation.");
+
+    result.grid = stage4_result.grid;
+    result.node_count = stage4_result.node_count;
+    result.inside_disk_mask = stage4_result.inside_disk_mask;
+    result.raw_valid_mask = stage4_result.valid_mask;
+    result.outer_contact_serial_numbers = stage4_result.outer_contact_serial_numbers;
+    result.inner_contact_serial_numbers = stage4_result.inner_contact_serial_numbers;
+    result.inside_disk_count = stage4_result.inside_disk_count;
+    result.raw_valid_node_count = stage4_result.valid_node_count;
+    result.raw_invalid_node_count = result.inside_disk_count - result.raw_valid_node_count;
+
+    result.z_outer_seed.assign(result.node_count, std::numeric_limits<double>::quiet_NaN());
+    result.z_inner_seed.assign(result.node_count, std::numeric_limits<double>::quiet_NaN());
+    result.outer_seed_mask.assign(result.node_count, 0);
+    result.inner_seed_mask.assign(result.node_count, 0);
+    result.paired_seed_mask.assign(result.node_count, 0);
+    result.boundary_exclusion_mask.assign(result.node_count, 0);
+    result.interp_allowed_outer_mask.assign(result.node_count, 0);
+    result.interp_allowed_inner_mask.assign(result.node_count, 0);
+    result.paired_interp_allowed_mask.assign(result.node_count, 0);
+    result.hard_invalid_mask.assign(result.node_count, 0);
+    result.reliable_core_mask.assign(result.node_count, 0);
+
+    const double derived_boundary_margin =
+        config.stage5_boundary_margin > 0.0 ? config.stage5_boundary_margin : (2.0 * result.grid.spacing);
+    const double derived_support_radius =
+        config.stage5_support_radius > 0.0 ? config.stage5_support_radius : (2.5 * result.grid.spacing);
+    const double derived_reliable_radius =
+        config.stage5_reliable_radius > 0.0
+            ? config.stage5_reliable_radius
+            : std::max(0.0, config.cylinder_radius - derived_boundary_margin);
+
+    if (derived_boundary_margin < 0.0) {
+        throw std::runtime_error("Stage 5 requires boundary_margin >= 0");
+    }
+    if (derived_support_radius <= 0.0) {
+        throw std::runtime_error("Stage 5 requires support_radius > 0");
+    }
+    if (derived_reliable_radius < 0.0) {
+        throw std::runtime_error("Stage 5 requires reliable_radius >= 0");
+    }
+    if (config.stage5_min_support_nodes == 0) {
+        throw std::runtime_error("Stage 5 requires stage5_min_support_nodes > 0");
+    }
+
+    result.boundary_margin = derived_boundary_margin;
+    result.support_radius = derived_support_radius;
+    result.reliable_radius = std::min(config.cylinder_radius, derived_reliable_radius);
+
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            if (result.inside_disk_mask[idx] == 0) {
+                continue;
+            }
+            if (result.raw_valid_mask[idx] == 0) {
+                continue;
+            }
+            result.z_outer_seed[idx] = stage4_result.z_outer_raw[idx];
+            result.z_inner_seed[idx] = stage4_result.z_inner_raw[idx];
+            result.outer_seed_mask[idx] = 1;
+            result.inner_seed_mask[idx] = 1;
+            result.paired_seed_mask[idx] = 1;
+            ++result.outer_seed_node_count;
+            ++result.inner_seed_node_count;
+            ++result.paired_seed_node_count;
+        }
+    }
+
+    const double boundary_limit = config.cylinder_radius - result.boundary_margin;
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            if (result.inside_disk_mask[idx] == 0) {
+                continue;
+            }
+            const double radial = stage5NodeRadius(result.grid, i, j);
+            if (radial > boundary_limit + tolerance) {
+                result.boundary_exclusion_mask[idx] = 1;
+                ++result.boundary_excluded_node_count;
+            }
+        }
+    }
+
+    for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+        if (result.paired_seed_mask[idx] == 0) {
+            continue;
+        }
+        if (result.outer_contact_serial_numbers[idx] > 0) {
+            result.unique_outer_seed_atom_serials.push_back(result.outer_contact_serial_numbers[idx]);
+        }
+        if (result.inner_contact_serial_numbers[idx] > 0) {
+            result.unique_inner_seed_atom_serials.push_back(result.inner_contact_serial_numbers[idx]);
+        }
+    }
+    std::sort(result.unique_outer_seed_atom_serials.begin(), result.unique_outer_seed_atom_serials.end());
+    result.unique_outer_seed_atom_serials.erase(
+        std::unique(result.unique_outer_seed_atom_serials.begin(), result.unique_outer_seed_atom_serials.end()),
+        result.unique_outer_seed_atom_serials.end());
+    std::sort(result.unique_inner_seed_atom_serials.begin(), result.unique_inner_seed_atom_serials.end());
+    result.unique_inner_seed_atom_serials.erase(
+        std::unique(result.unique_inner_seed_atom_serials.begin(), result.unique_inner_seed_atom_serials.end()),
+        result.unique_inner_seed_atom_serials.end());
+
+    const double support_radius2 = result.support_radius * result.support_radius;
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            if (result.inside_disk_mask[idx] == 0 || result.paired_seed_mask[idx] != 0) {
+                continue;
+            }
+            if (result.boundary_exclusion_mask[idx] != 0) {
+                result.hard_invalid_mask[idx] = 1;
+                ++result.hard_invalid_node_count;
+                continue;
+            }
+
+            std::size_t paired_neighbors = 0;
+            std::size_t outer_neighbors = 0;
+            std::size_t inner_neighbors = 0;
+            const double x0 = result.grid.x_values[i];
+            const double y0 = result.grid.y_values[j];
+            for (std::size_t nj = 0; nj < result.grid.ny; ++nj) {
+                const double dy = result.grid.y_values[nj] - y0;
+                for (std::size_t ni = 0; ni < result.grid.nx; ++ni) {
+                    const double dx = result.grid.x_values[ni] - x0;
+                    const double d2 = (dx * dx) + (dy * dy);
+                    if (d2 > support_radius2 + tolerance) {
+                        continue;
+                    }
+                    const std::size_t nidx = stage4NodeIndex(ni, nj, result.grid.nx);
+                    if (result.paired_seed_mask[nidx] != 0) {
+                        ++paired_neighbors;
+                    }
+                    if (result.outer_seed_mask[nidx] != 0) {
+                        ++outer_neighbors;
+                    }
+                    if (result.inner_seed_mask[nidx] != 0) {
+                        ++inner_neighbors;
+                    }
+                }
+            }
+
+            const bool allowed = paired_neighbors >= config.stage5_min_support_nodes &&
+                                 outer_neighbors >= config.stage5_min_support_nodes &&
+                                 inner_neighbors >= config.stage5_min_support_nodes;
+            if (allowed) {
+                result.interp_allowed_outer_mask[idx] = 1;
+                result.interp_allowed_inner_mask[idx] = 1;
+                result.paired_interp_allowed_mask[idx] = 1;
+                ++result.interp_allowed_outer_node_count;
+                ++result.interp_allowed_inner_node_count;
+                ++result.paired_interp_allowed_node_count;
+            } else {
+                result.hard_invalid_mask[idx] = 1;
+                ++result.hard_invalid_node_count;
+            }
+        }
+    }
+
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            if (result.inside_disk_mask[idx] == 0 || result.hard_invalid_mask[idx] != 0) {
+                continue;
+            }
+            const double radial = stage5NodeRadius(result.grid, i, j);
+            if (radial <= result.reliable_radius + tolerance) {
+                result.reliable_core_mask[idx] = 1;
+                ++result.reliable_core_node_count;
+            }
+        }
+    }
+
+    if (config.debug) {
+        result.outer_seed_csv_path = config.output_prefix + "_outer_seed.csv";
+        result.inner_seed_csv_path = config.output_prefix + "_inner_seed.csv";
+        result.paired_seed_mask_csv_path = config.output_prefix + "_paired_seed_mask.csv";
+        result.boundary_exclusion_mask_csv_path = config.output_prefix + "_boundary_exclusion_mask.csv";
+        result.interp_allowed_mask_csv_path = config.output_prefix + "_interp_allowed_mask.csv";
+        result.hard_invalid_mask_csv_path = config.output_prefix + "_hard_invalid_mask.csv";
+        result.reliable_core_mask_csv_path = config.output_prefix + "_reliable_core_mask.csv";
+        result.summary_csv_path = config.output_prefix + "_stage5_summary.csv";
+
+        if (!writeStage5SeedCsv(result, result.outer_seed_csv_path, "z_outer_seed", result.z_outer_seed)) {
+            throw std::runtime_error("Failed to write Stage 5 outer seed CSV");
+        }
+        if (!writeStage5SeedCsv(result, result.inner_seed_csv_path, "z_inner_seed", result.z_inner_seed)) {
+            throw std::runtime_error("Failed to write Stage 5 inner seed CSV");
+        }
+        if (!writeStage5MaskCsv(result, result.paired_seed_mask_csv_path, "paired_seed", result.paired_seed_mask)) {
+            throw std::runtime_error("Failed to write Stage 5 paired-seed mask CSV");
+        }
+        if (!writeStage5MaskCsv(
+                result, result.boundary_exclusion_mask_csv_path, "boundary_excluded", result.boundary_exclusion_mask)) {
+            throw std::runtime_error("Failed to write Stage 5 boundary-exclusion mask CSV");
+        }
+        if (!writeStage5MaskCsv(
+                result, result.interp_allowed_mask_csv_path, "paired_interp_allowed", result.paired_interp_allowed_mask)) {
+            throw std::runtime_error("Failed to write Stage 5 interpolation-allowed mask CSV");
+        }
+        if (!writeStage5MaskCsv(result, result.hard_invalid_mask_csv_path, "hard_invalid", result.hard_invalid_mask)) {
+            throw std::runtime_error("Failed to write Stage 5 hard-invalid mask CSV");
+        }
+        if (!writeStage5MaskCsv(result, result.reliable_core_mask_csv_path, "reliable_core", result.reliable_core_mask)) {
+            throw std::runtime_error("Failed to write Stage 5 reliable-core mask CSV");
+        }
+        if (!writeStage5SummaryCsv(result)) {
+            throw std::runtime_error("Failed to write Stage 5 summary CSV");
+        }
+    }
+
+    result.messages.push_back("Geometry Stage 5 boundary margin: " + std::to_string(result.boundary_margin));
+    result.messages.push_back("Geometry Stage 5 support radius: " + std::to_string(result.support_radius));
+    result.messages.push_back("Geometry Stage 5 reliable radius: " + std::to_string(result.reliable_radius));
+    result.messages.push_back("Geometry Stage 5 raw valid nodes: " + std::to_string(result.raw_valid_node_count));
+    result.messages.push_back("Geometry Stage 5 paired seed nodes: " + std::to_string(result.paired_seed_node_count));
+    result.messages.push_back("Geometry Stage 5 boundary-excluded nodes: " +
+                              std::to_string(result.boundary_excluded_node_count));
+    result.messages.push_back("Geometry Stage 5 interpolation-allowed nodes: " +
+                              std::to_string(result.paired_interp_allowed_node_count));
+    result.messages.push_back("Geometry Stage 5 hard-invalid nodes: " + std::to_string(result.hard_invalid_node_count));
+    result.messages.push_back("Geometry Stage 5 reliable core nodes: " +
+                              std::to_string(result.reliable_core_node_count));
+    result.messages.push_back("Geometry Stage 5 unique outer seed atoms: " +
+                              std::to_string(result.unique_outer_seed_atom_serials.size()));
+    result.messages.push_back("Geometry Stage 5 unique inner seed atoms: " +
+                              std::to_string(result.unique_inner_seed_atom_serials.size()));
+    if (config.debug) {
+        result.messages.push_back("Geometry Stage 5 outer seed CSV: " + result.outer_seed_csv_path);
+        result.messages.push_back("Geometry Stage 5 inner seed CSV: " + result.inner_seed_csv_path);
+        result.messages.push_back("Geometry Stage 5 paired-seed mask CSV: " + result.paired_seed_mask_csv_path);
+        result.messages.push_back("Geometry Stage 5 boundary-exclusion mask CSV: " +
+                                  result.boundary_exclusion_mask_csv_path);
+        result.messages.push_back("Geometry Stage 5 interpolation-allowed mask CSV: " +
+                                  result.interp_allowed_mask_csv_path);
+        result.messages.push_back("Geometry Stage 5 hard-invalid mask CSV: " + result.hard_invalid_mask_csv_path);
+        result.messages.push_back("Geometry Stage 5 reliable-core mask CSV: " + result.reliable_core_mask_csv_path);
+        result.messages.push_back("Geometry Stage 5 summary CSV: " + result.summary_csv_path);
+    }
+    result.messages.push_back("Geometry analysis: completed Stage 5 surface preparation.");
+
+    result.success = true;
+    logMessages(result.messages, logger);
+    return result;
+}
+
 GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                                                     const FoldPatchAnalysisConfig& config,
                                                     const ParserConfig& parser_config,
@@ -1049,8 +1392,9 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
     result.stage3_patch = runGeometryAnalysisStage3PatchNormalization(result.stage2_patch, config, logger);
     result.stage4_raw =
         runGeometryAnalysisStage4RawSheetDetection(capsid, config, parser_config, result.stage3_patch, logger);
+    result.stage5_prep = runGeometryAnalysisStage5SurfacePreparation(result.stage4_raw, config, logger);
     result.success = result.preparation.success && result.stage2_patch.success && result.stage3_patch.success &&
-                     result.stage4_raw.success;
+                     result.stage4_raw.success && result.stage5_prep.success;
     logMessages(result.messages, logger);
 
     return result;
