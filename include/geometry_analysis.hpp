@@ -40,6 +40,7 @@ struct FoldPatchAnalysisConfig {
     int fold_type = 2;
     int fold_index = 0;
     double cylinder_radius = 12.0;
+    double delta_vdw = 0.0;
     double grid_spacing = 2.0;
     std::size_t min_atoms_in_patch = 20;
     bool export_rotated_capsid = false;
@@ -191,7 +192,8 @@ std::string normalizeElementSymbol(const std::string& raw_element);
 double vdwRadius(const std::string& normalized_element);
 PatchAtom makePatchAtom(const Atom& atom,
                         const geometry_symmetry::Vector3& rotated_position,
-                        const CylinderMembership& membership);
+                        const CylinderMembership& membership,
+                        double delta_vdw);
 
 LineSphereIntersection intersectVerticalLineWithSphere(double x,
                                                        double y,
@@ -222,6 +224,7 @@ GeometryPatchSelectionResult runGeometryAnalysisStage2PatchSelection(
 
 GeometryPatchNormalizationResult runGeometryAnalysisStage3PatchNormalization(
     const GeometryPatchSelectionResult& stage2_result,
+    const FoldPatchAnalysisConfig& config,
     Logger* logger);
 
 GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
