@@ -3,9 +3,13 @@
 #include "export_capsid.hpp"
 
 #include <cmath>
+#include <cctype>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace {
+
+constexpr double kVdwRadiusFallbackAngstrom = 1.70;
 
 void logMessages(const std::vector<std::string>& messages, Logger* logger) {
     if (logger == nullptr) {
@@ -44,6 +48,33 @@ void validateStage2Config(const FoldPatchAnalysisConfig& config) {
     }
 }
 
+std::string trimWhitespace(const std::string& text) {
+    std::size_t start = 0;
+    while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start])) != 0) {
+        ++start;
+    }
+
+    std::size_t end = text.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(text[end - 1])) != 0) {
+        --end;
+    }
+
+    return text.substr(start, end - start);
+}
+
+const std::unordered_map<std::string, double>& vdwRadiusLookupTable() {
+    static const std::unordered_map<std::string, double> table = {
+        {"H", 1.20},
+        {"C", 1.70},
+        {"N", 1.55},
+        {"O", 1.52},
+        {"S", 1.80},
+        {"P", 1.80},
+        {"SE", 1.90},
+    };
+    return table;
+}
+
 } // namespace
 
 CylinderMembership classifyPatchCylinder(const geometry_symmetry::Vector3& position, double cylinder_radius) {
@@ -57,6 +88,51 @@ CylinderMembership classifyPatchCylinder(const geometry_symmetry::Vector3& posit
     membership.in_cylinder_radius = in_cylinder_radius;
     membership.selected = in_positive_z && in_cylinder_radius;
     return membership;
+}
+
+std::string normalizeElementSymbol(const std::string& raw_element) {
+    const std::string trimmed = trimWhitespace(raw_element);
+    if (trimmed.empty()) {
+        return "";
+    }
+
+    std::string normalized;
+    normalized.reserve(trimmed.size());
+    for (const char ch : trimmed) {
+        if (std::isalpha(static_cast<unsigned char>(ch)) == 0) {
+            continue;
+        }
+        normalized.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
+        if (normalized.size() == 2) {
+            break;
+        }
+    }
+    return normalized;
+}
+
+double vdwRadius(const std::string& normalized_element) {
+    const auto& table = vdwRadiusLookupTable();
+    const auto it = table.find(normalized_element);
+    if (it != table.end()) {
+        return it->second;
+    }
+    // Stage 3 analytical fallback: unknown/unsupported elements map to 1.70 Å.
+    return kVdwRadiusFallbackAngstrom;
+}
+
+PatchAtom makePatchAtom(const Atom& atom,
+                        const geometry_symmetry::Vector3& rotated_position,
+                        const CylinderMembership& membership) {
+    PatchAtom patch_atom;
+    patch_atom.position = rotated_position;
+    patch_atom.element = normalizeElementSymbol(atom.element());
+    patch_atom.vdw_radius = vdwRadius(patch_atom.element);
+    patch_atom.membership = membership;
+    patch_atom.radial_xy = membership.radial_xy;
+    patch_atom.in_positive_z = membership.in_positive_z;
+    patch_atom.in_cylinder_radius = membership.in_cylinder_radius;
+    patch_atom.original_atom = &atom;
+    return patch_atom;
 }
 
 GeometryPreparationResult prepareGeometryAnalysisStage1(Capsid& capsid,
@@ -171,14 +247,7 @@ GeometryPatchSelectionResult runGeometryAnalysisStage2PatchSelection(
                     continue;
                 }
 
-                PatchAtom patch_atom;
-                patch_atom.position = position;
-                patch_atom.element = atom.element();
-                patch_atom.radial_xy = membership.radial_xy;
-                patch_atom.in_positive_z = membership.in_positive_z;
-                patch_atom.in_cylinder_radius = membership.in_cylinder_radius;
-                patch_atom.original_atom = &atom;
-                result.patch_atoms.push_back(patch_atom);
+                result.patch_atoms.push_back(makePatchAtom(atom, position, membership));
                 result.selected_atom_refs.push_back(&atom);
             }
         }
@@ -220,6 +289,66 @@ GeometryPatchSelectionResult runGeometryAnalysisStage2PatchSelection(
     return result;
 }
 
+GeometryPatchNormalizationResult runGeometryAnalysisStage3PatchNormalization(
+    const GeometryPatchSelectionResult& stage2_result,
+    Logger* logger) {
+    GeometryPatchNormalizationResult result;
+    result.analytical_patch.cylinder_radius = stage2_result.cylinder_radius;
+    result.analytical_patch.export_path = stage2_result.export_path;
+
+    if (!stage2_result.success) {
+        throw std::runtime_error("Stage 3 cannot run before successful Stage 2 patch selection");
+    }
+    if (stage2_result.patch_atoms.size() != stage2_result.selected_atom_refs.size()) {
+        throw std::runtime_error("Analytical patch build produced inconsistent atom/reference counts");
+    }
+
+    result.messages.push_back("Geometry Stage 3");
+    result.messages.push_back("Geometry analysis: starting Stage 3 analytical patch normalization.");
+    result.messages.push_back("Geometry Stage 3 selected atoms to normalize: " +
+                              std::to_string(stage2_result.patch_atoms.size()));
+
+    result.analytical_patch.atoms.reserve(stage2_result.patch_atoms.size());
+    result.analytical_patch.original_atom_refs.reserve(stage2_result.selected_atom_refs.size());
+
+    for (std::size_t idx = 0; idx < stage2_result.patch_atoms.size(); ++idx) {
+        const PatchAtom& selected = stage2_result.patch_atoms[idx];
+        const Atom* original_ref = stage2_result.selected_atom_refs[idx];
+        if (original_ref == nullptr || selected.original_atom == nullptr || selected.original_atom != original_ref) {
+            throw std::runtime_error("PatchAtom normalization encountered a null original atom reference");
+        }
+
+        const PatchAtom normalized = makePatchAtom(*original_ref, selected.position, selected.membership);
+        if (vdwRadiusLookupTable().find(normalized.element) == vdwRadiusLookupTable().end()) {
+            ++result.analytical_patch.fallback_vdw_radius_count;
+        } else {
+            ++result.analytical_patch.explicit_vdw_radius_count;
+        }
+
+        result.analytical_patch.atoms.push_back(normalized);
+        result.analytical_patch.original_atom_refs.push_back(original_ref);
+    }
+
+    result.analytical_patch.atom_count = result.analytical_patch.atoms.size();
+    if (result.analytical_patch.atom_count != result.analytical_patch.original_atom_refs.size()) {
+        throw std::runtime_error("Analytical patch build produced inconsistent atom/reference counts");
+    }
+    if (result.analytical_patch.atom_count == 0) {
+        throw std::runtime_error("Analytical patch is empty after Stage 3 normalization");
+    }
+
+    result.messages.push_back("Geometry Stage 3 explicit element vdW assignments: " +
+                              std::to_string(result.analytical_patch.explicit_vdw_radius_count));
+    result.messages.push_back("Geometry Stage 3 fallback vdW assignments: " +
+                              std::to_string(result.analytical_patch.fallback_vdw_radius_count));
+    result.messages.push_back("Geometry Stage 3 patch export path (Stage 2 canonical): " +
+                              result.analytical_patch.export_path);
+    result.messages.push_back("Geometry analysis: completed Stage 3 analytical patch normalization.");
+    result.success = true;
+    logMessages(result.messages, logger);
+    return result;
+}
+
 GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                                                     const FoldPatchAnalysisConfig& config,
                                                     const ParserConfig& parser_config,
@@ -235,7 +364,8 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
     result.preparation = prepareGeometryAnalysisStage1(capsid, config, parser_config, logger, tolerance);
     result.stage2_patch =
         runGeometryAnalysisStage2PatchSelection(capsid, config, parser_config, result.preparation, logger);
-    result.success = result.preparation.success && result.stage2_patch.success;
+    result.stage3_patch = runGeometryAnalysisStage3PatchNormalization(result.stage2_patch, logger);
+    result.success = result.preparation.success && result.stage2_patch.success && result.stage3_patch.success;
     logMessages(result.messages, logger);
 
     return result;
