@@ -84,6 +84,7 @@ struct AnalyticalPatch {
     double cylinder_radius = 0.0;
     std::size_t atom_count = 0;
     std::size_t explicit_vdw_radius_count = 0;
+    std::size_t inferred_vdw_radius_count = 0;
     std::size_t fallback_vdw_radius_count = 0;
     std::string export_path;
 };
@@ -142,12 +143,15 @@ struct GeometryStage4RawSheetResult {
     std::vector<uint8_t> valid_mask;
     std::vector<PatchAtomContactRole> atom_roles;
     std::vector<Stage4RawContactRecord> raw_contacts;
+    std::size_t contact_search_patch_atom_count = 0;
     std::size_t node_count = 0;
     std::size_t inside_disk_count = 0;
     std::size_t valid_node_count = 0;
     std::size_t invalid_node_count = 0;
     std::size_t unique_outer_contact_atom_count = 0;
     std::size_t unique_inner_contact_atom_count = 0;
+    std::size_t unique_both_contact_atom_count = 0;
+    std::size_t unique_contact_atom_count = 0;
     std::string outer_csv_path;
     std::string inner_csv_path;
     std::string valid_mask_csv_path;

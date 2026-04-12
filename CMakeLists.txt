@@ -15,7 +15,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(CAPDAT_BUILD_TESTS "Build CapDAT tests" OFF)
+option(CAPDAT_BUILD_TESTS "Build CapDAT tests" ON)
 option(CAPDAT_ENABLE_WARNINGS "Enable compiler warnings" ON)
 
 # Default build type if not specified by user
