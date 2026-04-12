@@ -163,6 +163,7 @@ struct GeometryStage4RawSheetResult {
     std::string outer_only_mask_csv_path;
     std::string inner_only_mask_csv_path;
     std::string negative_thickness_mask_csv_path;
+    std::string stage3_normalized_atoms_csv_path;
     std::string contact_atoms_pdb_path;
     std::string summary_csv_path;
     std::string stage4_start_timestamp_utc;
