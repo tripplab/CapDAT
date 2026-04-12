@@ -1211,6 +1211,9 @@ GeometryStage5SurfacePrepResult runGeometryAnalysisStage5SurfacePreparation(
         }
     }
 
+    // Stage 5 seed-atom traceability is defined over the full paired-seed domain.
+    // Do not filter by boundary/reliability/interpolation masks here: every
+    // Stage 4-valid node promoted to paired_seed contributes provenance serials.
     for (std::size_t idx = 0; idx < result.node_count; ++idx) {
         if (result.paired_seed_mask[idx] == 0) {
             continue;
