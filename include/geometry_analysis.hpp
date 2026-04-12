@@ -122,6 +122,7 @@ struct Stage4RawContactRecord {
 
 struct Stage4NodeFirstContact {
     bool valid = false;
+    std::size_t candidate_patch_atom_count = 0;
     double z_outer_raw = 0.0;
     double z_inner_raw = 0.0;
     std::size_t outer_patch_atom_index = 0;
@@ -141,6 +142,9 @@ struct GeometryStage4RawSheetResult {
     std::vector<double> z_inner_raw;
     std::vector<uint8_t> inside_disk_mask;
     std::vector<uint8_t> valid_mask;
+    std::vector<std::size_t> candidate_patch_atom_counts;
+    std::vector<int> inner_contact_serial_numbers;
+    std::vector<int> outer_contact_serial_numbers;
     std::vector<PatchAtomContactRole> atom_roles;
     std::vector<Stage4RawContactRecord> raw_contacts;
     std::size_t contact_search_patch_atom_count = 0;

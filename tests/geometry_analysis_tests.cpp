@@ -151,8 +151,9 @@ void testSingleNodeFirstContact() {
 
     const auto single = detectRawFirstContactAtNode(0.0, 0.0, atoms);
     assertTrue(single.valid, "one intersecting sphere should be valid");
-    assertTrue(near(single.z_outer_raw, 7.0), "single sphere outer should be z_high");
-    assertTrue(near(single.z_inner_raw, 3.0), "single sphere inner should be z_low");
+    assertTrue(near(single.z_outer_raw, 5.0), "single sphere outer should be atom z");
+    assertTrue(near(single.z_inner_raw, 5.0), "single sphere inner should be atom z");
+    assertTrue(single.candidate_patch_atom_count == 1, "single intersecting atom should be counted as candidate");
 
     PatchAtom b;
     b.position = {0.0, 0.0, 8.0};
@@ -161,8 +162,9 @@ void testSingleNodeFirstContact() {
 
     const auto multi = detectRawFirstContactAtNode(0.0, 0.0, atoms);
     assertTrue(multi.valid, "multiple intersecting spheres should be valid");
-    assertTrue(near(multi.z_outer_raw, 7.0), "outer should be minimum z_high");
-    assertTrue(near(multi.z_inner_raw, 4.0), "inner should be maximum z_low");
+    assertTrue(near(multi.z_outer_raw, 8.0), "outer should be maximum atom z");
+    assertTrue(near(multi.z_inner_raw, 5.0), "inner should be minimum atom z");
+    assertTrue(multi.candidate_patch_atom_count == 2, "both intersecting atoms should be counted as candidates");
 
     const auto none = detectRawFirstContactAtNode(20.0, 20.0, atoms);
     assertTrue(!none.valid, "no intersection should be invalid");
@@ -191,9 +193,9 @@ void testSingleNodeFirstContact() {
     d1.vdw_radius = 1.0;
     disjoint.push_back(d1);
     const auto disjoint_case = detectRawFirstContactAtNode(0.0, 0.0, disjoint);
-    assertTrue(!disjoint_case.valid, "non-overlapping intervals implying negative thickness should be invalid");
-    assertTrue(near(disjoint_case.z_outer_raw, 92.0), "disjoint outer should still be min upper");
-    assertTrue(near(disjoint_case.z_inner_raw, 100.0), "disjoint inner should still be max lower");
+    assertTrue(disjoint_case.valid, "non-overlapping intervals should remain valid with max/min envelope rule");
+    assertTrue(near(disjoint_case.z_outer_raw, 101.0), "disjoint outer should be max atom z");
+    assertTrue(near(disjoint_case.z_inner_raw, 91.0), "disjoint inner should be min atom z");
 }
 
 void testGridConstruction() {
@@ -479,6 +481,15 @@ void testStage4RoleClassificationAndCsvAndPdb() {
     assertTrue(header.find("stage4_start_utc") != std::string::npos, "summary csv should include timestamps");
     assertTrue(header.find("negative_thickness_nodes") != std::string::npos,
                "summary csv should include thickness counters");
+
+    std::ifstream valid_mask(stage4.valid_mask_csv_path);
+    std::getline(valid_mask, header);
+    assertTrue(header.find("candidate_patch_atom_count") != std::string::npos,
+               "valid mask csv should include candidate atom count");
+    assertTrue(header.find("inner_contact_serial_number") != std::string::npos,
+               "valid mask csv should include inner serial column");
+    assertTrue(header.find("outer_contact_serial_number") != std::string::npos,
+               "valid mask csv should include outer serial column");
 
     std::filesystem::remove(stage2.export_path);
     std::filesystem::remove(stage4.outer_csv_path);
