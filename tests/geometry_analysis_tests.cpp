@@ -1,11 +1,13 @@
 #include "geometry_analysis.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 
@@ -691,6 +693,61 @@ void testStage5SeedPromotionAndUniqueSerials() {
                "inner serial list should be sorted ascending");
 }
 
+void testStage5SeedSerialTraceabilityUsesAllPairedSeeds() {
+    GeometryStage4RawSheetResult stage4 = makeSyntheticStage4ResultForStage5();
+    auto markValid = [&](std::size_t i, std::size_t j, double z_outer, double z_inner, int outer_serial,
+                         int inner_serial) {
+        const std::size_t idx = nodeIndex(i, j, stage4.grid.nx);
+        if (stage4.valid_mask[idx] == 0) {
+            ++stage4.valid_node_count;
+        }
+        stage4.valid_mask[idx] = 1;
+        stage4.z_outer_raw[idx] = z_outer;
+        stage4.z_inner_raw[idx] = z_inner;
+        stage4.outer_contact_serial_numbers[idx] = outer_serial;
+        stage4.inner_contact_serial_numbers[idx] = inner_serial;
+    };
+
+    // Add additional valid nodes near/outside the reliable-core region and at boundary-prone positions.
+    markValid(2, 0, 8.7, 4.7, 120, 220);
+    markValid(0, 2, 8.8, 4.8, 130, 230);
+    markValid(4, 2, 8.9, 4.9, 120, 240); // duplicate outer serial, distinct inner serial.
+    stage4.invalid_node_count = stage4.inside_disk_count - stage4.valid_node_count;
+
+    FoldPatchAnalysisConfig config;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    config.stage5_boundary_margin = 0.75;
+    config.stage5_reliable_radius = 0.5;
+    config.stage5_support_radius = 1.5;
+    config.stage5_min_support_nodes = 4;
+    const auto stage5 = runGeometryAnalysisStage5SurfacePreparation(stage4, config, nullptr);
+    assertTrue(stage5.success, "Stage 5 should succeed");
+
+    std::vector<int> expected_outer;
+    std::vector<int> expected_inner;
+    for (std::size_t idx = 0; idx < stage5.node_count; ++idx) {
+        if (stage5.paired_seed_mask[idx] == 0) {
+            continue;
+        }
+        if (stage4.outer_contact_serial_numbers[idx] > 0) {
+            expected_outer.push_back(stage4.outer_contact_serial_numbers[idx]);
+        }
+        if (stage4.inner_contact_serial_numbers[idx] > 0) {
+            expected_inner.push_back(stage4.inner_contact_serial_numbers[idx]);
+        }
+    }
+    std::sort(expected_outer.begin(), expected_outer.end());
+    expected_outer.erase(std::unique(expected_outer.begin(), expected_outer.end()), expected_outer.end());
+    std::sort(expected_inner.begin(), expected_inner.end());
+    expected_inner.erase(std::unique(expected_inner.begin(), expected_inner.end()), expected_inner.end());
+
+    assertTrue(stage5.unique_outer_seed_atom_serials == expected_outer,
+               "Stage 5 outer seed serials should match all paired-seed nodes");
+    assertTrue(stage5.unique_inner_seed_atom_serials == expected_inner,
+               "Stage 5 inner seed serials should match all paired-seed nodes");
+}
+
 void testStage5BoundaryExclusionBehavior() {
     const GeometryStage4RawSheetResult stage4 = makeSyntheticStage4ResultForStage5();
     FoldPatchAnalysisConfig config;
@@ -853,6 +910,7 @@ int main() {
         testStage1ToStage4Integration();
         testStage5RequiresSuccessfulStage4();
         testStage5SeedPromotionAndUniqueSerials();
+        testStage5SeedSerialTraceabilityUsesAllPairedSeeds();
         testStage5BoundaryExclusionBehavior();
         testStage5InterpolationAdmissibilityBehavior();
         testStage5ReliableCoreBehavior();
