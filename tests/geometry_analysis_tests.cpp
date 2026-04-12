@@ -312,7 +312,7 @@ void testPatchAtomBuilderNormalization() {
     const geometry_symmetry::Vector3 rotated{2.5, -1.0, 4.0};
     const CylinderMembership membership = classifyPatchCylinder(rotated, 3.0);
 
-    const PatchAtom patch_atom = makePatchAtom(atom, rotated, membership);
+    const PatchAtom patch_atom = makePatchAtom(atom, rotated, membership, 0.0);
     assertTrue(near(patch_atom.position.x, rotated.x), "builder should preserve rotated x");
     assertTrue(near(patch_atom.position.y, rotated.y), "builder should preserve rotated y");
     assertTrue(near(patch_atom.position.z, rotated.z), "builder should preserve rotated z");
@@ -328,17 +328,18 @@ void testPatchAtomBuilderInfersElementFromNameWhenMissing() {
     const geometry_symmetry::Vector3 rotated{1.0, 2.0, 3.0};
     const CylinderMembership membership = classifyPatchCylinder(rotated, 5.0);
 
-    const PatchAtom patch_atom = makePatchAtom(atom, rotated, membership);
+    const PatchAtom patch_atom = makePatchAtom(atom, rotated, membership, 0.2);
     assertTrue(patch_atom.element == "N", "builder should infer N from atom name when element is missing");
-    assertTrue(near(patch_atom.vdw_radius, 1.55), "inferred N should get N vdW radius");
+    assertTrue(near(patch_atom.vdw_radius, 1.75), "inferred N should include configured vdW delta");
 }
 
 void testStage3FailsWithoutSuccessfulStage2() {
     GeometryPatchSelectionResult stage2_result;
     stage2_result.success = false;
+    FoldPatchAnalysisConfig config;
     bool threw = false;
     try {
-        (void)runGeometryAnalysisStage3PatchNormalization(stage2_result, nullptr);
+        (void)runGeometryAnalysisStage3PatchNormalization(stage2_result, config, nullptr);
     } catch (const std::runtime_error& e) {
         threw = std::string(e.what()).find("cannot run before successful Stage 2") != std::string::npos;
     }
@@ -357,7 +358,7 @@ void testStage2ToStage3Integration() {
     stage1.success = true;
 
     const auto stage2 = runGeometryAnalysisStage2PatchSelection(capsid, config, makeParserConfig(), stage1, nullptr);
-    const auto stage3 = runGeometryAnalysisStage3PatchNormalization(stage2, nullptr);
+    const auto stage3 = runGeometryAnalysisStage3PatchNormalization(stage2, config, nullptr);
 
     assertTrue(stage3.success, "Stage 3 should succeed from valid Stage 2 result");
     assertTrue(stage3.analytical_patch.atom_count == stage2.selected_atom_refs.size(),
@@ -389,7 +390,7 @@ void testStage3InfersAndFallsBackWhenElementMissing() {
     stage1.success = true;
 
     const auto stage2 = runGeometryAnalysisStage2PatchSelection(capsid, config, makeParserConfig(), stage1, nullptr);
-    const auto stage3 = runGeometryAnalysisStage3PatchNormalization(stage2, nullptr);
+    const auto stage3 = runGeometryAnalysisStage3PatchNormalization(stage2, config, nullptr);
 
     assertTrue(stage3.success, "Stage 3 should succeed with missing/unknown element symbols");
     assertTrue(stage3.analytical_patch.explicit_vdw_radius_count == 0,
@@ -415,7 +416,7 @@ void testStage4RoleClassificationAndCsvAndPdb() {
     stage1.success = true;
 
     const auto stage2 = runGeometryAnalysisStage2PatchSelection(capsid, config, makeParserConfig(), stage1, nullptr);
-    const auto stage3 = runGeometryAnalysisStage3PatchNormalization(stage2, nullptr);
+    const auto stage3 = runGeometryAnalysisStage3PatchNormalization(stage2, config, nullptr);
     const auto stage4 = runGeometryAnalysisStage4RawSheetDetection(capsid, config, makeParserConfig(), stage3, nullptr);
 
     assertTrue(stage4.success, "Stage 4 should succeed");

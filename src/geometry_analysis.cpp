@@ -360,13 +360,14 @@ double vdwRadius(const std::string& normalized_element) {
 
 PatchAtom makePatchAtom(const Atom& atom,
                         const geometry_symmetry::Vector3& rotated_position,
-                        const CylinderMembership& membership) {
+                        const CylinderMembership& membership,
+                        double delta_vdw) {
     const VdwResolution resolved = resolveVdwElement(atom);
 
     PatchAtom patch_atom;
     patch_atom.position = rotated_position;
     patch_atom.element = resolved.normalized_element;
-    patch_atom.vdw_radius = vdwRadius(patch_atom.element);
+    patch_atom.vdw_radius = vdwRadius(patch_atom.element) + delta_vdw;
     patch_atom.membership = membership;
     patch_atom.radial_xy = membership.radial_xy;
     patch_atom.in_positive_z = membership.in_positive_z;
@@ -587,7 +588,7 @@ GeometryPatchSelectionResult runGeometryAnalysisStage2PatchSelection(
                     continue;
                 }
 
-                result.patch_atoms.push_back(makePatchAtom(atom, position, membership));
+                result.patch_atoms.push_back(makePatchAtom(atom, position, membership, config.delta_vdw));
                 result.selected_atom_refs.push_back(&atom);
             }
         }
@@ -631,6 +632,7 @@ GeometryPatchSelectionResult runGeometryAnalysisStage2PatchSelection(
 
 GeometryPatchNormalizationResult runGeometryAnalysisStage3PatchNormalization(
     const GeometryPatchSelectionResult& stage2_result,
+    const FoldPatchAnalysisConfig& config,
     Logger* logger) {
     GeometryPatchNormalizationResult result;
     result.analytical_patch.cylinder_radius = stage2_result.cylinder_radius;
@@ -645,6 +647,7 @@ GeometryPatchNormalizationResult runGeometryAnalysisStage3PatchNormalization(
 
     result.messages.push_back("Geometry Stage 3");
     result.messages.push_back("Geometry analysis: starting Stage 3 analytical patch normalization.");
+    result.messages.push_back("Geometry Stage 3 vdW delta offset: " + std::to_string(config.delta_vdw));
     result.messages.push_back("Geometry Stage 3 selected atoms to normalize: " +
                               std::to_string(stage2_result.patch_atoms.size()));
 
@@ -668,7 +671,8 @@ GeometryPatchNormalizationResult runGeometryAnalysisStage3PatchNormalization(
             throw std::runtime_error("PatchAtom normalization encountered a null original atom reference");
         }
 
-        const PatchAtom normalized = makePatchAtom(*original_ref, selected.position, selected.membership);
+        const PatchAtom normalized =
+            makePatchAtom(*original_ref, selected.position, selected.membership, config.delta_vdw);
         const VdwResolution vdw_resolution = resolveVdwElement(*original_ref);
         if (vdw_resolution.source == VdwResolutionSource::explicit_element) {
             ++result.analytical_patch.explicit_vdw_radius_count;
@@ -986,7 +990,7 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
     result.preparation = prepareGeometryAnalysisStage1(capsid, config, parser_config, logger, tolerance);
     result.stage2_patch =
         runGeometryAnalysisStage2PatchSelection(capsid, config, parser_config, result.preparation, logger);
-    result.stage3_patch = runGeometryAnalysisStage3PatchNormalization(result.stage2_patch, logger);
+    result.stage3_patch = runGeometryAnalysisStage3PatchNormalization(result.stage2_patch, config, logger);
     result.stage4_raw =
         runGeometryAnalysisStage4RawSheetDetection(capsid, config, parser_config, result.stage3_patch, logger);
     result.success = result.preparation.success && result.stage2_patch.success && result.stage3_patch.success &&
