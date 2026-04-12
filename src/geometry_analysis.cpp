@@ -4,6 +4,8 @@
 
 #include <cmath>
 #include <cctype>
+#include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -48,6 +50,12 @@ void validateStage2Config(const FoldPatchAnalysisConfig& config) {
     }
 }
 
+void validateStage4Config(const FoldPatchAnalysisConfig& config) {
+    if (config.grid_spacing <= 0.0) {
+        throw std::runtime_error("Stage 4 requires grid_spacing > 0");
+    }
+}
+
 std::string trimWhitespace(const std::string& text) {
     std::size_t start = 0;
     while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start])) != 0) {
@@ -73,6 +81,86 @@ const std::unordered_map<std::string, double>& vdwRadiusLookupTable() {
         {"SE", 1.90},
     };
     return table;
+}
+
+std::size_t stage4NodeIndex(std::size_t i, std::size_t j, std::size_t nx) {
+    return (j * nx) + i;
+}
+
+bool writeStage4CsvOuter(const GeometryStage4RawSheetResult& result) {
+    std::ofstream out(result.outer_csv_path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,inside_disk,valid,z_outer_raw\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.inside_disk_mask[idx]) << ',' << static_cast<int>(result.valid_mask[idx])
+                << ',';
+            if (result.valid_mask[idx] != 0) {
+                out << result.z_outer_raw[idx];
+            } else {
+                out << "nan";
+            }
+            out << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage4CsvInner(const GeometryStage4RawSheetResult& result) {
+    std::ofstream out(result.inner_csv_path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,inside_disk,valid,z_inner_raw\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.inside_disk_mask[idx]) << ',' << static_cast<int>(result.valid_mask[idx])
+                << ',';
+            if (result.valid_mask[idx] != 0) {
+                out << result.z_inner_raw[idx];
+            } else {
+                out << "nan";
+            }
+            out << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage4CsvValidMask(const GeometryStage4RawSheetResult& result) {
+    std::ofstream out(result.valid_mask_csv_path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,inside_disk,valid\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.inside_disk_mask[idx]) << ',' << static_cast<int>(result.valid_mask[idx])
+                << '\n';
+        }
+    }
+    return out.good();
+}
+
+PatchAtomContactRole classifyContactRole(bool used_as_outer, bool used_as_inner) {
+    if (used_as_outer && used_as_inner) {
+        return PatchAtomContactRole::both;
+    }
+    if (used_as_outer) {
+        return PatchAtomContactRole::outer;
+    }
+    if (used_as_inner) {
+        return PatchAtomContactRole::inner;
+    }
+    return PatchAtomContactRole::none;
 }
 
 } // namespace
@@ -133,6 +221,105 @@ PatchAtom makePatchAtom(const Atom& atom,
     patch_atom.in_cylinder_radius = membership.in_cylinder_radius;
     patch_atom.original_atom = &atom;
     return patch_atom;
+}
+
+LineSphereIntersection intersectVerticalLineWithSphere(double x,
+                                                       double y,
+                                                       const PatchAtom& atom,
+                                                       double tolerance) {
+    const double dx = x - atom.position.x;
+    const double dy = y - atom.position.y;
+    const double d2 = (dx * dx) + (dy * dy);
+    const double r2 = atom.vdw_radius * atom.vdw_radius;
+
+    if (d2 > r2 + tolerance) {
+        return LineSphereIntersection{};
+    }
+
+    const double remaining = std::max(0.0, r2 - d2);
+    const double delta = std::sqrt(remaining);
+    LineSphereIntersection result;
+    result.intersects = true;
+    result.z_low = atom.position.z - delta;
+    result.z_high = atom.position.z + delta;
+    return result;
+}
+
+Stage4NodeFirstContact detectRawFirstContactAtNode(double x,
+                                                    double y,
+                                                    const std::vector<PatchAtom>& patch_atoms,
+                                                    double tie_tolerance) {
+    Stage4NodeFirstContact result;
+    bool any_intersection = false;
+    double best_outer = std::numeric_limits<double>::infinity();
+    double best_inner = -std::numeric_limits<double>::infinity();
+
+    for (std::size_t idx = 0; idx < patch_atoms.size(); ++idx) {
+        const LineSphereIntersection intersection =
+            intersectVerticalLineWithSphere(x, y, patch_atoms[idx], tie_tolerance);
+        if (!intersection.intersects) {
+            continue;
+        }
+
+        if (!any_intersection || (intersection.z_high < best_outer - tie_tolerance)) {
+            best_outer = intersection.z_high;
+            result.outer_patch_atom_index = idx;
+        }
+
+        if (!any_intersection || (intersection.z_low > best_inner + tie_tolerance)) {
+            best_inner = intersection.z_low;
+            result.inner_patch_atom_index = idx;
+        }
+
+        any_intersection = true;
+    }
+
+    if (!any_intersection) {
+        return result;
+    }
+
+    result.z_outer_raw = best_outer;
+    result.z_inner_raw = best_inner;
+    result.valid = std::isfinite(result.z_outer_raw) && std::isfinite(result.z_inner_raw) &&
+                   (result.z_inner_raw <= result.z_outer_raw + tie_tolerance);
+    return result;
+}
+
+Stage4GridDescriptor buildStage4RegularGrid(double cylinder_radius, double spacing, double tolerance) {
+    if (cylinder_radius <= 0.0) {
+        throw std::runtime_error("Stage 4 requires cylinder_radius > 0");
+    }
+    if (spacing <= 0.0) {
+        throw std::runtime_error("Stage 4 requires grid_spacing > 0");
+    }
+
+    Stage4GridDescriptor grid;
+    grid.x_min = -cylinder_radius;
+    grid.x_max = cylinder_radius;
+    grid.y_min = -cylinder_radius;
+    grid.y_max = cylinder_radius;
+    grid.spacing = spacing;
+
+    const std::size_t nx = static_cast<std::size_t>(std::floor((grid.x_max - grid.x_min) / spacing)) + 1;
+    const std::size_t ny = static_cast<std::size_t>(std::floor((grid.y_max - grid.y_min) / spacing)) + 1;
+    grid.nx = nx;
+    grid.ny = ny;
+
+    grid.x_values.reserve(nx);
+    for (std::size_t i = 0; i < nx; ++i) {
+        const double x = grid.x_min + (static_cast<double>(i) * spacing);
+        const bool at_max = std::fabs(grid.x_max - x) <= tolerance;
+        grid.x_values.push_back(at_max ? grid.x_max : x);
+    }
+
+    grid.y_values.reserve(ny);
+    for (std::size_t j = 0; j < ny; ++j) {
+        const double y = grid.y_min + (static_cast<double>(j) * spacing);
+        const bool at_max = std::fabs(grid.y_max - y) <= tolerance;
+        grid.y_values.push_back(at_max ? grid.y_max : y);
+    }
+
+    return grid;
 }
 
 GeometryPreparationResult prepareGeometryAnalysisStage1(Capsid& capsid,
@@ -349,6 +536,158 @@ GeometryPatchNormalizationResult runGeometryAnalysisStage3PatchNormalization(
     return result;
 }
 
+GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
+    const Capsid& capsid,
+    const FoldPatchAnalysisConfig& config,
+    const ParserConfig& parser_config,
+    const GeometryPatchNormalizationResult& stage3_result,
+    Logger* logger,
+    double tolerance) {
+    GeometryStage4RawSheetResult result;
+
+    if (!stage3_result.success) {
+        throw std::runtime_error("Stage 4 cannot run before successful Stage 3 patch normalization");
+    }
+    if (stage3_result.analytical_patch.atoms.empty()) {
+        throw std::runtime_error("Analytical patch is empty; raw sheet detection cannot proceed");
+    }
+    validateStage4Config(config);
+
+    result.messages.push_back("Geometry Stage 4");
+    result.messages.push_back("Geometry analysis: starting Stage 4 raw outer/inner sheet detection.");
+    result.messages.push_back("Geometry Stage 4 grid spacing: " + std::to_string(config.grid_spacing));
+    result.messages.push_back("Geometry Stage 4 cylinder radius: " + std::to_string(config.cylinder_radius));
+
+    result.grid = buildStage4RegularGrid(config.cylinder_radius, config.grid_spacing, tolerance);
+    result.node_count = result.grid.nx * result.grid.ny;
+    result.z_outer_raw.assign(result.node_count, std::numeric_limits<double>::quiet_NaN());
+    result.z_inner_raw.assign(result.node_count, std::numeric_limits<double>::quiet_NaN());
+    result.inside_disk_mask.assign(result.node_count, 0);
+    result.valid_mask.assign(result.node_count, 0);
+    result.atom_roles.assign(stage3_result.analytical_patch.atoms.size(), PatchAtomContactRole::none);
+
+    const double radius2 = config.cylinder_radius * config.cylinder_radius;
+    std::vector<bool> used_as_outer(stage3_result.analytical_patch.atoms.size(), false);
+    std::vector<bool> used_as_inner(stage3_result.analytical_patch.atoms.size(), false);
+
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            const double x = result.grid.x_values[i];
+            const double y = result.grid.y_values[j];
+            const double r2 = (x * x) + (y * y);
+            const bool inside_disk = r2 <= radius2 + tolerance;
+
+            if (!inside_disk) {
+                continue;
+            }
+
+            result.inside_disk_mask[idx] = 1;
+            ++result.inside_disk_count;
+
+            const Stage4NodeFirstContact node =
+                detectRawFirstContactAtNode(x, y, stage3_result.analytical_patch.atoms, tolerance);
+            if (!node.valid) {
+                continue;
+            }
+
+            result.valid_mask[idx] = 1;
+            result.z_outer_raw[idx] = node.z_outer_raw;
+            result.z_inner_raw[idx] = node.z_inner_raw;
+            ++result.valid_node_count;
+
+            used_as_outer[node.outer_patch_atom_index] = true;
+            used_as_inner[node.inner_patch_atom_index] = true;
+
+            Stage4RawContactRecord record;
+            record.i = i;
+            record.j = j;
+            record.x = x;
+            record.y = y;
+            record.z_outer = node.z_outer_raw;
+            record.z_inner = node.z_inner_raw;
+            record.outer_patch_atom_index = node.outer_patch_atom_index;
+            record.inner_patch_atom_index = node.inner_patch_atom_index;
+            result.raw_contacts.push_back(record);
+        }
+    }
+
+    if (result.inside_disk_count == 0) {
+        throw std::runtime_error("No grid nodes fell inside the analysis disk");
+    }
+
+    result.invalid_node_count = result.inside_disk_count - result.valid_node_count;
+    if (result.valid_node_count == 0) {
+        throw std::runtime_error("Stage 4 produced zero valid raw-contact nodes");
+    }
+
+    std::vector<const Atom*> contact_atom_subset;
+    contact_atom_subset.reserve(stage3_result.analytical_patch.atoms.size());
+    for (std::size_t idx = 0; idx < stage3_result.analytical_patch.atoms.size(); ++idx) {
+        result.atom_roles[idx] = classifyContactRole(used_as_outer[idx], used_as_inner[idx]);
+        if (used_as_outer[idx]) {
+            ++result.unique_outer_contact_atom_count;
+        }
+        if (used_as_inner[idx]) {
+            ++result.unique_inner_contact_atom_count;
+        }
+        if (used_as_outer[idx] || used_as_inner[idx]) {
+            contact_atom_subset.push_back(stage3_result.analytical_patch.atoms[idx].original_atom);
+        }
+    }
+
+    result.outer_csv_path = config.output_prefix + "_outer_raw.csv";
+    result.inner_csv_path = config.output_prefix + "_inner_raw.csv";
+    result.valid_mask_csv_path = config.output_prefix + "_valid_mask_raw.csv";
+    result.contact_atoms_pdb_path = config.output_prefix + "_raw_contact_points.pdb";
+
+    if (!writeStage4CsvOuter(result)) {
+        throw std::runtime_error("Failed to write raw outer grid CSV");
+    }
+    if (!writeStage4CsvInner(result)) {
+        throw std::runtime_error("Failed to write raw inner grid CSV");
+    }
+    if (!writeStage4CsvValidMask(result)) {
+        throw std::runtime_error("Failed to write raw valid-mask grid CSV");
+    }
+
+    ExportCapsidConfig writer_config;
+    writer_config.output_path = result.contact_atoms_pdb_path;
+    writer_config.emit_header_comments = true;
+    writer_config.emit_ter_records = true;
+    writer_config.emit_end_record = true;
+    writer_config.preserve_atom_serial_numbers = true;
+    writer_config.coordinate_records_only = false;
+    writer_config.atom_subset = &contact_atom_subset;
+
+    try {
+        ExportCapsidWriter writer(logger);
+        (void)writer.write(capsid, writer_config, parser_config);
+    } catch (const std::exception&) {
+        throw std::runtime_error("Failed to export raw contact atoms subset");
+    }
+
+    result.messages.push_back("Geometry Stage 4 grid dimensions: nx=" + std::to_string(result.grid.nx) +
+                              ", ny=" + std::to_string(result.grid.ny));
+    result.messages.push_back("Geometry Stage 4 total nodes: " + std::to_string(result.node_count));
+    result.messages.push_back("Geometry Stage 4 nodes inside disk: " + std::to_string(result.inside_disk_count));
+    result.messages.push_back("Geometry Stage 4 valid nodes: " + std::to_string(result.valid_node_count));
+    result.messages.push_back("Geometry Stage 4 invalid nodes: " + std::to_string(result.invalid_node_count));
+    result.messages.push_back("Geometry Stage 4 unique outer-contact atoms: " +
+                              std::to_string(result.unique_outer_contact_atom_count));
+    result.messages.push_back("Geometry Stage 4 unique inner-contact atoms: " +
+                              std::to_string(result.unique_inner_contact_atom_count));
+    result.messages.push_back("Geometry Stage 4 outer CSV: " + result.outer_csv_path);
+    result.messages.push_back("Geometry Stage 4 inner CSV: " + result.inner_csv_path);
+    result.messages.push_back("Geometry Stage 4 valid mask CSV: " + result.valid_mask_csv_path);
+    result.messages.push_back("Geometry Stage 4 contact atoms PDB: " + result.contact_atoms_pdb_path);
+    result.messages.push_back("Geometry analysis: completed Stage 4 raw outer/inner sheet detection.");
+
+    result.success = true;
+    logMessages(result.messages, logger);
+    return result;
+}
+
 GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                                                     const FoldPatchAnalysisConfig& config,
                                                     const ParserConfig& parser_config,
@@ -365,7 +704,10 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
     result.stage2_patch =
         runGeometryAnalysisStage2PatchSelection(capsid, config, parser_config, result.preparation, logger);
     result.stage3_patch = runGeometryAnalysisStage3PatchNormalization(result.stage2_patch, logger);
-    result.success = result.preparation.success && result.stage2_patch.success && result.stage3_patch.success;
+    result.stage4_raw =
+        runGeometryAnalysisStage4RawSheetDetection(capsid, config, parser_config, result.stage3_patch, logger);
+    result.success = result.preparation.success && result.stage2_patch.success && result.stage3_patch.success &&
+                     result.stage4_raw.success;
     logMessages(result.messages, logger);
 
     return result;

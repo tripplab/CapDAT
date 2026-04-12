@@ -1,6 +1,7 @@
 #ifndef CAPDAT_GEOMETRY_ANALYSIS_HPP
 #define CAPDAT_GEOMETRY_ANALYSIS_HPP
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,7 @@ struct FoldPatchAnalysisConfig {
     int fold_type = 2;
     int fold_index = 0;
     double cylinder_radius = 12.0;
+    double grid_spacing = 2.0;
     std::size_t min_atoms_in_patch = 20;
     bool export_rotated_capsid = false;
     std::string output_prefix = "geometry";
@@ -92,11 +94,73 @@ struct GeometryPatchNormalizationResult {
     std::vector<std::string> messages;
 };
 
+struct Stage4GridDescriptor {
+    double x_min = 0.0;
+    double x_max = 0.0;
+    double y_min = 0.0;
+    double y_max = 0.0;
+    double spacing = 0.0;
+    std::size_t nx = 0;
+    std::size_t ny = 0;
+    std::vector<double> x_values;
+    std::vector<double> y_values;
+};
+
+enum class PatchAtomContactRole : uint8_t { none = 0, outer = 1, inner = 2, both = 3 };
+
+struct Stage4RawContactRecord {
+    std::size_t i = 0;
+    std::size_t j = 0;
+    double x = 0.0;
+    double y = 0.0;
+    double z_outer = 0.0;
+    double z_inner = 0.0;
+    std::size_t outer_patch_atom_index = 0;
+    std::size_t inner_patch_atom_index = 0;
+};
+
+struct Stage4NodeFirstContact {
+    bool valid = false;
+    double z_outer_raw = 0.0;
+    double z_inner_raw = 0.0;
+    std::size_t outer_patch_atom_index = 0;
+    std::size_t inner_patch_atom_index = 0;
+};
+
+struct LineSphereIntersection {
+    bool intersects = false;
+    double z_low = 0.0;
+    double z_high = 0.0;
+};
+
+struct GeometryStage4RawSheetResult {
+    bool success = false;
+    Stage4GridDescriptor grid;
+    std::vector<double> z_outer_raw;
+    std::vector<double> z_inner_raw;
+    std::vector<uint8_t> inside_disk_mask;
+    std::vector<uint8_t> valid_mask;
+    std::vector<PatchAtomContactRole> atom_roles;
+    std::vector<Stage4RawContactRecord> raw_contacts;
+    std::size_t node_count = 0;
+    std::size_t inside_disk_count = 0;
+    std::size_t valid_node_count = 0;
+    std::size_t invalid_node_count = 0;
+    std::size_t unique_outer_contact_atom_count = 0;
+    std::size_t unique_inner_contact_atom_count = 0;
+    std::string outer_csv_path;
+    std::string inner_csv_path;
+    std::string valid_mask_csv_path;
+    std::string contact_atoms_pdb_path;
+    std::vector<std::string> messages;
+};
+
 struct GeometryAnalysisResult {
     bool success = false;
     GeometryPreparationResult preparation;
     GeometryPatchSelectionResult stage2_patch;
     GeometryPatchNormalizationResult stage3_patch;
+    GeometryStage4RawSheetResult stage4_raw;
     std::vector<std::string> messages;
 };
 
@@ -107,6 +171,20 @@ double vdwRadius(const std::string& normalized_element);
 PatchAtom makePatchAtom(const Atom& atom,
                         const geometry_symmetry::Vector3& rotated_position,
                         const CylinderMembership& membership);
+
+LineSphereIntersection intersectVerticalLineWithSphere(double x,
+                                                       double y,
+                                                       const PatchAtom& atom,
+                                                       double tolerance = 1e-12);
+
+Stage4NodeFirstContact detectRawFirstContactAtNode(double x,
+                                                    double y,
+                                                    const std::vector<PatchAtom>& patch_atoms,
+                                                    double tie_tolerance = 1e-12);
+
+Stage4GridDescriptor buildStage4RegularGrid(double cylinder_radius,
+                                            double spacing,
+                                            double tolerance = 1e-12);
 
 GeometryPreparationResult prepareGeometryAnalysisStage1(Capsid& capsid,
                                                         const FoldPatchAnalysisConfig& config,
@@ -124,6 +202,14 @@ GeometryPatchSelectionResult runGeometryAnalysisStage2PatchSelection(
 GeometryPatchNormalizationResult runGeometryAnalysisStage3PatchNormalization(
     const GeometryPatchSelectionResult& stage2_result,
     Logger* logger);
+
+GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
+    const Capsid& capsid,
+    const FoldPatchAnalysisConfig& config,
+    const ParserConfig& parser_config,
+    const GeometryPatchNormalizationResult& stage3_result,
+    Logger* logger,
+    double tolerance = 1e-12);
 
 GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                                                     const FoldPatchAnalysisConfig& config,
