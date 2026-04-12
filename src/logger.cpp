@@ -55,6 +55,13 @@ bool Logger::hasLogFile() const {
 }
 
 /**
+ * @brief Write a NOTE-level message.
+ */
+void Logger::note(const std::string& message) {
+    log(LogLevel::NOTE, message);
+}
+
+/**
  * @brief Write an INFO-level message.
  */
 void Logger::info(const std::string& message) {
@@ -121,6 +128,8 @@ std::string Logger::levelToString(LogLevel level) const {
             return "ERROR";
         case LogLevel::WARNING:
             return "WARNING";
+        case LogLevel::NOTE:
+            return "NOTE";
         case LogLevel::INFO:
             return "INFO";
         case LogLevel::DEBUG:

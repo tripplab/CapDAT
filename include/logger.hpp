@@ -12,14 +12,16 @@
  *
  * - ERROR   : fatal or near-fatal issues
  * - WARNING : recoverable issues
+ * - NOTE    : noteworthy but non-warning observations
  * - INFO    : normal runtime progress messages
  * - DEBUG   : verbose diagnostic information
  */
 enum class LogLevel {
     ERROR = 0,
     WARNING = 1,
-    INFO = 2,
-    DEBUG = 3
+    NOTE = 2,
+    INFO = 3,
+    DEBUG = 4
 };
 
 /**
@@ -75,6 +77,13 @@ public:
      * @return True if a log file stream is active.
      */
     [[nodiscard]] bool hasLogFile() const;
+
+    /**
+     * @brief Write a NOTE-level message.
+     *
+     * @param message Text to log.
+     */
+    void note(const std::string& message);
 
     /**
      * @brief Write an INFO-level message.
