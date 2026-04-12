@@ -164,7 +164,7 @@ bool writeStage4CsvValidMask(const GeometryStage4RawSheetResult& result) {
         return false;
     }
     out << "i,j,x,y,inside_disk,valid,candidate_patch_atom_count,inner_contact_serial_number,"
-           "outer_contact_serial_number\n";
+           "outer_contact_serial_number,inner_contact_patch_atom_index,outer_contact_patch_atom_index\n";
     for (std::size_t j = 0; j < result.grid.ny; ++j) {
         for (std::size_t i = 0; i < result.grid.nx; ++i) {
             const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
@@ -172,9 +172,11 @@ bool writeStage4CsvValidMask(const GeometryStage4RawSheetResult& result) {
                 << static_cast<int>(result.inside_disk_mask[idx]) << ',' << static_cast<int>(result.valid_mask[idx])
                 << ',' << result.candidate_patch_atom_counts[idx] << ',';
             if (result.valid_mask[idx] != 0) {
-                out << result.inner_contact_serial_numbers[idx] << ',' << result.outer_contact_serial_numbers[idx];
+                out << result.inner_contact_serial_numbers[idx] << ',' << result.outer_contact_serial_numbers[idx] << ','
+                    << result.inner_contact_patch_atom_indices[idx] << ','
+                    << result.outer_contact_patch_atom_indices[idx];
             } else {
-                out << "nan,nan";
+                out << "nan,nan,nan,nan";
             }
             out << '\n';
         }
@@ -222,8 +224,9 @@ bool writeStage4SummaryCsv(const GeometryStage4RawSheetResult& result) {
     }
     out << "stage4_start_utc,stage4_end_utc,grid_spacing,cylinder_radius,nx,ny,total_nodes,inside_disk_nodes,"
            "valid_nodes,invalid_nodes,outer_only_nodes,inner_only_nodes,both_hit_nodes,zero_thickness_nodes,"
-           "negative_thickness_nodes,unique_outer_contact_atoms,unique_inner_contact_atoms,"
-           "unique_both_contact_atoms,unique_contact_union,runtime_seconds\n";
+           "negative_thickness_nodes,unique_outer_contact_patch_atoms,unique_inner_contact_patch_atoms,"
+           "unique_both_contact_patch_atoms,unique_contact_patch_atom_union,unique_outer_contact_serials,"
+           "unique_inner_contact_serials,unique_both_contact_serials,unique_contact_serial_union,runtime_seconds\n";
     out << result.stage4_start_timestamp_utc << ',' << result.stage4_end_timestamp_utc << ',' << result.grid.spacing
         << ',' << result.grid.x_max << ',' << result.grid.nx << ',' << result.grid.ny << ',' << result.node_count
         << ',' << result.inside_disk_count << ',' << result.valid_node_count << ',' << result.invalid_node_count
@@ -231,7 +234,9 @@ bool writeStage4SummaryCsv(const GeometryStage4RawSheetResult& result) {
         << result.both_hit_node_count << ',' << result.zero_thickness_node_count << ','
         << result.negative_thickness_node_count << ',' << result.unique_outer_contact_atom_count << ','
         << result.unique_inner_contact_atom_count << ',' << result.unique_both_contact_atom_count << ','
-        << result.unique_contact_atom_count << ',' << result.stage4_runtime_seconds << '\n';
+        << result.unique_contact_atom_count << ',' << result.unique_outer_contact_serial_count << ','
+        << result.unique_inner_contact_serial_count << ',' << result.unique_both_contact_serial_count << ','
+        << result.unique_contact_serial_union_count << ',' << result.stage4_runtime_seconds << '\n';
     return out.good();
 }
 
@@ -294,15 +299,17 @@ bool writeStage5SummaryCsv(const GeometryStage5SurfacePrepResult& result) {
     out << "boundary_margin,support_radius,reliable_radius,total_nodes,inside_disk_nodes,raw_valid_nodes,"
            "raw_invalid_nodes,outer_seed_nodes,inner_seed_nodes,paired_seed_nodes,boundary_excluded_nodes,"
            "interp_allowed_outer_nodes,interp_allowed_inner_nodes,paired_interp_allowed_nodes,hard_invalid_nodes,"
-           "reliable_core_nodes,unique_outer_seed_atoms,unique_inner_seed_atoms\n";
+           "reliable_core_nodes,unique_outer_seed_patch_atoms,unique_inner_seed_patch_atoms,"
+           "unique_seed_patch_atom_union,unique_outer_seed_serials,unique_inner_seed_serials\n";
     out << result.boundary_margin << ',' << result.support_radius << ',' << result.reliable_radius << ','
         << result.node_count << ',' << result.inside_disk_count << ',' << result.raw_valid_node_count << ','
         << result.raw_invalid_node_count << ',' << result.outer_seed_node_count << ',' << result.inner_seed_node_count
         << ',' << result.paired_seed_node_count << ',' << result.boundary_excluded_node_count << ','
         << result.interp_allowed_outer_node_count << ',' << result.interp_allowed_inner_node_count << ','
         << result.paired_interp_allowed_node_count << ',' << result.hard_invalid_node_count << ','
-        << result.reliable_core_node_count << ',' << result.unique_outer_seed_atom_serials.size() << ','
-        << result.unique_inner_seed_atom_serials.size() << '\n';
+        << result.reliable_core_node_count << ',' << result.unique_outer_seed_patch_atom_count << ','
+        << result.unique_inner_seed_patch_atom_count << ',' << result.unique_seed_patch_atom_index_union_count << ','
+        << result.unique_outer_seed_atom_serials.size() << ',' << result.unique_inner_seed_atom_serials.size() << '\n';
     return out.good();
 }
 
@@ -858,6 +865,8 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.candidate_patch_atom_counts.assign(result.node_count, 0);
     result.inner_contact_serial_numbers.assign(result.node_count, 0);
     result.outer_contact_serial_numbers.assign(result.node_count, 0);
+    result.outer_contact_patch_atom_indices.assign(result.node_count, -1);
+    result.inner_contact_patch_atom_indices.assign(result.node_count, -1);
     result.atom_roles.assign(stage3_result.analytical_patch.atoms.size(), PatchAtomContactRole::none);
     std::vector<uint8_t> outer_only_mask(result.node_count, 0);
     std::vector<uint8_t> inner_only_mask(result.node_count, 0);
@@ -900,6 +909,8 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
             }
             result.outer_contact_serial_numbers[idx] = outer_atom->serial();
             result.inner_contact_serial_numbers[idx] = inner_atom->serial();
+            result.outer_contact_patch_atom_indices[idx] = static_cast<int>(node.outer_patch_atom_index);
+            result.inner_contact_patch_atom_indices[idx] = static_cast<int>(node.inner_patch_atom_index);
             ++result.valid_node_count;
             ++result.both_hit_node_count;
 
@@ -970,6 +981,49 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
             contact_atom_subset.push_back(stage3_result.analytical_patch.atoms[idx].original_atom);
         }
     }
+
+    for (std::size_t idx = 0; idx < stage3_result.analytical_patch.atoms.size(); ++idx) {
+        const bool is_outer = used_as_outer[idx];
+        const bool is_inner = used_as_inner[idx];
+        if (!is_outer && !is_inner) {
+            continue;
+        }
+        const Atom* original_atom = stage3_result.analytical_patch.atoms[idx].original_atom;
+        if (original_atom == nullptr) {
+            throw std::runtime_error("Stage 4 encountered null original atom while aggregating serial provenance");
+        }
+        const int serial = original_atom->serial();
+        if (is_outer) {
+            result.unique_outer_contact_serials.push_back(serial);
+        }
+        if (is_inner) {
+            result.unique_inner_contact_serials.push_back(serial);
+        }
+        if (is_outer && is_inner) {
+            result.unique_both_contact_serials.push_back(serial);
+        }
+        result.unique_contact_serial_union.push_back(serial);
+    }
+    std::sort(result.unique_outer_contact_serials.begin(), result.unique_outer_contact_serials.end());
+    result.unique_outer_contact_serials.erase(
+        std::unique(result.unique_outer_contact_serials.begin(), result.unique_outer_contact_serials.end()),
+        result.unique_outer_contact_serials.end());
+    std::sort(result.unique_inner_contact_serials.begin(), result.unique_inner_contact_serials.end());
+    result.unique_inner_contact_serials.erase(
+        std::unique(result.unique_inner_contact_serials.begin(), result.unique_inner_contact_serials.end()),
+        result.unique_inner_contact_serials.end());
+    std::sort(result.unique_both_contact_serials.begin(), result.unique_both_contact_serials.end());
+    result.unique_both_contact_serials.erase(
+        std::unique(result.unique_both_contact_serials.begin(), result.unique_both_contact_serials.end()),
+        result.unique_both_contact_serials.end());
+    std::sort(result.unique_contact_serial_union.begin(), result.unique_contact_serial_union.end());
+    result.unique_contact_serial_union.erase(
+        std::unique(result.unique_contact_serial_union.begin(), result.unique_contact_serial_union.end()),
+        result.unique_contact_serial_union.end());
+    result.unique_outer_contact_serial_count = result.unique_outer_contact_serials.size();
+    result.unique_inner_contact_serial_count = result.unique_inner_contact_serials.size();
+    result.unique_both_contact_serial_count = result.unique_both_contact_serials.size();
+    result.unique_contact_serial_union_count = result.unique_contact_serial_union.size();
 
     if (config.debug) {
         result.outer_csv_path = config.output_prefix + "_outer_raw.csv";
@@ -1054,20 +1108,28 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     }
     result.messages.push_back("Geometry Stage 4 patch atoms used for contact search: " +
                               std::to_string(result.contact_search_patch_atom_count));
-    result.messages.push_back("Geometry Stage 4 unique outer-contact atoms: " +
+    result.messages.push_back("Geometry Stage 4 unique outer-contact patch atoms (index-based): " +
                               std::to_string(result.unique_outer_contact_atom_count));
-    result.messages.push_back("Geometry Stage 4 unique inner-contact atoms: " +
+    result.messages.push_back("Geometry Stage 4 unique inner-contact patch atoms (index-based): " +
                               std::to_string(result.unique_inner_contact_atom_count));
     if (result.unique_both_contact_atom_count == 0) {
-        result.messages.push_back("Geometry Stage 4 unique both-contact atoms: " +
+        result.messages.push_back("Geometry Stage 4 unique both-contact patch atoms (index-based): " +
                                   std::to_string(result.unique_both_contact_atom_count));
     } else {
         result.messages.push_back(std::string(kWarningMessagePrefix) +
-                                  "Geometry Stage 4 unique both-contact atoms: " +
+                                  "Geometry Stage 4 unique both-contact patch atoms (index-based): " +
                                   std::to_string(result.unique_both_contact_atom_count));
     }
-    result.messages.push_back("Geometry Stage 4 unique contact atoms (outer U inner): " +
+    result.messages.push_back("Geometry Stage 4 unique contact patch atoms union (index-based): " +
                               std::to_string(result.unique_contact_atom_count));
+    result.messages.push_back("Geometry Stage 4 unique outer-contact atom serials: " +
+                              std::to_string(result.unique_outer_contact_serial_count));
+    result.messages.push_back("Geometry Stage 4 unique inner-contact atom serials: " +
+                              std::to_string(result.unique_inner_contact_serial_count));
+    result.messages.push_back("Geometry Stage 4 unique both-contact atom serials: " +
+                              std::to_string(result.unique_both_contact_serial_count));
+    result.messages.push_back("Geometry Stage 4 unique contact atom serial union: " +
+                              std::to_string(result.unique_contact_serial_union_count));
     result.messages.push_back("Geometry Stage 4 unique contact atom bounds x:[" +
                               std::to_string(contact_min_position.x) + ", " +
                               std::to_string(contact_max_position.x) + "] y:[" +
@@ -1134,6 +1196,8 @@ GeometryStage5SurfacePrepResult runGeometryAnalysisStage5SurfacePreparation(
     result.raw_valid_mask = stage4_result.valid_mask;
     result.outer_contact_serial_numbers = stage4_result.outer_contact_serial_numbers;
     result.inner_contact_serial_numbers = stage4_result.inner_contact_serial_numbers;
+    result.outer_contact_patch_atom_indices = stage4_result.outer_contact_patch_atom_indices;
+    result.inner_contact_patch_atom_indices = stage4_result.inner_contact_patch_atom_indices;
     result.inside_disk_count = stage4_result.inside_disk_count;
     result.raw_valid_node_count = stage4_result.valid_node_count;
     result.raw_invalid_node_count = result.inside_disk_count - result.raw_valid_node_count;
@@ -1218,13 +1282,45 @@ GeometryStage5SurfacePrepResult runGeometryAnalysisStage5SurfacePreparation(
         if (result.paired_seed_mask[idx] == 0) {
             continue;
         }
-        if (result.outer_contact_serial_numbers[idx] > 0) {
-            result.unique_outer_seed_atom_serials.push_back(result.outer_contact_serial_numbers[idx]);
+        const int outer_patch_index = result.outer_contact_patch_atom_indices[idx];
+        const int inner_patch_index = result.inner_contact_patch_atom_indices[idx];
+        if (outer_patch_index >= 0) {
+            result.unique_outer_seed_patch_atom_indices.push_back(static_cast<std::size_t>(outer_patch_index));
         }
-        if (result.inner_contact_serial_numbers[idx] > 0) {
-            result.unique_inner_seed_atom_serials.push_back(result.inner_contact_serial_numbers[idx]);
+        if (inner_patch_index >= 0) {
+            result.unique_inner_seed_patch_atom_indices.push_back(static_cast<std::size_t>(inner_patch_index));
         }
+
+        if (outer_patch_index >= 0 || inner_patch_index >= 0) {
+            if (outer_patch_index >= 0) {
+                result.unique_seed_patch_atom_index_union.push_back(static_cast<std::size_t>(outer_patch_index));
+            }
+            if (inner_patch_index >= 0) {
+                result.unique_seed_patch_atom_index_union.push_back(static_cast<std::size_t>(inner_patch_index));
+            }
+        } else {
+            // Fallback path for synthetic tests or legacy Stage 4 payloads that
+            // do not provide per-node patch-atom indices.
+            if (result.outer_contact_serial_numbers[idx] != 0 || result.inner_contact_serial_numbers[idx] != 0) {
+                result.unique_seed_patch_atom_index_union.push_back(idx);
+            }
+        }
+
+        result.unique_outer_seed_atom_serials.push_back(result.outer_contact_serial_numbers[idx]);
+        result.unique_inner_seed_atom_serials.push_back(result.inner_contact_serial_numbers[idx]);
     }
+    std::sort(result.unique_outer_seed_patch_atom_indices.begin(), result.unique_outer_seed_patch_atom_indices.end());
+    result.unique_outer_seed_patch_atom_indices.erase(std::unique(result.unique_outer_seed_patch_atom_indices.begin(),
+                                                                  result.unique_outer_seed_patch_atom_indices.end()),
+                                                      result.unique_outer_seed_patch_atom_indices.end());
+    std::sort(result.unique_inner_seed_patch_atom_indices.begin(), result.unique_inner_seed_patch_atom_indices.end());
+    result.unique_inner_seed_patch_atom_indices.erase(std::unique(result.unique_inner_seed_patch_atom_indices.begin(),
+                                                                  result.unique_inner_seed_patch_atom_indices.end()),
+                                                      result.unique_inner_seed_patch_atom_indices.end());
+    std::sort(result.unique_seed_patch_atom_index_union.begin(), result.unique_seed_patch_atom_index_union.end());
+    result.unique_seed_patch_atom_index_union.erase(std::unique(result.unique_seed_patch_atom_index_union.begin(),
+                                                                result.unique_seed_patch_atom_index_union.end()),
+                                                    result.unique_seed_patch_atom_index_union.end());
     std::sort(result.unique_outer_seed_atom_serials.begin(), result.unique_outer_seed_atom_serials.end());
     result.unique_outer_seed_atom_serials.erase(
         std::unique(result.unique_outer_seed_atom_serials.begin(), result.unique_outer_seed_atom_serials.end()),
@@ -1233,6 +1329,9 @@ GeometryStage5SurfacePrepResult runGeometryAnalysisStage5SurfacePreparation(
     result.unique_inner_seed_atom_serials.erase(
         std::unique(result.unique_inner_seed_atom_serials.begin(), result.unique_inner_seed_atom_serials.end()),
         result.unique_inner_seed_atom_serials.end());
+    result.unique_outer_seed_patch_atom_count = result.unique_outer_seed_patch_atom_indices.size();
+    result.unique_inner_seed_patch_atom_count = result.unique_inner_seed_patch_atom_indices.size();
+    result.unique_seed_patch_atom_index_union_count = result.unique_seed_patch_atom_index_union.size();
 
     const double support_radius2 = result.support_radius * result.support_radius;
     for (std::size_t j = 0; j < result.grid.ny; ++j) {
@@ -1354,9 +1453,15 @@ GeometryStage5SurfacePrepResult runGeometryAnalysisStage5SurfacePreparation(
     result.messages.push_back("Geometry Stage 5 hard-invalid nodes: " + std::to_string(result.hard_invalid_node_count));
     result.messages.push_back("Geometry Stage 5 reliable core nodes: " +
                               std::to_string(result.reliable_core_node_count));
-    result.messages.push_back("Geometry Stage 5 unique outer seed atoms: " +
+    result.messages.push_back("Geometry Stage 5 unique outer seed patch atoms (index-based): " +
+                              std::to_string(result.unique_outer_seed_patch_atom_count));
+    result.messages.push_back("Geometry Stage 5 unique inner seed patch atoms (index-based): " +
+                              std::to_string(result.unique_inner_seed_patch_atom_count));
+    result.messages.push_back("Geometry Stage 5 unique seed patch atom union (index-based): " +
+                              std::to_string(result.unique_seed_patch_atom_index_union_count));
+    result.messages.push_back("Geometry Stage 5 unique outer seed atom serials: " +
                               std::to_string(result.unique_outer_seed_atom_serials.size()));
-    result.messages.push_back("Geometry Stage 5 unique inner seed atoms: " +
+    result.messages.push_back("Geometry Stage 5 unique inner seed atom serials: " +
                               std::to_string(result.unique_inner_seed_atom_serials.size()));
     if (config.debug) {
         result.messages.push_back("Geometry Stage 5 outer seed CSV: " + result.outer_seed_csv_path);

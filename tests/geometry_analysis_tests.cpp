@@ -101,6 +101,8 @@ GeometryStage4RawSheetResult makeSyntheticStage4ResultForStage5() {
     stage4.valid_mask.assign(stage4.node_count, 0);
     stage4.outer_contact_serial_numbers.assign(stage4.node_count, 0);
     stage4.inner_contact_serial_numbers.assign(stage4.node_count, 0);
+    stage4.outer_contact_patch_atom_indices.assign(stage4.node_count, -1);
+    stage4.inner_contact_patch_atom_indices.assign(stage4.node_count, -1);
     stage4.candidate_patch_atom_counts.assign(stage4.node_count, 0);
 
     const double radius2 = 4.0;
@@ -116,25 +118,64 @@ GeometryStage4RawSheetResult makeSyntheticStage4ResultForStage5() {
         }
     }
 
-    auto markValid = [&](std::size_t i, std::size_t j, double z_outer, double z_inner, int outer_serial,
-                         int inner_serial) {
+    auto markValid = [&](std::size_t i,
+                         std::size_t j,
+                         double z_outer,
+                         double z_inner,
+                         int outer_serial,
+                         int inner_serial,
+                         int outer_patch_idx,
+                         int inner_patch_idx) {
         const std::size_t idx = nodeIndex(i, j, stage4.grid.nx);
         stage4.valid_mask[idx] = 1;
         stage4.z_outer_raw[idx] = z_outer;
         stage4.z_inner_raw[idx] = z_inner;
         stage4.outer_contact_serial_numbers[idx] = outer_serial;
         stage4.inner_contact_serial_numbers[idx] = inner_serial;
+        stage4.outer_contact_patch_atom_indices[idx] = outer_patch_idx;
+        stage4.inner_contact_patch_atom_indices[idx] = inner_patch_idx;
         ++stage4.valid_node_count;
     };
 
-    markValid(2, 2, 8.0, 4.0, 101, 201);
-    markValid(1, 2, 8.1, 4.1, 102, 202);
-    markValid(3, 2, 8.2, 4.2, 103, 203);
-    markValid(2, 1, 8.3, 4.3, 104, 204);
-    markValid(2, 3, 8.4, 4.4, 105, 205);
-    markValid(1, 1, 8.5, 4.5, 101, 201);
-    markValid(3, 3, 8.6, 4.6, 103, 203);
+    markValid(2, 2, 8.0, 4.0, 101, 201, 10, 20);
+    markValid(1, 2, 8.1, 4.1, 102, 202, 11, 21);
+    markValid(3, 2, 8.2, 4.2, 103, 203, 12, 22);
+    markValid(2, 1, 8.3, 4.3, 104, 204, 13, 23);
+    markValid(2, 3, 8.4, 4.4, 105, 205, 14, 24);
+    markValid(1, 1, 8.5, 4.5, 101, 201, 10, 20);
+    markValid(3, 3, 8.6, 4.6, 103, 203, 12, 22);
 
+    stage4.invalid_node_count = stage4.inside_disk_count - stage4.valid_node_count;
+    return stage4;
+}
+
+GeometryStage4RawSheetResult makeStage4ResultWithIndexSerialMismatch() {
+    GeometryStage4RawSheetResult stage4 = makeSyntheticStage4ResultForStage5();
+
+    auto markValid = [&](std::size_t i,
+                         std::size_t j,
+                         double z_outer,
+                         double z_inner,
+                         int outer_serial,
+                         int inner_serial,
+                         int outer_patch_idx,
+                         int inner_patch_idx) {
+        const std::size_t idx = nodeIndex(i, j, stage4.grid.nx);
+        if (stage4.valid_mask[idx] == 0) {
+            ++stage4.valid_node_count;
+        }
+        stage4.valid_mask[idx] = 1;
+        stage4.z_outer_raw[idx] = z_outer;
+        stage4.z_inner_raw[idx] = z_inner;
+        stage4.outer_contact_serial_numbers[idx] = outer_serial;
+        stage4.inner_contact_serial_numbers[idx] = inner_serial;
+        stage4.outer_contact_patch_atom_indices[idx] = outer_patch_idx;
+        stage4.inner_contact_patch_atom_indices[idx] = inner_patch_idx;
+    };
+
+    // Introduce serial collisions across distinct patch indices.
+    markValid(0, 2, 9.1, 4.1, 7, -3, 30, 40);
+    markValid(4, 2, 9.2, 4.2, 7, -3, 31, 41);
     stage4.invalid_node_count = stage4.inside_disk_count - stage4.valid_node_count;
     return stage4;
 }
@@ -730,12 +771,8 @@ void testStage5SeedSerialTraceabilityUsesAllPairedSeeds() {
         if (stage5.paired_seed_mask[idx] == 0) {
             continue;
         }
-        if (stage4.outer_contact_serial_numbers[idx] > 0) {
-            expected_outer.push_back(stage4.outer_contact_serial_numbers[idx]);
-        }
-        if (stage4.inner_contact_serial_numbers[idx] > 0) {
-            expected_inner.push_back(stage4.inner_contact_serial_numbers[idx]);
-        }
+        expected_outer.push_back(stage4.outer_contact_serial_numbers[idx]);
+        expected_inner.push_back(stage4.inner_contact_serial_numbers[idx]);
     }
     std::sort(expected_outer.begin(), expected_outer.end());
     expected_outer.erase(std::unique(expected_outer.begin(), expected_outer.end()), expected_outer.end());
@@ -746,6 +783,76 @@ void testStage5SeedSerialTraceabilityUsesAllPairedSeeds() {
                "Stage 5 outer seed serials should match all paired-seed nodes");
     assertTrue(stage5.unique_inner_seed_atom_serials == expected_inner,
                "Stage 5 inner seed serials should match all paired-seed nodes");
+}
+
+void testStage4SummaryCsvIncludesExplicitPatchAndSerialProvenanceColumns() {
+    Capsid capsid = makeSimpleCapsid();
+    FoldPatchAnalysisConfig config;
+    config.enabled = true;
+    config.debug = true;
+    config.fold_type = 2;
+    config.fold_index = 0;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    config.min_atoms_in_patch = 2;
+    config.output_prefix = "test_stage4_provenance_columns";
+
+    const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
+    assertTrue(result.success, "Stage 1-5 pipeline should succeed");
+    std::ifstream summary(result.stage4_raw.summary_csv_path);
+    assertTrue(summary.good(), "Stage 4 summary csv should be readable");
+
+    std::string header;
+    std::getline(summary, header);
+    assertTrue(header.find("unique_outer_contact_patch_atoms") != std::string::npos,
+               "Stage 4 summary should include index-based outer provenance");
+    assertTrue(header.find("unique_outer_contact_serials") != std::string::npos,
+               "Stage 4 summary should include serial-based outer provenance");
+    assertTrue(header.find("unique_contact_serial_union") != std::string::npos,
+               "Stage 4 summary should include serial union provenance");
+
+    std::filesystem::remove(result.stage2_patch.export_path);
+    std::filesystem::remove(result.stage4_raw.outer_csv_path);
+    std::filesystem::remove(result.stage4_raw.inner_csv_path);
+    std::filesystem::remove(result.stage4_raw.valid_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.outer_only_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.inner_only_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.negative_thickness_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.summary_csv_path);
+    std::filesystem::remove(result.stage4_raw.contact_atoms_pdb_path);
+    std::filesystem::remove(result.stage5_prep.outer_seed_csv_path);
+    std::filesystem::remove(result.stage5_prep.inner_seed_csv_path);
+    std::filesystem::remove(result.stage5_prep.paired_seed_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.boundary_exclusion_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.interp_allowed_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.hard_invalid_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.reliable_core_mask_csv_path);
+    std::filesystem::remove(result.stage5_prep.summary_csv_path);
+}
+
+void testStage5SeedProvenanceSeparatesPatchIndicesFromSerials() {
+    const GeometryStage4RawSheetResult stage4 = makeStage4ResultWithIndexSerialMismatch();
+    FoldPatchAnalysisConfig config;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+
+    const auto stage5 = runGeometryAnalysisStage5SurfacePreparation(stage4, config, nullptr);
+    assertTrue(stage5.success, "Stage 5 should succeed");
+    assertTrue(stage5.unique_outer_seed_patch_atom_count > stage5.unique_outer_seed_atom_serials.size(),
+               "outer index-based provenance should exceed serial-based provenance in mismatch fixture");
+    assertTrue(stage5.unique_inner_seed_patch_atom_count > stage5.unique_inner_seed_atom_serials.size(),
+               "inner index-based provenance should exceed serial-based provenance in mismatch fixture");
+    assertTrue(std::is_sorted(stage5.unique_outer_seed_patch_atom_indices.begin(),
+                              stage5.unique_outer_seed_patch_atom_indices.end()),
+               "outer seed patch indices should be sorted");
+    assertTrue(std::is_sorted(stage5.unique_outer_seed_atom_serials.begin(), stage5.unique_outer_seed_atom_serials.end()),
+               "outer seed serials should be sorted");
+    assertTrue(std::find(stage5.unique_outer_seed_atom_serials.begin(), stage5.unique_outer_seed_atom_serials.end(), 7) !=
+                   stage5.unique_outer_seed_atom_serials.end(),
+               "serial-based provenance should preserve non-positive/positive values from Stage 4");
+    assertTrue(std::find(stage5.unique_inner_seed_atom_serials.begin(), stage5.unique_inner_seed_atom_serials.end(), -3) !=
+                   stage5.unique_inner_seed_atom_serials.end(),
+               "serial-based provenance should include negative serials");
 }
 
 void testStage5BoundaryExclusionBehavior() {
@@ -911,6 +1018,8 @@ int main() {
         testStage5RequiresSuccessfulStage4();
         testStage5SeedPromotionAndUniqueSerials();
         testStage5SeedSerialTraceabilityUsesAllPairedSeeds();
+        testStage4SummaryCsvIncludesExplicitPatchAndSerialProvenanceColumns();
+        testStage5SeedProvenanceSeparatesPatchIndicesFromSerials();
         testStage5BoundaryExclusionBehavior();
         testStage5InterpolationAdmissibilityBehavior();
         testStage5ReliableCoreBehavior();

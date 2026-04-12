@@ -151,6 +151,8 @@ struct GeometryStage4RawSheetResult {
     std::vector<std::size_t> candidate_patch_atom_counts;
     std::vector<int> inner_contact_serial_numbers;
     std::vector<int> outer_contact_serial_numbers;
+    std::vector<int> outer_contact_patch_atom_indices;
+    std::vector<int> inner_contact_patch_atom_indices;
     std::vector<PatchAtomContactRole> atom_roles;
     std::vector<Stage4RawContactRecord> raw_contacts;
     std::size_t contact_search_patch_atom_count = 0;
@@ -167,6 +169,14 @@ struct GeometryStage4RawSheetResult {
     std::size_t unique_inner_contact_atom_count = 0;
     std::size_t unique_both_contact_atom_count = 0;
     std::size_t unique_contact_atom_count = 0;
+    std::vector<int> unique_outer_contact_serials;
+    std::vector<int> unique_inner_contact_serials;
+    std::vector<int> unique_both_contact_serials;
+    std::vector<int> unique_contact_serial_union;
+    std::size_t unique_outer_contact_serial_count = 0;
+    std::size_t unique_inner_contact_serial_count = 0;
+    std::size_t unique_both_contact_serial_count = 0;
+    std::size_t unique_contact_serial_union_count = 0;
     std::string outer_csv_path;
     std::string inner_csv_path;
     std::string valid_mask_csv_path;
@@ -206,9 +216,14 @@ struct GeometryStage5SurfacePrepResult {
 
     std::vector<int> outer_contact_serial_numbers;
     std::vector<int> inner_contact_serial_numbers;
+    std::vector<int> outer_contact_patch_atom_indices;
+    std::vector<int> inner_contact_patch_atom_indices;
 
     std::vector<int> unique_outer_seed_atom_serials;
     std::vector<int> unique_inner_seed_atom_serials;
+    std::vector<std::size_t> unique_outer_seed_patch_atom_indices;
+    std::vector<std::size_t> unique_inner_seed_patch_atom_indices;
+    std::vector<std::size_t> unique_seed_patch_atom_index_union;
 
     std::size_t node_count = 0;
     std::size_t inside_disk_count = 0;
@@ -223,6 +238,9 @@ struct GeometryStage5SurfacePrepResult {
     std::size_t paired_interp_allowed_node_count = 0;
     std::size_t hard_invalid_node_count = 0;
     std::size_t reliable_core_node_count = 0;
+    std::size_t unique_outer_seed_patch_atom_count = 0;
+    std::size_t unique_inner_seed_patch_atom_count = 0;
+    std::size_t unique_seed_patch_atom_index_union_count = 0;
 
     double boundary_margin = 0.0;
     double support_radius = 0.0;
