@@ -120,6 +120,25 @@ void testLineSphereIntersectionHelper() {
     assertTrue(proper.intersects, "d2 < r2 should intersect");
     assertTrue(near(proper.z_low, 5.0 - std::sqrt(3.0)), "proper z_low should be center-delta");
     assertTrue(near(proper.z_high, 5.0 + std::sqrt(3.0)), "proper z_high should be center+delta");
+
+    PatchAtom shifted;
+    shifted.position = {0.0, 0.0, 1000.0};
+    shifted.vdw_radius = 2.0;
+    const auto shifted_hit = intersectVerticalLineWithSphere(0.0, 0.0, shifted);
+    assertTrue(shifted_hit.intersects, "large positive z sphere should intersect identically");
+    assertTrue(near(shifted_hit.z_low, 998.0), "shifted sphere z_low should be geometric only");
+    assertTrue(near(shifted_hit.z_high, 1002.0), "shifted sphere z_high should be geometric only");
+
+    PatchAtom low;
+    low.position = {0.0, 0.0, -1000.0};
+    low.vdw_radius = 2.0;
+    const auto low_hit = intersectVerticalLineWithSphere(2.0, 0.0, low);
+    assertTrue(low_hit.intersects, "tangent at large negative z should intersect");
+    assertTrue(near(low_hit.z_low, -1000.0), "negative-z tangent z_low should match center");
+    assertTrue(near(low_hit.z_high, -1000.0), "negative-z tangent z_high should match center");
+
+    const auto near_miss = intersectVerticalLineWithSphere(2.000001, 0.0, atom, 1e-12);
+    assertTrue(!near_miss.intersects, "just outside radius should miss with strict tolerance");
 }
 
 void testSingleNodeFirstContact() {
@@ -161,6 +180,20 @@ void testSingleNodeFirstContact() {
     assertTrue(tie.valid, "tie case should remain valid");
     assertTrue(tie.outer_patch_atom_index == 0, "tie should prefer earlier patch atom for outer");
     assertTrue(tie.inner_patch_atom_index == 0, "tie should prefer earlier patch atom for inner");
+
+    std::vector<PatchAtom> disjoint;
+    PatchAtom d0;
+    d0.position = {0.0, 0.0, 91.0}; // [90,92]
+    d0.vdw_radius = 1.0;
+    disjoint.push_back(d0);
+    PatchAtom d1;
+    d1.position = {0.0, 0.0, 101.0}; // [100,102]
+    d1.vdw_radius = 1.0;
+    disjoint.push_back(d1);
+    const auto disjoint_case = detectRawFirstContactAtNode(0.0, 0.0, disjoint);
+    assertTrue(!disjoint_case.valid, "non-overlapping intervals implying negative thickness should be invalid");
+    assertTrue(near(disjoint_case.z_outer_raw, 92.0), "disjoint outer should still be min upper");
+    assertTrue(near(disjoint_case.z_inner_raw, 100.0), "disjoint inner should still be max lower");
 }
 
 void testGridConstruction() {
@@ -400,7 +433,15 @@ void testStage4RoleClassificationAndCsvAndPdb() {
     assertTrue(std::filesystem::exists(stage4.outer_csv_path), "outer csv should exist");
     assertTrue(std::filesystem::exists(stage4.inner_csv_path), "inner csv should exist");
     assertTrue(std::filesystem::exists(stage4.valid_mask_csv_path), "valid mask csv should exist");
+    assertTrue(std::filesystem::exists(stage4.outer_only_mask_csv_path), "outer-only mask csv should exist");
+    assertTrue(std::filesystem::exists(stage4.inner_only_mask_csv_path), "inner-only mask csv should exist");
+    assertTrue(std::filesystem::exists(stage4.negative_thickness_mask_csv_path),
+               "negative-thickness mask csv should exist");
+    assertTrue(std::filesystem::exists(stage4.summary_csv_path), "summary csv should exist");
     assertTrue(std::filesystem::exists(stage4.contact_atoms_pdb_path), "contact atom pdb should exist");
+    assertTrue(stage4.negative_thickness_node_count == 0, "negative-thickness valid nodes should be zero");
+    assertTrue(stage4.both_hit_node_count == stage4.valid_node_count,
+               "current policy should classify all valid nodes as both-hit");
 
     std::ifstream outer(stage4.outer_csv_path);
     std::string header;
@@ -433,11 +474,57 @@ void testStage4RoleClassificationAndCsvAndPdb() {
     assertTrue(atom_records == static_cast<int>(expected_contact_atoms),
                "contact PDB should export only original atoms classified as outer/inner contacts");
 
+    std::ifstream summary(stage4.summary_csv_path);
+    std::getline(summary, header);
+    assertTrue(header.find("stage4_start_utc") != std::string::npos, "summary csv should include timestamps");
+    assertTrue(header.find("negative_thickness_nodes") != std::string::npos,
+               "summary csv should include thickness counters");
+
     std::filesystem::remove(stage2.export_path);
     std::filesystem::remove(stage4.outer_csv_path);
     std::filesystem::remove(stage4.inner_csv_path);
     std::filesystem::remove(stage4.valid_mask_csv_path);
+    std::filesystem::remove(stage4.outer_only_mask_csv_path);
+    std::filesystem::remove(stage4.inner_only_mask_csv_path);
+    std::filesystem::remove(stage4.negative_thickness_mask_csv_path);
+    std::filesystem::remove(stage4.summary_csv_path);
     std::filesystem::remove(stage4.contact_atoms_pdb_path);
+}
+
+void testStage4DeterministicOutputs() {
+    Capsid capsid = makeSimpleCapsid();
+    FoldPatchAnalysisConfig config;
+    config.enabled = true;
+    config.fold_type = 2;
+    config.fold_index = 0;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    config.min_atoms_in_patch = 2;
+    config.output_prefix = "stage4_deterministic";
+
+    const auto first = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
+    assertTrue(first.success, "first Stage 1-4 run should succeed");
+    std::ifstream f1(first.stage4_raw.outer_csv_path);
+    const std::string csv1((std::istreambuf_iterator<char>(f1)), std::istreambuf_iterator<char>());
+
+    const auto second = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
+    assertTrue(second.success, "second Stage 1-4 run should succeed");
+    std::ifstream f2(second.stage4_raw.outer_csv_path);
+    const std::string csv2((std::istreambuf_iterator<char>(f2)), std::istreambuf_iterator<char>());
+
+    assertTrue(csv1 == csv2, "outer raw csv should be byte-stable across identical runs");
+    assertTrue(first.stage4_raw.valid_node_count == second.stage4_raw.valid_node_count,
+               "valid-node count should be deterministic");
+
+    std::filesystem::remove(first.stage2_patch.export_path);
+    std::filesystem::remove(first.stage4_raw.outer_csv_path);
+    std::filesystem::remove(first.stage4_raw.inner_csv_path);
+    std::filesystem::remove(first.stage4_raw.valid_mask_csv_path);
+    std::filesystem::remove(first.stage4_raw.outer_only_mask_csv_path);
+    std::filesystem::remove(first.stage4_raw.inner_only_mask_csv_path);
+    std::filesystem::remove(first.stage4_raw.negative_thickness_mask_csv_path);
+    std::filesystem::remove(first.stage4_raw.summary_csv_path);
+    std::filesystem::remove(first.stage4_raw.contact_atoms_pdb_path);
 }
 
 void testStage1NonIdentityFor3_0() {
@@ -486,6 +573,10 @@ void testStage1ToStage4Integration() {
     std::filesystem::remove(result.stage4_raw.outer_csv_path);
     std::filesystem::remove(result.stage4_raw.inner_csv_path);
     std::filesystem::remove(result.stage4_raw.valid_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.outer_only_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.inner_only_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.negative_thickness_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.summary_csv_path);
     std::filesystem::remove(result.stage4_raw.contact_atoms_pdb_path);
 }
 
@@ -509,6 +600,7 @@ int main() {
         testStage2ToStage3Integration();
         testStage3InfersAndFallsBackWhenElementMissing();
         testStage4RoleClassificationAndCsvAndPdb();
+        testStage4DeterministicOutputs();
         testStage1ToStage4Integration();
         std::cout << "All geometry analysis Stage 1/2/3/4 tests passed.\n";
         return 0;

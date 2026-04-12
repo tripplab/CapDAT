@@ -188,6 +188,7 @@ if(CAPDAT_BUILD_TESTS)
         src/reorientation_workflow.cpp
         src/export_capsid.cpp
         src/logger.cpp
+        src/timer.cpp
         src/geometry_analysis.cpp
     )
     target_include_directories(capdat_geometry_analysis_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)

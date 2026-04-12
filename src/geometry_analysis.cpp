@@ -1,11 +1,15 @@
 #include "geometry_analysis.hpp"
 
 #include "export_capsid.hpp"
+#include "timer.hpp"
 
 #include <cmath>
 #include <cctype>
+#include <chrono>
 #include <fstream>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -154,6 +158,59 @@ bool writeStage4CsvValidMask(const GeometryStage4RawSheetResult& result) {
                 << '\n';
         }
     }
+    return out.good();
+}
+
+std::string utcTimestampNowIso8601() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t tt = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &tt);
+#else
+    gmtime_r(&tt, &tm);
+#endif
+    std::ostringstream out;
+    out << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+    return out.str();
+}
+
+bool writeStage4CsvBinaryMask(const GeometryStage4RawSheetResult& result,
+                              const std::string& path,
+                              const char* header_name,
+                              const std::vector<uint8_t>& mask) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,inside_disk," << header_name << "\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.inside_disk_mask[idx]) << ',' << static_cast<int>(mask[idx]) << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage4SummaryCsv(const GeometryStage4RawSheetResult& result) {
+    std::ofstream out(result.summary_csv_path);
+    if (!out) {
+        return false;
+    }
+    out << "stage4_start_utc,stage4_end_utc,grid_spacing,cylinder_radius,nx,ny,total_nodes,inside_disk_nodes,"
+           "valid_nodes,invalid_nodes,outer_only_nodes,inner_only_nodes,both_hit_nodes,zero_thickness_nodes,"
+           "negative_thickness_nodes,unique_outer_contact_atoms,unique_inner_contact_atoms,"
+           "unique_both_contact_atoms,unique_contact_union,runtime_seconds\n";
+    out << result.stage4_start_timestamp_utc << ',' << result.stage4_end_timestamp_utc << ',' << result.grid.spacing
+        << ',' << result.grid.x_max << ',' << result.grid.nx << ',' << result.grid.ny << ',' << result.node_count
+        << ',' << result.inside_disk_count << ',' << result.valid_node_count << ',' << result.invalid_node_count
+        << ',' << result.outer_only_node_count << ',' << result.inner_only_node_count << ','
+        << result.both_hit_node_count << ',' << result.zero_thickness_node_count << ','
+        << result.negative_thickness_node_count << ',' << result.unique_outer_contact_atom_count << ','
+        << result.unique_inner_contact_atom_count << ',' << result.unique_both_contact_atom_count << ','
+        << result.unique_contact_atom_count << ',' << result.stage4_runtime_seconds << '\n';
     return out.good();
 }
 
@@ -611,6 +668,9 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     Logger* logger,
     double tolerance) {
     GeometryStage4RawSheetResult result;
+    Timer stage4_timer;
+    stage4_timer.start();
+    result.stage4_start_timestamp_utc = utcTimestampNowIso8601();
 
     if (!stage3_result.success) {
         throw std::runtime_error("Stage 4 cannot run before successful Stage 3 patch normalization");
@@ -633,6 +693,9 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.inside_disk_mask.assign(result.node_count, 0);
     result.valid_mask.assign(result.node_count, 0);
     result.atom_roles.assign(stage3_result.analytical_patch.atoms.size(), PatchAtomContactRole::none);
+    std::vector<uint8_t> outer_only_mask(result.node_count, 0);
+    std::vector<uint8_t> inner_only_mask(result.node_count, 0);
+    std::vector<uint8_t> negative_thickness_mask(result.node_count, 0);
 
     const double radius2 = config.cylinder_radius * config.cylinder_radius;
     std::vector<bool> used_as_outer(stage3_result.analytical_patch.atoms.size(), false);
@@ -663,6 +726,16 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
             result.z_outer_raw[idx] = node.z_outer_raw;
             result.z_inner_raw[idx] = node.z_inner_raw;
             ++result.valid_node_count;
+            ++result.both_hit_node_count;
+
+            const double thickness = node.z_outer_raw - node.z_inner_raw;
+            if (std::fabs(thickness) <= tolerance) {
+                ++result.zero_thickness_node_count;
+            }
+            if (thickness < -tolerance) {
+                ++result.negative_thickness_node_count;
+                negative_thickness_mask[idx] = 1;
+            }
 
             used_as_outer[node.outer_patch_atom_index] = true;
             used_as_inner[node.inner_patch_atom_index] = true;
@@ -726,7 +799,11 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.outer_csv_path = config.output_prefix + "_outer_raw.csv";
     result.inner_csv_path = config.output_prefix + "_inner_raw.csv";
     result.valid_mask_csv_path = config.output_prefix + "_valid_mask_raw.csv";
-    result.contact_atoms_pdb_path = config.output_prefix + "_raw_contact_points.pdb";
+    result.outer_only_mask_csv_path = config.output_prefix + "_outer_only_mask_raw.csv";
+    result.inner_only_mask_csv_path = config.output_prefix + "_inner_only_mask_raw.csv";
+    result.negative_thickness_mask_csv_path = config.output_prefix + "_negative_thickness_mask_raw.csv";
+    result.summary_csv_path = config.output_prefix + "_stage4_summary.csv";
+    result.contact_atoms_pdb_path = config.output_prefix + "_raw_contact_atoms.pdb";
 
     if (!writeStage4CsvOuter(result)) {
         throw std::runtime_error("Failed to write raw outer grid CSV");
@@ -736,6 +813,16 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     }
     if (!writeStage4CsvValidMask(result)) {
         throw std::runtime_error("Failed to write raw valid-mask grid CSV");
+    }
+    if (!writeStage4CsvBinaryMask(result, result.outer_only_mask_csv_path, "outer_only", outer_only_mask)) {
+        throw std::runtime_error("Failed to write raw outer-only mask CSV");
+    }
+    if (!writeStage4CsvBinaryMask(result, result.inner_only_mask_csv_path, "inner_only", inner_only_mask)) {
+        throw std::runtime_error("Failed to write raw inner-only mask CSV");
+    }
+    if (!writeStage4CsvBinaryMask(
+            result, result.negative_thickness_mask_csv_path, "negative_thickness", negative_thickness_mask)) {
+        throw std::runtime_error("Failed to write raw negative-thickness mask CSV");
     }
 
     ExportCapsidConfig writer_config;
@@ -754,12 +841,26 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
         throw std::runtime_error("Failed to export raw contact atoms subset");
     }
 
+    stage4_timer.stop();
+    result.stage4_end_timestamp_utc = utcTimestampNowIso8601();
+    result.stage4_runtime_seconds = stage4_timer.elapsedSeconds();
+    if (!writeStage4SummaryCsv(result)) {
+        throw std::runtime_error("Failed to write Stage 4 summary CSV");
+    }
+
     result.messages.push_back("Geometry Stage 4 grid dimensions: nx=" + std::to_string(result.grid.nx) +
                               ", ny=" + std::to_string(result.grid.ny));
     result.messages.push_back("Geometry Stage 4 total nodes: " + std::to_string(result.node_count));
     result.messages.push_back("Geometry Stage 4 nodes inside disk: " + std::to_string(result.inside_disk_count));
     result.messages.push_back("Geometry Stage 4 valid nodes: " + std::to_string(result.valid_node_count));
     result.messages.push_back("Geometry Stage 4 invalid nodes: " + std::to_string(result.invalid_node_count));
+    result.messages.push_back("Geometry Stage 4 outer-only nodes: " + std::to_string(result.outer_only_node_count));
+    result.messages.push_back("Geometry Stage 4 inner-only nodes: " + std::to_string(result.inner_only_node_count));
+    result.messages.push_back("Geometry Stage 4 both-hit nodes: " + std::to_string(result.both_hit_node_count));
+    result.messages.push_back("Geometry Stage 4 zero-thickness nodes: " +
+                              std::to_string(result.zero_thickness_node_count));
+    result.messages.push_back("Geometry Stage 4 negative-thickness nodes: " +
+                              std::to_string(result.negative_thickness_node_count));
     result.messages.push_back("Geometry Stage 4 patch atoms used for contact search: " +
                               std::to_string(result.contact_search_patch_atom_count));
     result.messages.push_back("Geometry Stage 4 unique outer-contact atoms: " +
@@ -780,7 +881,15 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.messages.push_back("Geometry Stage 4 outer CSV: " + result.outer_csv_path);
     result.messages.push_back("Geometry Stage 4 inner CSV: " + result.inner_csv_path);
     result.messages.push_back("Geometry Stage 4 valid mask CSV: " + result.valid_mask_csv_path);
+    result.messages.push_back("Geometry Stage 4 outer-only mask CSV: " + result.outer_only_mask_csv_path);
+    result.messages.push_back("Geometry Stage 4 inner-only mask CSV: " + result.inner_only_mask_csv_path);
+    result.messages.push_back("Geometry Stage 4 negative-thickness mask CSV: " +
+                              result.negative_thickness_mask_csv_path);
+    result.messages.push_back("Geometry Stage 4 summary CSV: " + result.summary_csv_path);
     result.messages.push_back("Geometry Stage 4 contact atoms PDB: " + result.contact_atoms_pdb_path);
+    result.messages.push_back("Geometry Stage 4 start timestamp (UTC): " + result.stage4_start_timestamp_utc);
+    result.messages.push_back("Geometry Stage 4 end timestamp (UTC): " + result.stage4_end_timestamp_utc);
+    result.messages.push_back("Geometry Stage 4 runtime seconds: " + std::to_string(result.stage4_runtime_seconds));
     result.messages.push_back("Geometry analysis: completed Stage 4 raw outer/inner sheet detection.");
 
     result.success = true;
