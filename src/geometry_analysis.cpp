@@ -18,6 +18,7 @@ namespace {
 
 constexpr double kVdwRadiusFallbackAngstrom = 1.70;
 constexpr std::string_view kWarningMessagePrefix = "[[WARNING]] ";
+constexpr std::string_view kNoteMessagePrefix = "[[NOTE]] ";
 
 void logMessages(const std::vector<std::string>& messages, Logger* logger) {
     if (logger == nullptr) {
@@ -26,6 +27,10 @@ void logMessages(const std::vector<std::string>& messages, Logger* logger) {
     for (const std::string& message : messages) {
         if (message.rfind(kWarningMessagePrefix, 0) == 0) {
             logger->warning(message.substr(kWarningMessagePrefix.size()));
+            continue;
+        }
+        if (message.rfind(kNoteMessagePrefix, 0) == 0) {
+            logger->note(message.substr(kNoteMessagePrefix.size()));
             continue;
         }
         logger->info(message);
@@ -726,6 +731,7 @@ GeometryPatchNormalizationResult runGeometryAnalysisStage3PatchNormalization(
                               result.analytical_patch.export_path);
     if (result.analytical_patch.fallback_vdw_radius_count > 0) {
         result.messages.push_back(
+            std::string(kNoteMessagePrefix) +
             "Geometry Stage 3 note: fallback vdW radii were applied where explicit/inferred element resolution "
             "was unavailable.");
     }
@@ -1014,6 +1020,7 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     if (result.zero_thickness_node_count > 0 || result.negative_thickness_node_count > 0 ||
         result.unique_both_contact_atom_count > 0) {
         result.messages.push_back(
+            std::string(kNoteMessagePrefix) +
             "Geometry Stage 4 note: non-zero zero-thickness/negative-thickness nodes or both-contact atoms "
             "indicate potential raw-sheet overlap/thickness anomalies.");
     }
