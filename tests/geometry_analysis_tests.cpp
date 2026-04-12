@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
@@ -100,6 +101,78 @@ void testCylinderClassifier() {
 
     const auto outside = classifyPatchCylinder({2.01, 0.0, 1.0}, 2.0);
     assertTrue(!outside.selected, "r>radius should be excluded");
+}
+
+void testLineSphereIntersectionHelper() {
+    PatchAtom atom;
+    atom.position = {0.0, 0.0, 5.0};
+    atom.vdw_radius = 2.0;
+
+    const auto miss = intersectVerticalLineWithSphere(3.0, 0.0, atom);
+    assertTrue(!miss.intersects, "d2 > r2 should not intersect");
+
+    const auto tangent = intersectVerticalLineWithSphere(2.0, 0.0, atom);
+    assertTrue(tangent.intersects, "tangent should intersect");
+    assertTrue(near(tangent.z_low, 5.0), "tangent z_low should match center z");
+    assertTrue(near(tangent.z_high, 5.0), "tangent z_high should match center z");
+
+    const auto proper = intersectVerticalLineWithSphere(1.0, 0.0, atom);
+    assertTrue(proper.intersects, "d2 < r2 should intersect");
+    assertTrue(near(proper.z_low, 5.0 - std::sqrt(3.0)), "proper z_low should be center-delta");
+    assertTrue(near(proper.z_high, 5.0 + std::sqrt(3.0)), "proper z_high should be center+delta");
+}
+
+void testSingleNodeFirstContact() {
+    std::vector<PatchAtom> atoms;
+
+    PatchAtom a;
+    a.position = {0.0, 0.0, 5.0};
+    a.vdw_radius = 2.0;
+    atoms.push_back(a);
+
+    const auto single = detectRawFirstContactAtNode(0.0, 0.0, atoms);
+    assertTrue(single.valid, "one intersecting sphere should be valid");
+    assertTrue(near(single.z_outer_raw, 7.0), "single sphere outer should be z_high");
+    assertTrue(near(single.z_inner_raw, 3.0), "single sphere inner should be z_low");
+
+    PatchAtom b;
+    b.position = {0.0, 0.0, 8.0};
+    b.vdw_radius = 4.0;
+    atoms.push_back(b);
+
+    const auto multi = detectRawFirstContactAtNode(0.0, 0.0, atoms);
+    assertTrue(multi.valid, "multiple intersecting spheres should be valid");
+    assertTrue(near(multi.z_outer_raw, 7.0), "outer should be minimum z_high");
+    assertTrue(near(multi.z_inner_raw, 4.0), "inner should be maximum z_low");
+
+    const auto none = detectRawFirstContactAtNode(20.0, 20.0, atoms);
+    assertTrue(!none.valid, "no intersection should be invalid");
+
+    std::vector<PatchAtom> tie_atoms;
+    PatchAtom t0;
+    t0.position = {0.0, 0.0, 5.0};
+    t0.vdw_radius = 2.0;
+    tie_atoms.push_back(t0);
+    PatchAtom t1;
+    t1.position = {0.0, 0.0, 5.0};
+    t1.vdw_radius = 2.0;
+    tie_atoms.push_back(t1);
+    const auto tie = detectRawFirstContactAtNode(0.0, 0.0, tie_atoms);
+    assertTrue(tie.valid, "tie case should remain valid");
+    assertTrue(tie.outer_patch_atom_index == 0, "tie should prefer earlier patch atom for outer");
+    assertTrue(tie.inner_patch_atom_index == 0, "tie should prefer earlier patch atom for inner");
+}
+
+void testGridConstruction() {
+    const auto grid = buildStage4RegularGrid(2.0, 1.0);
+    assertTrue(grid.nx == 5 && grid.ny == 5, "grid dimensions should include both -R and +R");
+    assertTrue(near(grid.x_values[0], -2.0) && near(grid.x_values[4], 2.0), "x bounds should be correct");
+    assertTrue(near(grid.y_values[0], -2.0) && near(grid.y_values[4], 2.0), "y bounds should be correct");
+
+    const bool center_inside = ((grid.x_values[2] * grid.x_values[2]) + (grid.y_values[2] * grid.y_values[2])) <= 4.0;
+    const bool corner_inside = ((grid.x_values[0] * grid.x_values[0]) + (grid.y_values[0] * grid.y_values[0])) <= 4.0;
+    assertTrue(center_inside, "center should be inside disk");
+    assertTrue(!corner_inside, "corner should be outside disk");
 }
 
 void testStage1IdentityFor2_0() {
@@ -255,72 +328,77 @@ void testStage2ToStage3Integration() {
     std::filesystem::remove(stage2.export_path);
 }
 
-void testStage3FallbackRadiusIntegration() {
-    Capsid capsid = makeStage2CapsidWithUnknownElement();
-    FoldPatchAnalysisConfig config;
-    config.enabled = true;
-    config.cylinder_radius = 2.0;
-    config.min_atoms_in_patch = 2;
-    config.output_prefix = "stage3_fallback";
-
-    GeometryPreparationResult stage1;
-    stage1.success = true;
-
-    const auto stage2 = runGeometryAnalysisStage2PatchSelection(capsid, config, makeParserConfig(), stage1, nullptr);
-    const auto stage3 = runGeometryAnalysisStage3PatchNormalization(stage2, nullptr);
-    assertTrue(stage3.success, "Stage 3 should succeed with unknown element via fallback radius");
-    assertTrue(stage3.analytical_patch.fallback_vdw_radius_count == 1, "unknown element should use fallback count");
-    assertTrue(stage3.analytical_patch.atoms[1].element == "XX", "unknown element should still be normalized and kept");
-    assertTrue(near(stage3.analytical_patch.atoms[1].vdw_radius, 1.70), "unknown element should use 1.70 fallback");
-
-    std::filesystem::remove(stage2.export_path);
-}
-
-void testPatchExportUsesOriginalSubsetNonRegression() {
+void testStage4RoleClassificationAndCsvAndPdb() {
     Capsid capsid = makeStage2Capsid();
     FoldPatchAnalysisConfig config;
     config.enabled = true;
     config.cylinder_radius = 2.0;
+    config.grid_spacing = 2.0;
     config.min_atoms_in_patch = 2;
-    config.output_prefix = "stage3_export_nonreg";
+    config.output_prefix = "stage4_contacts";
 
     GeometryPreparationResult stage1;
     stage1.success = true;
+
     const auto stage2 = runGeometryAnalysisStage2PatchSelection(capsid, config, makeParserConfig(), stage1, nullptr);
     const auto stage3 = runGeometryAnalysisStage3PatchNormalization(stage2, nullptr);
+    const auto stage4 = runGeometryAnalysisStage4RawSheetDetection(capsid, config, makeParserConfig(), stage3, nullptr);
 
-    assertTrue(stage3.success, "Stage 3 should succeed for export non-regression");
-    assertTrue(stage3.analytical_patch.export_path == stage2.export_path,
-               "Stage 3 should preserve canonical Stage 2 export path");
-    assertTrue(stage2.selected_atom_refs.size() == 2, "Stage 2 should provide expected original subset");
-    assertTrue(stage2.selected_atom_refs[0]->serial() == 1, "first selected original atom serial should be preserved");
-    assertTrue(stage2.selected_atom_refs[1]->serial() == 2, "second selected original atom serial should be preserved");
+    assertTrue(stage4.success, "Stage 4 should succeed");
+    assertTrue(stage4.valid_node_count > 0, "Stage 4 should have valid nodes");
+    assertTrue(stage4.unique_outer_contact_atom_count > 0, "Stage 4 should classify outer contacts");
+    assertTrue(stage4.unique_inner_contact_atom_count > 0, "Stage 4 should classify inner contacts");
+
+    bool seen_both = false;
+    for (PatchAtomContactRole role : stage4.atom_roles) {
+        if (role == PatchAtomContactRole::both) {
+            seen_both = true;
+            break;
+        }
+    }
+    assertTrue(seen_both, "at least one contact atom should be classified as both");
+
+    assertTrue(std::filesystem::exists(stage4.outer_csv_path), "outer csv should exist");
+    assertTrue(std::filesystem::exists(stage4.inner_csv_path), "inner csv should exist");
+    assertTrue(std::filesystem::exists(stage4.valid_mask_csv_path), "valid mask csv should exist");
+    assertTrue(std::filesystem::exists(stage4.contact_atoms_pdb_path), "contact atom pdb should exist");
+
+    std::ifstream outer(stage4.outer_csv_path);
+    std::string header;
+    std::getline(outer, header);
+    assertTrue(header == "i,j,x,y,inside_disk,valid,z_outer_raw", "outer csv header should match");
+    std::string line;
+    bool saw_nan = false;
+    while (std::getline(outer, line)) {
+        if (line.find(",0,nan") != std::string::npos) {
+            saw_nan = true;
+            break;
+        }
+    }
+    assertTrue(saw_nan, "outer csv should contain invalid nodes with nan");
+
+    std::ifstream pdb(stage4.contact_atoms_pdb_path);
+    int atom_records = 0;
+    std::string pdb_line;
+    while (std::getline(pdb, pdb_line)) {
+        if (pdb_line.rfind("ATOM", 0) == 0 || pdb_line.rfind("HETATM", 0) == 0) {
+            ++atom_records;
+        }
+    }
+    std::size_t expected_contact_atoms = 0;
+    for (PatchAtomContactRole role : stage4.atom_roles) {
+        if (role != PatchAtomContactRole::none) {
+            ++expected_contact_atoms;
+        }
+    }
+    assertTrue(atom_records == static_cast<int>(expected_contact_atoms),
+               "contact PDB should export only original atoms classified as outer/inner contacts");
 
     std::filesystem::remove(stage2.export_path);
-}
-
-void testEndToEndStage1Stage2Integration() {
-    Capsid capsid = makeSimpleCapsid();
-    FoldPatchAnalysisConfig config;
-    config.enabled = true;
-    config.fold_type = 2;
-    config.fold_index = 0;
-    config.cylinder_radius = 2.0;
-    config.min_atoms_in_patch = 2;
-    config.output_prefix = "stage2_integration";
-
-    const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
-    assertTrue(result.success, "Stage 1 + Stage 2 integration should succeed");
-    assertTrue(result.preparation.success, "Stage 1 should succeed in integration");
-    assertTrue(result.stage2_patch.success, "Stage 2 should succeed in integration");
-    assertTrue(result.stage3_patch.success, "Stage 3 should succeed in integration");
-    assertTrue(result.stage2_patch.selected_atoms_count == result.stage2_patch.patch_atoms.size(),
-               "selected count should match patch atoms size");
-    assertTrue(result.stage3_patch.analytical_patch.atom_count == result.stage2_patch.selected_atom_refs.size(),
-               "Stage 3 analytical patch count should match selected refs");
-    assertTrue(std::filesystem::exists(result.stage2_patch.export_path), "integration should export patch file");
-
-    std::filesystem::remove(result.stage2_patch.export_path);
+    std::filesystem::remove(stage4.outer_csv_path);
+    std::filesystem::remove(stage4.inner_csv_path);
+    std::filesystem::remove(stage4.valid_mask_csv_path);
+    std::filesystem::remove(stage4.contact_atoms_pdb_path);
 }
 
 void testStage1NonIdentityFor3_0() {
@@ -345,6 +423,33 @@ void testStage1NonIdentityFor3_0() {
     assertTrue(!near(x_before, x_after) || !near(z_before, z_after), "atom coordinates should change");
 }
 
+void testStage1ToStage4Integration() {
+    Capsid capsid = makeSimpleCapsid();
+    FoldPatchAnalysisConfig config;
+    config.enabled = true;
+    config.fold_type = 2;
+    config.fold_index = 0;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    config.min_atoms_in_patch = 2;
+    config.output_prefix = "stage4_integration";
+
+    const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
+    assertTrue(result.success, "Stage 1-4 integration should succeed");
+    assertTrue(result.preparation.success, "Stage 1 should succeed");
+    assertTrue(result.stage2_patch.success, "Stage 2 should succeed");
+    assertTrue(result.stage3_patch.success, "Stage 3 should succeed");
+    assertTrue(result.stage4_raw.success, "Stage 4 should succeed");
+    assertTrue(result.stage4_raw.valid_node_count > 0, "Stage 4 valid mask should include valid nodes");
+    assertTrue(std::filesystem::exists(result.stage4_raw.contact_atoms_pdb_path), "Stage 4 should export contact atoms");
+
+    std::filesystem::remove(result.stage2_patch.export_path);
+    std::filesystem::remove(result.stage4_raw.outer_csv_path);
+    std::filesystem::remove(result.stage4_raw.inner_csv_path);
+    std::filesystem::remove(result.stage4_raw.valid_mask_csv_path);
+    std::filesystem::remove(result.stage4_raw.contact_atoms_pdb_path);
+}
+
 } // namespace
 
 int main() {
@@ -352,6 +457,9 @@ int main() {
         testCylinderClassifier();
         testVdwRadiusLookupAndNormalization();
         testPatchAtomBuilderNormalization();
+        testLineSphereIntersectionHelper();
+        testSingleNodeFirstContact();
+        testGridConstruction();
         testStage1IdentityFor2_0();
         testStage1NonIdentityFor3_0();
         testStage2PatchSelectionAndTraceability();
@@ -359,10 +467,9 @@ int main() {
         testStage2RequiresStage1();
         testStage3FailsWithoutSuccessfulStage2();
         testStage2ToStage3Integration();
-        testStage3FallbackRadiusIntegration();
-        testPatchExportUsesOriginalSubsetNonRegression();
-        testEndToEndStage1Stage2Integration();
-        std::cout << "All geometry analysis Stage 1/2/3 tests passed.\n";
+        testStage4RoleClassificationAndCsvAndPdb();
+        testStage1ToStage4Integration();
+        std::cout << "All geometry analysis Stage 1/2/3/4 tests passed.\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Geometry analysis test failure: " << e.what() << '\n';

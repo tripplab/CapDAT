@@ -36,6 +36,7 @@ void printHelp(const std::string& program_name) {
         << "      --geometry_fold_type <n>   Geometry fold type 2|3|5 (default: 2)\n"
         << "      --geometry_fold_index <n>  Geometry fold index for selected type (default: 0)\n"
         << "      --geometry_cylinder_radius <A>  Geometry cylinder radius in angstroms (default: 12.0)\n"
+        << "      --geometry_grid_spacing <A>  Geometry Stage 4 XY grid spacing in angstroms (default: 2.0)\n"
         << "      --geometry_min_atoms_in_patch <n>  Minimum selected atoms required (default: 20)\n"
         << "      --geometry_out_prefix <path>  Prefix for geometry analysis outputs (default: geometry)\n"
         << "      --quiet             Reduce terminal output\n"
@@ -92,6 +93,7 @@ int main(int argc, char* argv[]) {
     int geometry_fold_type = 2;
     int geometry_fold_index = 0;
     double geometry_cylinder_radius = 12.0;
+    double geometry_grid_spacing = 2.0;
     std::size_t geometry_min_atoms_in_patch = 20;
     std::string geometry_output_prefix = "geometry";
 
@@ -211,6 +213,14 @@ int main(int argc, char* argv[]) {
             geometry_cylinder_radius = std::stod(argv[++i]);
             continue;
         }
+        if (arg == "--geometry_grid_spacing") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_grid_spacing\n";
+                return 1;
+            }
+            geometry_grid_spacing = std::stod(argv[++i]);
+            continue;
+        }
         if (arg == "--geometry_min_atoms_in_patch") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: missing value for --geometry_min_atoms_in_patch\n";
@@ -314,6 +324,7 @@ int main(int argc, char* argv[]) {
         geometry_config.fold_type = geometry_fold_type;
         geometry_config.fold_index = geometry_fold_index;
         geometry_config.cylinder_radius = geometry_cylinder_radius;
+        geometry_config.grid_spacing = geometry_grid_spacing;
         geometry_config.min_atoms_in_patch = geometry_min_atoms_in_patch;
         geometry_config.export_rotated_capsid = verbose;
         geometry_config.output_prefix = geometry_output_prefix;
@@ -321,7 +332,7 @@ int main(int argc, char* argv[]) {
         const GeometryAnalysisResult geometry_result =
             runFoldPatchGeometryAnalysis(capsid, geometry_config, config, &logger);
         if (!geometry_result.success) {
-            throw std::runtime_error("Geometry analysis failed during Stage 1 preparation");
+            throw std::runtime_error("Geometry analysis failed in Stage 1/2/3/4 pipeline");
         }
 
         if (!export_final_output_path.empty()) {
