@@ -94,6 +94,8 @@ struct VdwResolution {
     VdwResolutionSource source = VdwResolutionSource::fallback_unknown;
 };
 
+VdwResolution resolveVdwElement(const Atom& atom);
+
 std::size_t stage4NodeIndex(std::size_t i, std::size_t j, std::size_t nx) {
     return (j * nx) + i;
 }
@@ -211,6 +213,50 @@ bool writeStage4SummaryCsv(const GeometryStage4RawSheetResult& result) {
         << result.negative_thickness_node_count << ',' << result.unique_outer_contact_atom_count << ','
         << result.unique_inner_contact_atom_count << ',' << result.unique_both_contact_atom_count << ','
         << result.unique_contact_atom_count << ',' << result.stage4_runtime_seconds << '\n';
+    return out.good();
+}
+
+const char* toVdwSourceLabel(VdwResolutionSource source) {
+    switch (source) {
+    case VdwResolutionSource::explicit_element:
+        return "explicit_element";
+    case VdwResolutionSource::inferred_from_atom_name:
+        return "inferred_from_atom_name";
+    case VdwResolutionSource::fallback_unknown:
+    default:
+        return "fallback_unknown";
+    }
+}
+
+bool writeStage3NormalizedAtomsCsv(const std::string& path, const GeometryPatchNormalizationResult& stage3_result) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+
+    out << "patch_atom_index,serial_number,atom_name,residue_name,chain_id,residue_seq,insertion_code,alt_loc,"
+           "is_hetatm,raw_element,assigned_element,vdw_assignment_source,vdw_radius,radial_xy,in_positive_z,"
+           "in_cylinder_radius,x,y,z\n";
+
+    for (std::size_t idx = 0; idx < stage3_result.analytical_patch.atoms.size(); ++idx) {
+        const PatchAtom& atom = stage3_result.analytical_patch.atoms[idx];
+        const Atom* original = atom.original_atom;
+        if (original == nullptr) {
+            return false;
+        }
+        const VdwResolution vdw_resolution = resolveVdwElement(*original);
+        const char chain_id = original->chainId() == '\0' ? ' ' : original->chainId();
+        const char insertion_code = original->insertionCode() == '\0' ? ' ' : original->insertionCode();
+        const char alt_loc = original->altLoc() == '\0' ? ' ' : original->altLoc();
+
+        out << idx << ',' << original->serial() << ',' << original->name() << ',' << original->residueName() << ','
+            << chain_id << ',' << original->residueSeq() << ',' << insertion_code << ',' << alt_loc << ','
+            << (original->isHetatm() ? 1 : 0) << ',' << original->element() << ',' << atom.element << ','
+            << toVdwSourceLabel(vdw_resolution.source) << ',' << atom.vdw_radius << ',' << atom.radial_xy << ','
+            << (atom.in_positive_z ? 1 : 0) << ',' << (atom.in_cylinder_radius ? 1 : 0) << ',' << atom.position.x
+            << ',' << atom.position.y << ',' << atom.position.z << '\n';
+    }
+
     return out.good();
 }
 
@@ -684,6 +730,14 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.messages.push_back("Geometry analysis: starting Stage 4 raw outer/inner sheet detection.");
     result.messages.push_back("Geometry Stage 4 grid spacing: " + std::to_string(config.grid_spacing));
     result.messages.push_back("Geometry Stage 4 cylinder radius: " + std::to_string(config.cylinder_radius));
+    result.stage3_normalized_atoms_csv_path = config.output_prefix + "_stage3_normalized_atoms.csv";
+    if (!writeStage3NormalizedAtomsCsv(result.stage3_normalized_atoms_csv_path, stage3_result)) {
+        throw std::runtime_error("Failed to write Stage 3 normalized atoms CSV for Stage 4 input traceability");
+    }
+    result.messages.push_back("Geometry Stage 4 Stage 3 normalized atom input CSV: " +
+                              result.stage3_normalized_atoms_csv_path);
+    result.messages.push_back("Geometry Stage 4 Stage 3 normalized atom rows: " +
+                              std::to_string(stage3_result.analytical_patch.atoms.size()));
 
     result.grid = buildStage4RegularGrid(config.cylinder_radius, config.grid_spacing, tolerance);
     result.contact_search_patch_atom_count = stage3_result.analytical_patch.atoms.size();
