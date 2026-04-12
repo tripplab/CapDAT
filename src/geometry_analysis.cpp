@@ -11,17 +11,23 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 
 namespace {
 
 constexpr double kVdwRadiusFallbackAngstrom = 1.70;
+constexpr std::string_view kWarningMessagePrefix = "[[WARNING]] ";
 
 void logMessages(const std::vector<std::string>& messages, Logger* logger) {
     if (logger == nullptr) {
         return;
     }
     for (const std::string& message : messages) {
+        if (message.rfind(kWarningMessagePrefix, 0) == 0) {
+            logger->warning(message.substr(kWarningMessagePrefix.size()));
+            continue;
+        }
         logger->info(message);
     }
 }
@@ -704,14 +710,25 @@ GeometryPatchNormalizationResult runGeometryAnalysisStage3PatchNormalization(
                               std::to_string(result.analytical_patch.explicit_vdw_radius_count));
     result.messages.push_back("Geometry Stage 3 inferred-from-name vdW assignments: " +
                               std::to_string(result.analytical_patch.inferred_vdw_radius_count));
-    result.messages.push_back("Geometry Stage 3 fallback vdW assignments: " +
-                              std::to_string(result.analytical_patch.fallback_vdw_radius_count));
+    if (result.analytical_patch.fallback_vdw_radius_count == 0) {
+        result.messages.push_back("Geometry Stage 3 fallback vdW assignments: " +
+                                  std::to_string(result.analytical_patch.fallback_vdw_radius_count));
+    } else {
+        result.messages.push_back(std::string(kWarningMessagePrefix) +
+                                  "Geometry Stage 3 fallback vdW assignments: " +
+                                  std::to_string(result.analytical_patch.fallback_vdw_radius_count));
+    }
     result.messages.push_back("Geometry Stage 3 patch atom bounds x:[" + std::to_string(min_position.x) + ", " +
                               std::to_string(max_position.x) + "] y:[" + std::to_string(min_position.y) + ", " +
                               std::to_string(max_position.y) + "] z:[" + std::to_string(min_position.z) + ", " +
                               std::to_string(max_position.z) + "]");
     result.messages.push_back("Geometry Stage 3 patch export path (Stage 2 canonical): " +
                               result.analytical_patch.export_path);
+    if (result.analytical_patch.fallback_vdw_radius_count > 0) {
+        result.messages.push_back(
+            "Geometry Stage 3 note: fallback vdW radii were applied where explicit/inferred element resolution "
+            "was unavailable.");
+    }
     result.messages.push_back("Geometry analysis: completed Stage 3 analytical patch normalization.");
     result.success = true;
     logMessages(result.messages, logger);
@@ -941,18 +958,36 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.messages.push_back("Geometry Stage 4 outer-only nodes: " + std::to_string(result.outer_only_node_count));
     result.messages.push_back("Geometry Stage 4 inner-only nodes: " + std::to_string(result.inner_only_node_count));
     result.messages.push_back("Geometry Stage 4 both-hit nodes: " + std::to_string(result.both_hit_node_count));
-    result.messages.push_back("Geometry Stage 4 zero-thickness nodes: " +
-                              std::to_string(result.zero_thickness_node_count));
-    result.messages.push_back("Geometry Stage 4 negative-thickness nodes: " +
-                              std::to_string(result.negative_thickness_node_count));
+    if (result.zero_thickness_node_count == 0) {
+        result.messages.push_back("Geometry Stage 4 zero-thickness nodes: " +
+                                  std::to_string(result.zero_thickness_node_count));
+    } else {
+        result.messages.push_back(std::string(kWarningMessagePrefix) +
+                                  "Geometry Stage 4 zero-thickness nodes: " +
+                                  std::to_string(result.zero_thickness_node_count));
+    }
+    if (result.negative_thickness_node_count == 0) {
+        result.messages.push_back("Geometry Stage 4 negative-thickness nodes: " +
+                                  std::to_string(result.negative_thickness_node_count));
+    } else {
+        result.messages.push_back(std::string(kWarningMessagePrefix) +
+                                  "Geometry Stage 4 negative-thickness nodes: " +
+                                  std::to_string(result.negative_thickness_node_count));
+    }
     result.messages.push_back("Geometry Stage 4 patch atoms used for contact search: " +
                               std::to_string(result.contact_search_patch_atom_count));
     result.messages.push_back("Geometry Stage 4 unique outer-contact atoms: " +
                               std::to_string(result.unique_outer_contact_atom_count));
     result.messages.push_back("Geometry Stage 4 unique inner-contact atoms: " +
                               std::to_string(result.unique_inner_contact_atom_count));
-    result.messages.push_back("Geometry Stage 4 unique both-contact atoms: " +
-                              std::to_string(result.unique_both_contact_atom_count));
+    if (result.unique_both_contact_atom_count == 0) {
+        result.messages.push_back("Geometry Stage 4 unique both-contact atoms: " +
+                                  std::to_string(result.unique_both_contact_atom_count));
+    } else {
+        result.messages.push_back(std::string(kWarningMessagePrefix) +
+                                  "Geometry Stage 4 unique both-contact atoms: " +
+                                  std::to_string(result.unique_both_contact_atom_count));
+    }
     result.messages.push_back("Geometry Stage 4 unique contact atoms (outer U inner): " +
                               std::to_string(result.unique_contact_atom_count));
     result.messages.push_back("Geometry Stage 4 unique contact atom bounds x:[" +
@@ -976,6 +1011,12 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.messages.push_back("Geometry Stage 4 start timestamp (UTC): " + result.stage4_start_timestamp_utc);
     result.messages.push_back("Geometry Stage 4 end timestamp (UTC): " + result.stage4_end_timestamp_utc);
     result.messages.push_back("Geometry Stage 4 runtime seconds: " + std::to_string(result.stage4_runtime_seconds));
+    if (result.zero_thickness_node_count > 0 || result.negative_thickness_node_count > 0 ||
+        result.unique_both_contact_atom_count > 0) {
+        result.messages.push_back(
+            "Geometry Stage 4 note: non-zero zero-thickness/negative-thickness nodes or both-contact atoms "
+            "indicate potential raw-sheet overlap/thickness anomalies.");
+    }
     result.messages.push_back("Geometry analysis: completed Stage 4 raw outer/inner sheet detection.");
 
     result.success = true;
