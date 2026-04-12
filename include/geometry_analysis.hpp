@@ -48,6 +48,12 @@ struct FoldPatchAnalysisConfig {
     double stage5_support_radius = 0.0;
     std::size_t stage5_min_support_nodes = 4;
     double stage5_reliable_radius = 0.0;
+    double stage6_smoothing_weight = 1.0;
+    std::size_t stage6_max_iterations = 500;
+    double stage6_convergence_tolerance = 1e-6;
+    bool stage6_enforce_non_crossing = true;
+    double stage6_min_separation = 0.0;
+    bool stage6_export_obj_meshes = true;
     bool export_rotated_capsid = false;
     std::string output_prefix = "geometry";
 };
@@ -258,6 +264,57 @@ struct GeometryStage5SurfacePrepResult {
     std::vector<std::string> messages;
 };
 
+struct GeometryStage6SurfaceReconstructionResult {
+    bool success = false;
+
+    Stage4GridDescriptor grid;
+
+    std::vector<double> z_outer_reconstructed;
+    std::vector<double> z_inner_reconstructed;
+
+    std::vector<uint8_t> inside_disk_mask;
+    std::vector<uint8_t> paired_seed_mask;
+    std::vector<uint8_t> paired_interp_allowed_mask;
+    std::vector<uint8_t> hard_invalid_mask;
+    std::vector<uint8_t> reconstructed_mask;
+    std::vector<uint8_t> final_valid_analysis_mask;
+    std::vector<uint8_t> non_crossing_adjustment_mask;
+    std::vector<uint8_t> obj_vertex_mask;
+
+    std::size_t node_count = 0;
+    std::size_t reconstructed_node_count = 0;
+    std::size_t seed_node_count = 0;
+    std::size_t interp_node_count = 0;
+    std::size_t final_valid_analysis_node_count = 0;
+    std::size_t non_crossing_adjusted_node_count = 0;
+    std::size_t unresolved_node_count = 0;
+
+    std::size_t outer_iterations_used = 0;
+    std::size_t inner_iterations_used = 0;
+    double outer_final_max_update = 0.0;
+    double inner_final_max_update = 0.0;
+
+    double min_reconstructed_separation = 0.0;
+    double max_reconstructed_separation = 0.0;
+    double mean_reconstructed_separation = 0.0;
+
+    std::size_t outer_obj_vertex_count = 0;
+    std::size_t inner_obj_vertex_count = 0;
+    std::size_t outer_obj_face_count = 0;
+    std::size_t inner_obj_face_count = 0;
+
+    std::string outer_reconstructed_csv_path;
+    std::string inner_reconstructed_csv_path;
+    std::string reconstructed_mask_csv_path;
+    std::string final_valid_analysis_mask_csv_path;
+    std::string non_crossing_adjustment_mask_csv_path;
+    std::string outer_obj_path;
+    std::string inner_obj_path;
+    std::string summary_csv_path;
+
+    std::vector<std::string> messages;
+};
+
 struct GeometryAnalysisResult {
     bool success = false;
     GeometryPreparationResult preparation;
@@ -265,6 +322,7 @@ struct GeometryAnalysisResult {
     GeometryPatchNormalizationResult stage3_patch;
     GeometryStage4RawSheetResult stage4_raw;
     GeometryStage5SurfacePrepResult stage5_prep;
+    GeometryStage6SurfaceReconstructionResult stage6_surfaces;
     std::vector<std::string> messages;
 };
 
@@ -319,6 +377,12 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
 
 GeometryStage5SurfacePrepResult runGeometryAnalysisStage5SurfacePreparation(
     const GeometryStage4RawSheetResult& stage4_result,
+    const FoldPatchAnalysisConfig& config,
+    Logger* logger,
+    double tolerance = 1e-12);
+
+GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceReconstruction(
+    const GeometryStage5SurfacePrepResult& stage5_result,
     const FoldPatchAnalysisConfig& config,
     Logger* logger,
     double tolerance = 1e-12);
