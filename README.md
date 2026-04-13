@@ -15,7 +15,6 @@ The program currently provides a command-line interface with support for input-f
 
 ## Reorientation and final export semantics (v01)
 
-- `--write-clean-pdb` has been replaced by `--export-final <file>`.
 - Reorientation is opt-in and requires `--reorient` with exactly one source:
   - `--align-fold <name>` for canonical folds (`2_0`, `2_1`, `3_0`, `3_1`, `5_0`), or
   - `--align-vector <x,y,z>` for a custom origin-based direction vector.
