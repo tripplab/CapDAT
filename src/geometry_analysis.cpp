@@ -320,6 +320,12 @@ struct Stage6FieldSolveResult {
     double final_max_update = 0.0;
 };
 
+struct Stage7FieldSmoothResult {
+    std::vector<double> values;
+    std::size_t iterations_used = 0;
+    double final_max_update = 0.0;
+};
+
 std::vector<std::size_t> stage6FourNeighborIndices(std::size_t i, std::size_t j, std::size_t nx, std::size_t ny) {
     std::vector<std::size_t> neighbors;
     neighbors.reserve(4);
@@ -517,6 +523,142 @@ bool writeStage6SummaryCsv(const GeometryStage6SurfaceReconstructionResult& resu
         << result.outer_reconstructed_nodes_not_used_by_any_face << ','
         << result.inner_reconstructed_scalar_node_count << ','
         << result.inner_reconstructed_nodes_not_used_by_any_face << '\n';
+    return out.good();
+}
+
+Stage7FieldSmoothResult runStage7FieldSmoothing(const Stage4GridDescriptor& grid,
+                                                const std::vector<double>& reconstructed_values,
+                                                const std::vector<uint8_t>& reconstructed_mask,
+                                                const std::vector<uint8_t>& paired_seed_mask,
+                                                const FoldPatchAnalysisConfig& config) {
+    Stage7FieldSmoothResult smooth_result;
+    smooth_result.values = reconstructed_values;
+    const double alpha = config.stage7_smoothing_weight / (1.0 + config.stage7_smoothing_weight);
+
+    std::vector<double> current = smooth_result.values;
+    std::vector<double> next = current;
+    std::size_t iterations = 0;
+    double final_max_update = 0.0;
+    for (; iterations < config.stage7_max_iterations; ++iterations) {
+        double iteration_max_update = 0.0;
+        bool any_updated = false;
+        next = current;
+
+        for (std::size_t j = 0; j < grid.ny; ++j) {
+            for (std::size_t i = 0; i < grid.nx; ++i) {
+                const std::size_t idx = stage4NodeIndex(i, j, grid.nx);
+                if (reconstructed_mask[idx] == 0 || !std::isfinite(current[idx])) {
+                    continue;
+                }
+                if (config.stage7_preserve_seed_values && paired_seed_mask[idx] != 0) {
+                    continue;
+                }
+                const auto neighbors = stage6FourNeighborIndices(i, j, grid.nx, grid.ny);
+                double sum = 0.0;
+                std::size_t count = 0;
+                for (const std::size_t nidx : neighbors) {
+                    if (reconstructed_mask[nidx] == 0 || !std::isfinite(current[nidx])) {
+                        continue;
+                    }
+                    sum += current[nidx];
+                    ++count;
+                }
+                if (count == 0) {
+                    continue;
+                }
+                const double previous = current[idx];
+                const double average = sum / static_cast<double>(count);
+                const double updated = previous + (alpha * (average - previous));
+                next[idx] = updated;
+                iteration_max_update = std::max(iteration_max_update, std::fabs(updated - previous));
+                any_updated = true;
+            }
+        }
+
+        current.swap(next);
+        final_max_update = iteration_max_update;
+        if (!any_updated || iteration_max_update < config.stage7_convergence_tolerance) {
+            ++iterations;
+            break;
+        }
+    }
+
+    smooth_result.values = std::move(current);
+    smooth_result.iterations_used = iterations;
+    smooth_result.final_max_update = final_max_update;
+    return smooth_result;
+}
+
+bool writeStage7FieldCsv(const GeometryStage7SmoothedSurfaceResult& result,
+                         const std::string& path,
+                         const char* value_header_name,
+                         const std::vector<double>& values) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,reconstructed,reliable_core,metric_domain," << value_header_name << "\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.reconstructed_mask[idx]) << ','
+                << static_cast<int>(result.reliable_core_mask[idx]) << ','
+                << static_cast<int>(result.metric_domain_mask[idx]) << ',';
+            if (std::isfinite(values[idx])) {
+                out << values[idx];
+            } else {
+                out << "nan";
+            }
+            out << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage7MaskCsv(const GeometryStage7SmoothedSurfaceResult& result,
+                        const std::string& path,
+                        const char* mask_name,
+                        const std::vector<uint8_t>& mask) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y," << mask_name << "\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(mask[idx]) << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage7SummaryCsv(const GeometryStage7SmoothedSurfaceResult& result, const FoldPatchAnalysisConfig& config) {
+    std::ofstream out(result.summary_csv_path);
+    if (!out) {
+        return false;
+    }
+    out << "stage7_enabled,smoothing_weight,max_iterations,convergence_tolerance,preserve_seed_values,"
+           "enforce_non_crossing,min_separation,node_count,smooth_valid_nodes,metric_domain_nodes,"
+           "non_crossing_adjusted_nodes,outer_iterations_used,inner_iterations_used,outer_final_max_update,"
+           "inner_final_max_update,min_smooth_separation,max_smooth_separation,mean_smooth_separation,"
+           "normal_orientation_outer,normal_orientation_inner,local_thickness_definition,metric_surface_definition,"
+           "outer_mesh_vertex_count,outer_mesh_face_count,inner_mesh_vertex_count,inner_mesh_face_count,"
+           "outer_mesh_unused_scalar_nodes,inner_mesh_unused_scalar_nodes\n";
+    out << (config.stage7_enabled ? 1 : 0) << ',' << config.stage7_smoothing_weight << ','
+        << config.stage7_max_iterations << ',' << config.stage7_convergence_tolerance << ','
+        << (config.stage7_preserve_seed_values ? 1 : 0) << ',' << (config.stage7_enforce_non_crossing ? 1 : 0) << ','
+        << config.stage7_min_separation << ',' << result.node_count << ',' << result.smooth_valid_node_count << ','
+        << result.metric_domain_node_count << ',' << result.smooth_non_crossing_adjusted_node_count << ','
+        << result.outer_iterations_used << ',' << result.inner_iterations_used << ',' << result.outer_final_max_update
+        << ',' << result.inner_final_max_update << ',' << result.min_smooth_separation << ','
+        << result.max_smooth_separation << ',' << result.mean_smooth_separation << ',' << result.normal_orientation_outer
+        << ',' << result.normal_orientation_inner << ',' << result.local_thickness_definition << ','
+        << result.metric_surface_definition << ',' << result.outer_mesh_vertex_count << ','
+        << result.outer_mesh_face_count << ',' << result.inner_mesh_vertex_count << ',' << result.inner_mesh_face_count
+        << ',' << result.outer_mesh_unused_scalar_nodes << ',' << result.inner_mesh_unused_scalar_nodes << '\n';
     return out.good();
 }
 
@@ -2323,6 +2465,262 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
     return result;
 }
 
+GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
+    const GeometryStage6SurfaceReconstructionResult& stage6_result,
+    const GeometryStage5SurfacePrepResult& stage5_result,
+    const FoldPatchAnalysisConfig& config,
+    Logger* logger,
+    double tolerance) {
+    (void)tolerance;
+    GeometryStage7SmoothedSurfaceResult result;
+    if (!stage6_result.success) {
+        throw std::runtime_error("Stage 7 cannot run before successful Stage 6 surface reconstruction");
+    }
+    if (stage6_result.node_count == 0 || stage6_result.grid.nx == 0 || stage6_result.grid.ny == 0) {
+        throw std::runtime_error("Stage 7 requires a non-empty Stage 6 grid");
+    }
+    if (stage6_result.reconstructed_node_count == 0) {
+        throw std::runtime_error("Stage 7 requires Stage 6 reconstructed nodes");
+    }
+    if (stage5_result.reliable_core_node_count == 0) {
+        throw std::runtime_error("Stage 7 requires Stage 5 reliable-core nodes");
+    }
+    if (config.stage7_max_iterations == 0) {
+        throw std::runtime_error("Stage 7 requires stage7_max_iterations > 0");
+    }
+    if (config.stage7_convergence_tolerance <= 0.0) {
+        throw std::runtime_error("Stage 7 requires stage7_convergence_tolerance > 0");
+    }
+    if (config.stage7_smoothing_weight <= 0.0) {
+        throw std::runtime_error("Stage 7 requires stage7_smoothing_weight > 0");
+    }
+
+    result.messages.push_back("Geometry Stage 7");
+    result.messages.push_back("Geometry analysis: starting Stage 7 surface smoothing / regularization.");
+    result.grid = stage6_result.grid;
+    result.node_count = stage6_result.node_count;
+    result.reconstructed_mask = stage6_result.reconstructed_mask;
+    result.reliable_core_mask = stage5_result.reliable_core_mask;
+    result.smooth_valid_mask.assign(result.node_count, 0);
+    result.metric_domain_mask.assign(result.node_count, 0);
+    result.smooth_non_crossing_adjustment_mask.assign(result.node_count, 0);
+
+    const Stage7FieldSmoothResult outer = runStage7FieldSmoothing(result.grid,
+                                                                   stage6_result.z_outer_reconstructed,
+                                                                   stage6_result.reconstructed_mask,
+                                                                   stage5_result.paired_seed_mask,
+                                                                   config);
+    const Stage7FieldSmoothResult inner = runStage7FieldSmoothing(result.grid,
+                                                                   stage6_result.z_inner_reconstructed,
+                                                                   stage6_result.reconstructed_mask,
+                                                                   stage5_result.paired_seed_mask,
+                                                                   config);
+    result.z_outer_smooth = outer.values;
+    result.z_inner_smooth = inner.values;
+    result.outer_iterations_used = outer.iterations_used;
+    result.inner_iterations_used = inner.iterations_used;
+    result.outer_final_max_update = outer.final_max_update;
+    result.inner_final_max_update = inner.final_max_update;
+
+    for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+        if (stage6_result.reconstructed_mask[idx] == 0 || !std::isfinite(result.z_outer_smooth[idx]) ||
+            !std::isfinite(result.z_inner_smooth[idx])) {
+            continue;
+        }
+        if (config.stage7_enforce_non_crossing &&
+            result.z_outer_smooth[idx] < (result.z_inner_smooth[idx] + config.stage7_min_separation)) {
+            const double mid = 0.5 * (result.z_outer_smooth[idx] + result.z_inner_smooth[idx]);
+            result.z_inner_smooth[idx] = mid - (0.5 * config.stage7_min_separation);
+            result.z_outer_smooth[idx] = mid + (0.5 * config.stage7_min_separation);
+            result.smooth_non_crossing_adjustment_mask[idx] = 1;
+            ++result.smooth_non_crossing_adjusted_node_count;
+        }
+        result.smooth_valid_mask[idx] = 1;
+        ++result.smooth_valid_node_count;
+        if (result.reliable_core_mask[idx] != 0) {
+            result.metric_domain_mask[idx] = 1;
+            ++result.metric_domain_node_count;
+        }
+    }
+    if (result.metric_domain_node_count == 0) {
+        throw std::runtime_error("Stage 7 produced zero metric-domain nodes after reliable-core restriction");
+    }
+
+    bool first_sep = true;
+    double sum_sep = 0.0;
+    std::size_t sep_count = 0;
+    for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+        if (result.metric_domain_mask[idx] == 0) {
+            continue;
+        }
+        const double separation = result.z_outer_smooth[idx] - result.z_inner_smooth[idx];
+        if (!std::isfinite(separation)) {
+            continue;
+        }
+        if (first_sep) {
+            result.min_smooth_separation = separation;
+            result.max_smooth_separation = separation;
+            first_sep = false;
+        } else {
+            result.min_smooth_separation = std::min(result.min_smooth_separation, separation);
+            result.max_smooth_separation = std::max(result.max_smooth_separation, separation);
+        }
+        sum_sep += separation;
+        ++sep_count;
+    }
+    if (sep_count == 0) {
+        throw std::runtime_error("Stage 7 could not compute finite smooth separation on metric domain");
+    }
+    result.mean_smooth_separation = sum_sep / static_cast<double>(sep_count);
+
+    if (config.debug) {
+        result.outer_smooth_csv_path = config.output_prefix + "_outer_smooth.csv";
+        result.inner_smooth_csv_path = config.output_prefix + "_inner_smooth.csv";
+        result.smooth_valid_mask_csv_path = config.output_prefix + "_smooth_valid_mask.csv";
+        result.metric_domain_mask_csv_path = config.output_prefix + "_smooth_metric_domain_mask.csv";
+        result.smooth_non_crossing_adjustment_mask_csv_path =
+            config.output_prefix + "_smooth_non_crossing_adjustment_mask.csv";
+        result.summary_csv_path = config.output_prefix + "_stage7_summary.csv";
+        if (!writeStage7FieldCsv(result, result.outer_smooth_csv_path, "z_outer_smooth", result.z_outer_smooth)) {
+            throw std::runtime_error("Failed to write Stage 7 outer smooth CSV");
+        }
+        if (!writeStage7FieldCsv(result, result.inner_smooth_csv_path, "z_inner_smooth", result.z_inner_smooth)) {
+            throw std::runtime_error("Failed to write Stage 7 inner smooth CSV");
+        }
+        if (!writeStage7MaskCsv(result, result.smooth_valid_mask_csv_path, "smooth_valid", result.smooth_valid_mask)) {
+            throw std::runtime_error("Failed to write Stage 7 smooth-valid mask CSV");
+        }
+        if (!writeStage7MaskCsv(
+                result, result.metric_domain_mask_csv_path, "metric_domain", result.metric_domain_mask)) {
+            throw std::runtime_error("Failed to write Stage 7 metric-domain mask CSV");
+        }
+        if (!writeStage7MaskCsv(result,
+                                result.smooth_non_crossing_adjustment_mask_csv_path,
+                                "smooth_non_crossing_adjusted",
+                                result.smooth_non_crossing_adjustment_mask)) {
+            throw std::runtime_error("Failed to write Stage 7 non-crossing-adjustment mask CSV");
+        }
+        if (!writeStage7SummaryCsv(result, config)) {
+            throw std::runtime_error("Failed to write Stage 7 summary CSV");
+        }
+    }
+
+    if (config.stage7_export_meshes) {
+        const bool use_stl = config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl;
+        const std::string extension = use_stl ? ".stl" : ".obj";
+        if (config.stage6_split_in_out_meshes) {
+            result.outer_mesh_path = config.output_prefix + "_smooth_outer_surface" + extension;
+            result.inner_mesh_path = config.output_prefix + "_smooth_inner_surface" + extension;
+            if (use_stl) {
+                const Stage6StlExportResult outer_mesh =
+                    writeStage6StlMesh(result.grid, result.metric_domain_mask, result.z_outer_smooth, result.outer_mesh_path);
+                const Stage6StlExportResult inner_mesh =
+                    writeStage6StlMesh(result.grid, result.metric_domain_mask, result.z_inner_smooth, result.inner_mesh_path);
+                result.outer_mesh_vertex_count = outer_mesh.vertex_count;
+                result.outer_mesh_face_count = outer_mesh.face_count;
+                result.inner_mesh_vertex_count = inner_mesh.vertex_count;
+                result.inner_mesh_face_count = inner_mesh.face_count;
+            } else {
+                const Stage6ObjExportResult outer_mesh =
+                    writeStage6ObjMesh(result.grid, result.metric_domain_mask, result.z_outer_smooth, result.outer_mesh_path);
+                const Stage6ObjExportResult inner_mesh =
+                    writeStage6ObjMesh(result.grid, result.metric_domain_mask, result.z_inner_smooth, result.inner_mesh_path);
+                result.outer_mesh_vertex_count = outer_mesh.vertex_count;
+                result.outer_mesh_face_count = outer_mesh.face_count;
+                result.inner_mesh_vertex_count = inner_mesh.vertex_count;
+                result.inner_mesh_face_count = inner_mesh.face_count;
+            }
+        } else {
+            result.outer_mesh_path = config.output_prefix + "_smooth_surface" + extension;
+            result.inner_mesh_path = result.outer_mesh_path;
+            if (use_stl) {
+                const Stage6DualMeshExportResult combined = writeStage6StlMeshesCombined(
+                    result.grid, result.metric_domain_mask, result.z_outer_smooth, result.z_inner_smooth, result.outer_mesh_path);
+                result.outer_mesh_vertex_count = combined.outer_vertex_count;
+                result.outer_mesh_face_count = combined.outer_face_count;
+                result.inner_mesh_vertex_count = combined.inner_vertex_count;
+                result.inner_mesh_face_count = combined.inner_face_count;
+            } else {
+                const Stage6DualMeshExportResult combined = writeStage6ObjMeshesCombined(
+                    result.grid, result.metric_domain_mask, result.z_outer_smooth, result.z_inner_smooth, result.outer_mesh_path);
+                result.outer_mesh_vertex_count = combined.outer_vertex_count;
+                result.outer_mesh_face_count = combined.outer_face_count;
+                result.inner_mesh_vertex_count = combined.inner_vertex_count;
+                result.inner_mesh_face_count = combined.inner_face_count;
+            }
+        }
+        const std::size_t outer_scalar_nodes =
+            countStage6ReconstructedScalarNodes(result.grid, result.metric_domain_mask, result.z_outer_smooth);
+        const std::size_t inner_scalar_nodes =
+            countStage6ReconstructedScalarNodes(result.grid, result.metric_domain_mask, result.z_inner_smooth);
+        const std::size_t outer_used_by_faces =
+            countStage6ReconstructedNodesUsedByFaces(result.grid, result.metric_domain_mask, result.z_outer_smooth);
+        const std::size_t inner_used_by_faces =
+            countStage6ReconstructedNodesUsedByFaces(result.grid, result.metric_domain_mask, result.z_inner_smooth);
+        result.outer_mesh_unused_scalar_nodes =
+            outer_scalar_nodes > outer_used_by_faces ? outer_scalar_nodes - outer_used_by_faces : 0;
+        result.inner_mesh_unused_scalar_nodes =
+            inner_scalar_nodes > inner_used_by_faces ? inner_scalar_nodes - inner_used_by_faces : 0;
+    }
+
+    result.messages.push_back("Geometry Stage 7 smoothing weight: " + std::to_string(config.stage7_smoothing_weight));
+    result.messages.push_back("Geometry Stage 7 max iterations: " + std::to_string(config.stage7_max_iterations));
+    result.messages.push_back("Geometry Stage 7 convergence tolerance: " +
+                              std::to_string(config.stage7_convergence_tolerance));
+    result.messages.push_back("Geometry Stage 7 preserve seed values: " +
+                              std::to_string(config.stage7_preserve_seed_values ? 1 : 0));
+    result.messages.push_back("Geometry Stage 7 enforce non-crossing: " +
+                              std::to_string(config.stage7_enforce_non_crossing ? 1 : 0));
+    result.messages.push_back("Geometry Stage 7 minimum separation: " + std::to_string(config.stage7_min_separation));
+    result.messages.push_back("Geometry Stage 7 seed preservation status: " +
+                              std::string(config.stage7_preserve_seed_values ? "enabled" : "disabled"));
+    result.messages.push_back("Geometry Stage 7 outer iterations used: " + std::to_string(result.outer_iterations_used));
+    result.messages.push_back("Geometry Stage 7 inner iterations used: " + std::to_string(result.inner_iterations_used));
+    result.messages.push_back("Geometry Stage 7 outer final max update: " + std::to_string(result.outer_final_max_update));
+    result.messages.push_back("Geometry Stage 7 inner final max update: " + std::to_string(result.inner_final_max_update));
+    result.messages.push_back("Geometry Stage 7 smooth valid node count: " + std::to_string(result.smooth_valid_node_count));
+    result.messages.push_back("Geometry Stage 7 metric domain node count: " + std::to_string(result.metric_domain_node_count));
+    result.messages.push_back("Geometry Stage 7 smooth non-crossing adjusted node count: " +
+                              std::to_string(result.smooth_non_crossing_adjusted_node_count));
+    result.messages.push_back("Geometry Stage 7 min smooth separation: " + std::to_string(result.min_smooth_separation));
+    result.messages.push_back("Geometry Stage 7 max smooth separation: " + std::to_string(result.max_smooth_separation));
+    result.messages.push_back("Geometry Stage 7 mean smooth separation: " + std::to_string(result.mean_smooth_separation));
+    result.messages.push_back("Geometry Stage 7 outer normal convention: " + result.normal_orientation_outer);
+    result.messages.push_back("Geometry Stage 7 inner normal convention: " + result.normal_orientation_inner);
+    result.messages.push_back("Geometry Stage 7 local thickness definition: " + result.local_thickness_definition);
+    result.messages.push_back("Geometry Stage 7 metric-surface definition: " + result.metric_surface_definition);
+    if (config.debug) {
+        result.messages.push_back("Geometry Stage 7 outer smooth CSV: " + result.outer_smooth_csv_path);
+        result.messages.push_back("Geometry Stage 7 inner smooth CSV: " + result.inner_smooth_csv_path);
+        result.messages.push_back("Geometry Stage 7 smooth-valid mask CSV: " + result.smooth_valid_mask_csv_path);
+        result.messages.push_back("Geometry Stage 7 metric-domain mask CSV: " + result.metric_domain_mask_csv_path);
+        result.messages.push_back("Geometry Stage 7 non-crossing-adjustment mask CSV: " +
+                                  result.smooth_non_crossing_adjustment_mask_csv_path);
+        result.messages.push_back("Geometry Stage 7 summary CSV: " + result.summary_csv_path);
+    }
+    if (config.stage7_export_meshes) {
+        const std::string mesh_label =
+            config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl ? "STL" : "OBJ";
+        const std::string export_mode = config.stage6_split_in_out_meshes ? "split" : "combined";
+        result.messages.push_back("Geometry Stage 7 " + mesh_label + " export mode: " + export_mode);
+        result.messages.push_back("Geometry Stage 7 outer " + mesh_label + ": " + result.outer_mesh_path +
+                                  " (mesh vertices emitted=" + std::to_string(result.outer_mesh_vertex_count) +
+                                  ", mesh faces emitted=" + std::to_string(result.outer_mesh_face_count) +
+                                  ", scalar nodes not used by any face=" +
+                                  std::to_string(result.outer_mesh_unused_scalar_nodes) + ")");
+        result.messages.push_back("Geometry Stage 7 inner " + mesh_label + ": " + result.inner_mesh_path +
+                                  " (mesh vertices emitted=" + std::to_string(result.inner_mesh_vertex_count) +
+                                  ", mesh faces emitted=" + std::to_string(result.inner_mesh_face_count) +
+                                  ", scalar nodes not used by any face=" +
+                                  std::to_string(result.inner_mesh_unused_scalar_nodes) + ")");
+    }
+    result.messages.push_back("Geometry analysis: completed Stage 7 surface smoothing / regularization.");
+
+    result.success = true;
+    logMessages(result.messages, logger);
+    return result;
+}
+
 GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                                                     const FoldPatchAnalysisConfig& config,
                                                     const ParserConfig& parser_config,
@@ -2343,8 +2741,16 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
         runGeometryAnalysisStage4RawSheetDetection(capsid, config, parser_config, result.stage3_patch, logger);
     result.stage5_prep = runGeometryAnalysisStage5SurfacePreparation(result.stage4_raw, config, logger);
     result.stage6_surfaces = runGeometryAnalysisStage6SurfaceReconstruction(result.stage5_prep, config, logger);
+    if (config.stage7_enabled) {
+        result.stage7_smooth =
+            runGeometryAnalysisStage7SurfaceSmoothing(result.stage6_surfaces, result.stage5_prep, config, logger);
+    } else {
+        result.stage7_smooth.success = true;
+        result.stage7_smooth.messages.push_back("Geometry Stage 7 smoothing disabled by configuration.");
+    }
     result.success = result.preparation.success && result.stage2_patch.success && result.stage3_patch.success &&
-                     result.stage4_raw.success && result.stage5_prep.success && result.stage6_surfaces.success;
+                     result.stage4_raw.success && result.stage5_prep.success && result.stage6_surfaces.success &&
+                     result.stage7_smooth.success;
     logMessages(result.messages, logger);
 
     return result;

@@ -54,6 +54,14 @@ struct FoldPatchAnalysisConfig {
     bool stage6_enforce_non_crossing = true;
     double stage6_min_separation = 0.0;
     bool stage6_export_obj_meshes = true;
+    bool stage7_enabled = true;
+    double stage7_smoothing_weight = 1.0;
+    std::size_t stage7_max_iterations = 250;
+    double stage7_convergence_tolerance = 1e-6;
+    bool stage7_preserve_seed_values = true;
+    bool stage7_enforce_non_crossing = true;
+    double stage7_min_separation = 1.0;
+    bool stage7_export_meshes = true;
     enum class MeshExportFormat : uint8_t { obj = 0, stl = 1 };
     MeshExportFormat stage6_mesh_export_format = MeshExportFormat::obj;
     bool stage6_split_in_out_meshes = false;
@@ -322,6 +330,59 @@ struct GeometryStage6SurfaceReconstructionResult {
     std::vector<std::string> messages;
 };
 
+struct GeometryStage7SmoothedSurfaceResult {
+    bool success = false;
+
+    Stage4GridDescriptor grid;
+
+    std::vector<double> z_outer_smooth;
+    std::vector<double> z_inner_smooth;
+
+    std::vector<uint8_t> reconstructed_mask;
+    std::vector<uint8_t> reliable_core_mask;
+    std::vector<uint8_t> smooth_valid_mask;
+    std::vector<uint8_t> smooth_non_crossing_adjustment_mask;
+    std::vector<uint8_t> metric_domain_mask;
+
+    std::size_t node_count = 0;
+    std::size_t smooth_valid_node_count = 0;
+    std::size_t metric_domain_node_count = 0;
+    std::size_t smooth_non_crossing_adjusted_node_count = 0;
+
+    std::size_t outer_iterations_used = 0;
+    std::size_t inner_iterations_used = 0;
+    double outer_final_max_update = 0.0;
+    double inner_final_max_update = 0.0;
+
+    double min_smooth_separation = 0.0;
+    double max_smooth_separation = 0.0;
+    double mean_smooth_separation = 0.0;
+
+    std::string normal_orientation_outer = "toward_positive_z";
+    std::string normal_orientation_inner = "toward_negative_z";
+    std::string local_thickness_definition = "vertical_z_difference";
+    std::string metric_surface_definition = "stage6_reconstructed_then_stage7_smoothed_restricted_to_reliable_core";
+
+    std::string outer_smooth_csv_path;
+    std::string inner_smooth_csv_path;
+    std::string smooth_valid_mask_csv_path;
+    std::string metric_domain_mask_csv_path;
+    std::string smooth_non_crossing_adjustment_mask_csv_path;
+    std::string summary_csv_path;
+
+    std::string outer_mesh_path;
+    std::string inner_mesh_path;
+
+    std::size_t outer_mesh_vertex_count = 0;
+    std::size_t inner_mesh_vertex_count = 0;
+    std::size_t outer_mesh_face_count = 0;
+    std::size_t inner_mesh_face_count = 0;
+    std::size_t outer_mesh_unused_scalar_nodes = 0;
+    std::size_t inner_mesh_unused_scalar_nodes = 0;
+
+    std::vector<std::string> messages;
+};
+
 struct GeometryAnalysisResult {
     bool success = false;
     GeometryPreparationResult preparation;
@@ -330,6 +391,7 @@ struct GeometryAnalysisResult {
     GeometryStage4RawSheetResult stage4_raw;
     GeometryStage5SurfacePrepResult stage5_prep;
     GeometryStage6SurfaceReconstructionResult stage6_surfaces;
+    GeometryStage7SmoothedSurfaceResult stage7_smooth;
     std::vector<std::string> messages;
 };
 
@@ -389,6 +451,13 @@ GeometryStage5SurfacePrepResult runGeometryAnalysisStage5SurfacePreparation(
     double tolerance = 1e-12);
 
 GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceReconstruction(
+    const GeometryStage5SurfacePrepResult& stage5_result,
+    const FoldPatchAnalysisConfig& config,
+    Logger* logger,
+    double tolerance = 1e-12);
+
+GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
+    const GeometryStage6SurfaceReconstructionResult& stage6_result,
     const GeometryStage5SurfacePrepResult& stage5_result,
     const FoldPatchAnalysisConfig& config,
     Logger* logger,
