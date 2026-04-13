@@ -48,6 +48,95 @@ std::string describeFrame(const Capsid::OrientationState& state) {
     return "unknown_frame";
 }
 
+std::string jsonEscape(const std::string& input) {
+    std::string escaped;
+    escaped.reserve(input.size());
+    for (const char ch : input) {
+        switch (ch) {
+        case '\\':
+            escaped += "\\\\";
+            break;
+        case '"':
+            escaped += "\\\"";
+            break;
+        case '\n':
+            escaped += "\\n";
+            break;
+        case '\r':
+            escaped += "\\r";
+            break;
+        case '\t':
+            escaped += "\\t";
+            break;
+        default:
+            escaped.push_back(ch);
+            break;
+        }
+    }
+    return escaped;
+}
+
+std::string meshFormatLabel(FoldPatchAnalysisConfig::MeshExportFormat format) {
+    return format == FoldPatchAnalysisConfig::MeshExportFormat::stl ? "stl" : "obj";
+}
+
+bool writeGeometryRunSummaryJson(const FoldPatchAnalysisConfig& config,
+                                 const ParserConfig& parser_config,
+                                 const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "{\n";
+    out << "  \"geometry\": {\n";
+    out << "    \"enabled\": " << (config.enabled ? "true" : "false") << ",\n";
+    out << "    \"debug\": " << (config.debug ? "true" : "false") << ",\n";
+    out << "    \"fold_type\": " << config.fold_type << ",\n";
+    out << "    \"fold_index\": " << config.fold_index << ",\n";
+    out << "    \"cylinder_radius\": " << config.cylinder_radius << ",\n";
+    out << "    \"delta_vdw\": " << config.delta_vdw << ",\n";
+    out << "    \"grid_spacing\": " << config.grid_spacing << ",\n";
+    out << "    \"min_atoms_in_patch\": " << config.min_atoms_in_patch << ",\n";
+    out << "    \"output_prefix\": \"" << jsonEscape(config.output_prefix) << "\"\n";
+    out << "  },\n";
+    out << "  \"stage5\": {\n";
+    out << "    \"boundary_margin\": " << config.stage5_boundary_margin << ",\n";
+    out << "    \"support_radius\": " << config.stage5_support_radius << ",\n";
+    out << "    \"min_support_nodes\": " << config.stage5_min_support_nodes << ",\n";
+    out << "    \"reliable_radius\": " << config.stage5_reliable_radius << "\n";
+    out << "  },\n";
+    out << "  \"stage6\": {\n";
+    out << "    \"smoothing_weight\": " << config.stage6_smoothing_weight << ",\n";
+    out << "    \"max_iterations\": " << config.stage6_max_iterations << ",\n";
+    out << "    \"convergence_tolerance\": " << config.stage6_convergence_tolerance << ",\n";
+    out << "    \"enforce_non_crossing\": " << (config.stage6_enforce_non_crossing ? "true" : "false") << ",\n";
+    out << "    \"min_separation\": " << config.stage6_min_separation << ",\n";
+    out << "    \"export_meshes\": " << (config.stage6_export_obj_meshes ? "true" : "false") << ",\n";
+    out << "    \"mesh_export_format\": \"" << meshFormatLabel(config.stage6_mesh_export_format) << "\",\n";
+    out << "    \"split_in_out_meshes\": " << (config.stage6_split_in_out_meshes ? "true" : "false") << "\n";
+    out << "  },\n";
+    out << "  \"stage7\": {\n";
+    out << "    \"enabled\": " << (config.stage7_enabled ? "true" : "false") << ",\n";
+    out << "    \"smoothing_weight\": " << config.stage7_smoothing_weight << ",\n";
+    out << "    \"max_iterations\": " << config.stage7_max_iterations << ",\n";
+    out << "    \"convergence_tolerance\": " << config.stage7_convergence_tolerance << ",\n";
+    out << "    \"preserve_seed_values\": " << (config.stage7_preserve_seed_values ? "true" : "false") << ",\n";
+    out << "    \"enforce_non_crossing\": " << (config.stage7_enforce_non_crossing ? "true" : "false") << ",\n";
+    out << "    \"min_separation\": " << config.stage7_min_separation << ",\n";
+    out << "    \"export_meshes\": " << (config.stage7_export_meshes ? "true" : "false") << "\n";
+    out << "  },\n";
+    out << "  \"parser\": {\n";
+    out << "    \"include_hetatm\": " << (parser_config.include_hetatm ? "true" : "false") << ",\n";
+    out << "    \"strict_mode\": " << (parser_config.strict_mode ? "true" : "false") << ",\n";
+    out << "    \"keep_altloc_all\": " << (parser_config.keep_altloc_all ? "true" : "false") << ",\n";
+    out << "    \"ignore_blank_chain_id\": " << (parser_config.ignore_blank_chain_id ? "true" : "false") << ",\n";
+    out << "    \"verbose_warnings\": " << (parser_config.verbose_warnings ? "true" : "false") << ",\n";
+    out << "    \"protein_only\": " << (parser_config.protein_only ? "true" : "false") << "\n";
+    out << "  }\n";
+    out << "}\n";
+    return out.good();
+}
+
 void validateStage1Config(const FoldPatchAnalysisConfig& config) {
     if (config.fold_type != 2 && config.fold_type != 3 && config.fold_type != 5) {
         throw std::runtime_error("Invalid geometry fold type: expected one of 2, 3, 5");
@@ -2198,7 +2287,7 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
     }
 
     result.messages.push_back("Geometry Stage 6");
-    result.messages.push_back("Geometry analysis: starting Stage 6 smooth surface reconstruction.");
+    result.messages.push_back("Geometry analysis: starting Stage 6 surface reconstruction.");
 
     result.grid = stage5_result.grid;
     result.node_count = stage5_result.node_count;
@@ -2407,10 +2496,6 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
                 : 0;
     }
 
-    result.messages.push_back("Geometry Stage 6 smoothing weight: " + std::to_string(config.stage6_smoothing_weight));
-    result.messages.push_back("Geometry Stage 6 max iterations: " + std::to_string(config.stage6_max_iterations));
-    result.messages.push_back("Geometry Stage 6 convergence tolerance: " +
-                              std::to_string(config.stage6_convergence_tolerance));
     result.messages.push_back("Geometry Stage 6 enforce non-crossing: " +
                               std::to_string(config.stage6_enforce_non_crossing ? 1 : 0));
     result.messages.push_back("Geometry Stage 6 minimum separation: " + std::to_string(config.stage6_min_separation));
@@ -2443,22 +2528,36 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
     if (config.stage6_export_obj_meshes) {
         const std::string mesh_label =
             config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl ? "STL" : "OBJ";
-        const std::string export_mode = config.stage6_split_in_out_meshes ? "split" : "combined";
-        result.messages.push_back("Geometry Stage 6 " + mesh_label + " export mode: " + export_mode);
-        result.messages.push_back("Geometry Stage 6 outer " + mesh_label + ": " + result.outer_obj_path +
-                                  " (reconstructed scalar nodes=" +
-                                  std::to_string(result.outer_reconstructed_scalar_node_count) +
-                                  ", mesh vertices emitted=" + std::to_string(result.outer_obj_vertex_count) +
-                                  ", mesh faces emitted=" + std::to_string(result.outer_obj_face_count) +
-                                  ", reconstructed nodes not used by any face=" +
-                                  std::to_string(result.outer_reconstructed_nodes_not_used_by_any_face) + ")");
-        result.messages.push_back("Geometry Stage 6 inner " + mesh_label + ": " + result.inner_obj_path +
-                                  " (reconstructed scalar nodes=" +
-                                  std::to_string(result.inner_reconstructed_scalar_node_count) +
-                                  ", mesh vertices emitted=" + std::to_string(result.inner_obj_vertex_count) +
-                                  ", mesh faces emitted=" + std::to_string(result.inner_obj_face_count) +
-                                  ", reconstructed nodes not used by any face=" +
-                                  std::to_string(result.inner_reconstructed_nodes_not_used_by_any_face) + ")");
+        if (config.stage6_split_in_out_meshes) {
+            result.messages.push_back("Geometry Stage 6 outer " + mesh_label + ": " + result.outer_obj_path +
+                                      " (reconstructed scalar nodes=" +
+                                      std::to_string(result.outer_reconstructed_scalar_node_count) +
+                                      ", mesh vertices emitted=" + std::to_string(result.outer_obj_vertex_count) +
+                                      ", mesh faces emitted=" + std::to_string(result.outer_obj_face_count) +
+                                      ", reconstructed nodes not used by any face=" +
+                                      std::to_string(result.outer_reconstructed_nodes_not_used_by_any_face) + ")");
+            result.messages.push_back("Geometry Stage 6 inner " + mesh_label + ": " + result.inner_obj_path +
+                                      " (reconstructed scalar nodes=" +
+                                      std::to_string(result.inner_reconstructed_scalar_node_count) +
+                                      ", mesh vertices emitted=" + std::to_string(result.inner_obj_vertex_count) +
+                                      ", mesh faces emitted=" + std::to_string(result.inner_obj_face_count) +
+                                      ", reconstructed nodes not used by any face=" +
+                                      std::to_string(result.inner_reconstructed_nodes_not_used_by_any_face) + ")");
+        } else {
+            result.messages.push_back("Geometry Stage 6 " + mesh_label + ": " + result.outer_obj_path +
+                                      " (outer reconstructed scalar nodes=" +
+                                      std::to_string(result.outer_reconstructed_scalar_node_count) +
+                                      ", outer mesh vertices emitted=" + std::to_string(result.outer_obj_vertex_count) +
+                                      ", outer mesh faces emitted=" + std::to_string(result.outer_obj_face_count) +
+                                      ", outer reconstructed nodes not used by any face=" +
+                                      std::to_string(result.outer_reconstructed_nodes_not_used_by_any_face) +
+                                      ", inner reconstructed scalar nodes=" +
+                                      std::to_string(result.inner_reconstructed_scalar_node_count) +
+                                      ", inner mesh vertices emitted=" + std::to_string(result.inner_obj_vertex_count) +
+                                      ", inner mesh faces emitted=" + std::to_string(result.inner_obj_face_count) +
+                                      ", inner reconstructed nodes not used by any face=" +
+                                      std::to_string(result.inner_reconstructed_nodes_not_used_by_any_face) + ")");
+        }
     }
     result.messages.push_back("Geometry analysis: completed Stage 6 smooth surface reconstruction.");
 
@@ -2674,8 +2773,6 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     result.messages.push_back("Geometry Stage 7 enforce non-crossing: " +
                               std::to_string(config.stage7_enforce_non_crossing ? 1 : 0));
     result.messages.push_back("Geometry Stage 7 minimum separation: " + std::to_string(config.stage7_min_separation));
-    result.messages.push_back("Geometry Stage 7 seed preservation status: " +
-                              std::string(config.stage7_preserve_seed_values ? "enabled" : "disabled"));
     result.messages.push_back("Geometry Stage 7 outer iterations used: " + std::to_string(result.outer_iterations_used));
     result.messages.push_back("Geometry Stage 7 inner iterations used: " + std::to_string(result.inner_iterations_used));
     result.messages.push_back("Geometry Stage 7 outer final max update: " + std::to_string(result.outer_final_max_update));
@@ -2687,10 +2784,6 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     result.messages.push_back("Geometry Stage 7 min smooth separation: " + std::to_string(result.min_smooth_separation));
     result.messages.push_back("Geometry Stage 7 max smooth separation: " + std::to_string(result.max_smooth_separation));
     result.messages.push_back("Geometry Stage 7 mean smooth separation: " + std::to_string(result.mean_smooth_separation));
-    result.messages.push_back("Geometry Stage 7 outer normal convention: " + result.normal_orientation_outer);
-    result.messages.push_back("Geometry Stage 7 inner normal convention: " + result.normal_orientation_inner);
-    result.messages.push_back("Geometry Stage 7 local thickness definition: " + result.local_thickness_definition);
-    result.messages.push_back("Geometry Stage 7 metric-surface definition: " + result.metric_surface_definition);
     if (config.debug) {
         result.messages.push_back("Geometry Stage 7 outer smooth CSV: " + result.outer_smooth_csv_path);
         result.messages.push_back("Geometry Stage 7 inner smooth CSV: " + result.inner_smooth_csv_path);
@@ -2703,18 +2796,28 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     if (config.stage7_export_meshes) {
         const std::string mesh_label =
             config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl ? "STL" : "OBJ";
-        const std::string export_mode = config.stage6_split_in_out_meshes ? "split" : "combined";
-        result.messages.push_back("Geometry Stage 7 " + mesh_label + " export mode: " + export_mode);
-        result.messages.push_back("Geometry Stage 7 outer " + mesh_label + ": " + result.outer_mesh_path +
-                                  " (mesh vertices emitted=" + std::to_string(result.outer_mesh_vertex_count) +
-                                  ", mesh faces emitted=" + std::to_string(result.outer_mesh_face_count) +
-                                  ", scalar nodes not used by any face=" +
-                                  std::to_string(result.outer_mesh_unused_scalar_nodes) + ")");
-        result.messages.push_back("Geometry Stage 7 inner " + mesh_label + ": " + result.inner_mesh_path +
-                                  " (mesh vertices emitted=" + std::to_string(result.inner_mesh_vertex_count) +
-                                  ", mesh faces emitted=" + std::to_string(result.inner_mesh_face_count) +
-                                  ", scalar nodes not used by any face=" +
-                                  std::to_string(result.inner_mesh_unused_scalar_nodes) + ")");
+        if (config.stage6_split_in_out_meshes) {
+            result.messages.push_back("Geometry Stage 7 outer " + mesh_label + ": " + result.outer_mesh_path +
+                                      " (mesh vertices emitted=" + std::to_string(result.outer_mesh_vertex_count) +
+                                      ", mesh faces emitted=" + std::to_string(result.outer_mesh_face_count) +
+                                      ", scalar nodes not used by any face=" +
+                                      std::to_string(result.outer_mesh_unused_scalar_nodes) + ")");
+            result.messages.push_back("Geometry Stage 7 inner " + mesh_label + ": " + result.inner_mesh_path +
+                                      " (mesh vertices emitted=" + std::to_string(result.inner_mesh_vertex_count) +
+                                      ", mesh faces emitted=" + std::to_string(result.inner_mesh_face_count) +
+                                      ", scalar nodes not used by any face=" +
+                                      std::to_string(result.inner_mesh_unused_scalar_nodes) + ")");
+        } else {
+            result.messages.push_back("Geometry Stage 7 " + mesh_label + ": " + result.outer_mesh_path +
+                                      " (outer mesh vertices emitted=" + std::to_string(result.outer_mesh_vertex_count) +
+                                      ", outer mesh faces emitted=" + std::to_string(result.outer_mesh_face_count) +
+                                      ", outer scalar nodes not used by any face=" +
+                                      std::to_string(result.outer_mesh_unused_scalar_nodes) +
+                                      ", inner mesh vertices emitted=" + std::to_string(result.inner_mesh_vertex_count) +
+                                      ", inner mesh faces emitted=" + std::to_string(result.inner_mesh_face_count) +
+                                      ", inner scalar nodes not used by any face=" +
+                                      std::to_string(result.inner_mesh_unused_scalar_nodes) + ")");
+        }
     }
     result.messages.push_back("Geometry analysis: completed Stage 7 surface smoothing / regularization.");
 
@@ -2753,6 +2856,11 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
     result.success = result.preparation.success && result.stage2_patch.success && result.stage3_patch.success &&
                      result.stage4_raw.success && result.stage5_prep.success && result.stage6_surfaces.success &&
                      result.stage7_smooth.success;
+    const std::string run_summary_json_path = config.output_prefix + "_run_summary.json";
+    if (!writeGeometryRunSummaryJson(config, parser_config, run_summary_json_path)) {
+        throw std::runtime_error("Failed to write geometry run summary JSON: " + run_summary_json_path);
+    }
+    result.messages.push_back("Geometry run summary JSON: " + run_summary_json_path);
     logMessages(result.messages, logger);
 
     return result;

@@ -41,7 +41,7 @@ struct FoldPatchAnalysisConfig {
     int fold_type = 2;
     int fold_index = 0;
     double cylinder_radius = 12.0;
-    double delta_vdw = 0.0;
+    double delta_vdw = 3.0;
     double grid_spacing = 2.0;
     std::size_t min_atoms_in_patch = 20;
     double stage5_boundary_margin = 0.0;
@@ -55,7 +55,7 @@ struct FoldPatchAnalysisConfig {
     double stage6_min_separation = 0.0;
     bool stage6_export_obj_meshes = true;
     bool stage7_enabled = true;
-    double stage7_smoothing_weight = 1.0;
+    double stage7_smoothing_weight = 0.01;
     std::size_t stage7_max_iterations = 250;
     double stage7_convergence_tolerance = 1e-6;
     bool stage7_preserve_seed_values = false;
@@ -63,7 +63,7 @@ struct FoldPatchAnalysisConfig {
     double stage7_min_separation = 1.0;
     bool stage7_export_meshes = true;
     enum class MeshExportFormat : uint8_t { obj = 0, stl = 1 };
-    MeshExportFormat stage6_mesh_export_format = MeshExportFormat::obj;
+    MeshExportFormat stage6_mesh_export_format = MeshExportFormat::stl;
     bool stage6_split_in_out_meshes = false;
     bool export_rotated_capsid = false;
     std::string output_prefix = "geometry";
