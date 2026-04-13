@@ -45,7 +45,7 @@ void printHelp(const std::string& program_name) {
       --geometry_fold_type <n>               Geometry fold type 2|3|5 (default: 2)
       --geometry_fold_index <n>              Geometry fold index for selected type (default: 0)
       --geometry_cylinder_radius <A>         Geometry cylinder radius in angstroms (default: 12.0)
-      --dvdW <A>                             Delta added to all assigned vdW radii in angstroms (default: 0.0)
+      --dvdW <A>                             Delta added to all assigned vdW radii in angstroms (default: 3.0)
       --geometry_grid_spacing <A>            Geometry Stage 4 XY grid spacing in angstroms (default: 2.0)
       --geometry_min_atoms_in_patch <n>      Minimum selected atoms required (default: 20)
       --geometry_boundary_margin <A>         Stage 5 boundary exclusion margin (default: auto)
@@ -53,13 +53,13 @@ void printHelp(const std::string& program_name) {
       --geometry_min_support_nodes <n>       Stage 5 minimum nearby support seeds (default: 4)
       --geometry_reliable_radius <A>         Stage 5 reliable core radius (default: auto)
       --geometry_out_prefix <path>           Prefix for geometry analysis outputs (default: geometry)
-      --export_mesh_format <name>            Stage 6 mesh export format: obj|stl (default: obj)
+      --export_mesh_format <name>            Stage 6 mesh export format: obj|stl (default: stl)
       --split_in_out_mesh                    Export Stage 6 inner and outer meshes as separate files
       --surf_min_separation <A>              Stage 6 minimum outer-inner separation in angstroms (default: 0.0)
 
   [Geometry smoothing]
       --geometry_smooth_enabled <true|false> Enable Stage 7 smoothing / regularization (default: true)
-      --geometry_smooth_weight <x>           Stage 7 smoothing weight (default: 1.0)
+      --geometry_smooth_weight <x>           Stage 7 smoothing weight (default: 0.01)
       --geometry_smooth_max_iterations <n>   Stage 7 max iterations (default: 250)
       --geometry_smooth_convergence_tolerance <x>  Stage 7 convergence tolerance (default: 1e-6)
       --geometry_smooth_pin_seed <true|false> Pin Stage 5 seed values during Stage 7 smoothing (default: false)
@@ -118,7 +118,7 @@ int main(int argc, char* argv[]) {
     int geometry_fold_type = 2;
     int geometry_fold_index = 0;
     double geometry_cylinder_radius = 12.0;
-    double delta_vdw = 0.0;
+    double delta_vdw = 3.0;
     double geometry_grid_spacing = 2.0;
     std::size_t geometry_min_atoms_in_patch = 20;
     double geometry_boundary_margin = 0.0;
@@ -126,12 +126,12 @@ int main(int argc, char* argv[]) {
     std::size_t geometry_min_support_nodes = 4;
     double geometry_reliable_radius = 0.0;
     std::string geometry_output_prefix = "geometry";
-    FoldPatchAnalysisConfig::MeshExportFormat mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::obj;
+    FoldPatchAnalysisConfig::MeshExportFormat mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::stl;
     bool split_in_out_mesh = false;
     double surface_min_separation = 0.0;
     // Stage 7 smoothing/regularization runs by default for geometry-analysis workflows.
     bool geometry_smooth_enabled = true;
-    double geometry_smooth_weight = 1.0;
+    double geometry_smooth_weight = 0.01;
     std::size_t geometry_smooth_max_iterations = 250;
     double geometry_smooth_convergence_tolerance = 1e-6;
     bool geometry_smooth_pin_seed = false;
