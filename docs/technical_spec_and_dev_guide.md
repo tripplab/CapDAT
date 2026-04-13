@@ -173,11 +173,11 @@ The CLI currently supports the following user-facing options:
 - `--geometry_smooth_convergence_tolerance <x>`
   Stage 7 convergence tolerance.
 
-- `--geometry_smooth_preserve_seed_values`
-  Preserve Stage 5 seed values during Stage 7 smoothing.
+- `--geometry_smooth_pin_seed <true|false>`
+  Pin Stage 5 seed values during Stage 7 smoothing. Defaults to `false`.
 
-- `--geometry_smooth_enforce_non_crossing`
-  Enforce Stage 7 non-crossing constraint.
+- `--geometry_smooth_enforce_non_crossing <true|false>`
+  Enforce Stage 7 non-crossing constraint. Defaults to `true`.
 
 - `--geometry_smooth_min_separation <A>`
   Stage 7 minimum outer-inner separation in angstroms.
