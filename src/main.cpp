@@ -16,50 +16,63 @@
  * @brief Print the CapDAT help message to standard output.
  */
 void printHelp(const std::string& program_name) {
-    std::cout
-        << "CapDAT v0.1.0\n"
-        << "Capsid Data Analysis Toolkit - v01 foundation release\n\n"
-        << "Usage:\n"
-        << "  " << program_name << " --input <file> [options]\n\n"
-        << "Required options:\n"
-        << "  -i, --input <file>      Input PDB file\n\n"
-        << "Optional options:\n"
-        << "  -l, --log <file>        Write log output to file\n"
-        << "  -v, --verbose           Increase terminal verbosity\n"
-        << "      --include-hetatm    Include HETATM records\n"
-        << "      --export-final <f>  Export current accepted Capsid coordinates to file\n"
-        << "      --reorient          Enable post-parse in-place reorientation workflow\n"
-        << "      --align-fold <name> Reorientation source: canonical fold (2_0,2_1,3_0,3_1,5_0)\n"
-        << "      --align-vector <v>  Reorientation source: custom direction x,y,z from origin\n"
-        << "      --align-axis <a>    Target alignment axis x|y|z (default: z)\n"
-        << "      --geometry-analysis Run geometry analysis Stage 1 preparation\n"
-        << "      --debug             Enable geometry debug artifact exports\n"
-        << "      --geometry_fold_type <n>   Geometry fold type 2|3|5 (default: 2)\n"
-        << "      --geometry_fold_index <n>  Geometry fold index for selected type (default: 0)\n"
-        << "      --geometry_cylinder_radius <A>  Geometry cylinder radius in angstroms (default: 12.0)\n"
-        << "      --dvdW <A>  Delta added to all assigned vdW radii in angstroms (default: 0.0)\n"
-        << "      --geometry_grid_spacing <A>  Geometry Stage 4 XY grid spacing in angstroms (default: 2.0)\n"
-        << "      --geometry_min_atoms_in_patch <n>  Minimum selected atoms required (default: 20)\n"
-        << "      --geometry_boundary_margin <A>  Stage 5 boundary exclusion margin (default: auto)\n"
-        << "      --geometry_support_radius <A>  Stage 5 interpolation support radius (default: auto)\n"
-        << "      --geometry_min_support_nodes <n>  Stage 5 minimum nearby support seeds (default: 4)\n"
-        << "      --geometry_reliable_radius <A>  Stage 5 reliable core radius (default: auto)\n"
-        << "      --geometry_out_prefix <path>  Prefix for geometry analysis outputs (default: geometry)\n"
-        << "      --export_mesh_format <name>   Stage 6 mesh export format: obj|stl (default: obj)\n"
-        << "      --split_in_out_mesh   Export Stage 6 inner and outer meshes as separate files\n"
-        << "      --surf_min_separation <A>  Stage 6 minimum outer-inner separation in angstroms (default: 0.0)\n"
-        << "      --quiet             Reduce terminal output\n"
-        << "  -h, --help              Show this help message\n"
-        << "      --version           Show version information\n\n"
-        << "Notes:\n"
-        << "  - --write-clean-pdb has been replaced by --export-final.\n"
-        << "  - Reorientation applies a pure rotation (no translation) in place to\n"
-        << "    current Capsid coordinates, changing frame identity from original\n"
-        << "    parsed frame to a derived frame tracked in Capsid orientation state.\n"
-        << "  - --align-axis defaults to positive Z when omitted.\n\n"
-        << "Examples:\n"
-        << "  " << program_name << " --input capsid.pdb --export-final accepted.pdb\n"
-        << "  " << program_name << " -i capsid.pdb --reorient --align-fold 5_0 --align-axis x --export-final aligned.pdb\n";
+    std::cout << "CapDAT v0.1.0\n"
+              << "Capsid Data Analysis Toolkit - v01 foundation release\n\n"
+              << "Usage:\n"
+              << "  " << program_name << " --input <file> [options]\n\n"
+              << "Required options:\n"
+              << "  -i, --input <file>      Input PDB file\n\n"
+              << R"(Optional options:
+
+  [General]
+  -l, --log <file>                           Write log output to file
+  -v, --verbose                              Increase terminal verbosity
+      --quiet                                Reduce terminal output
+      --include-hetatm                       Include HETATM records
+      --export-final <f>                     Export current accepted Capsid coordinates to file
+
+  [Reorientation]
+      --reorient                             Enable post-parse in-place reorientation workflow
+      --align-fold <name>                    Reorientation source: canonical fold (2_0,2_1,3_0,3_1,5_0)
+      --align-vector <v>                     Reorientation source: custom direction x,y,z from origin
+      --align-axis <a>                       Target alignment axis x|y|z (default: z)
+
+  [Geometry]
+      --geometry-analysis                    Run geometry analysis Stage 1 preparation
+      --debug                                Enable geometry debug artifact exports
+      --geometry_fold_type <n>               Geometry fold type 2|3|5 (default: 2)
+      --geometry_fold_index <n>              Geometry fold index for selected type (default: 0)
+      --geometry_cylinder_radius <A>         Geometry cylinder radius in angstroms (default: 12.0)
+      --dvdW <A>                             Delta added to all assigned vdW radii in angstroms (default: 0.0)
+      --geometry_grid_spacing <A>            Geometry Stage 4 XY grid spacing in angstroms (default: 2.0)
+      --geometry_min_atoms_in_patch <n>      Minimum selected atoms required (default: 20)
+      --geometry_boundary_margin <A>         Stage 5 boundary exclusion margin (default: auto)
+      --geometry_support_radius <A>          Stage 5 interpolation support radius (default: auto)
+      --geometry_min_support_nodes <n>       Stage 5 minimum nearby support seeds (default: 4)
+      --geometry_reliable_radius <A>         Stage 5 reliable core radius (default: auto)
+      --geometry_out_prefix <path>           Prefix for geometry analysis outputs (default: geometry)
+      --export_mesh_format <name>            Stage 6 mesh export format: obj|stl (default: obj)
+      --split_in_out_mesh                    Export Stage 6 inner and outer meshes as separate files
+      --surf_min_separation <A>              Stage 6 minimum outer-inner separation in angstroms (default: 0.0)
+
+  [Geometry smoothing]
+      --geometry_smooth_enabled              Enable Stage 7 smoothing / regularization
+      --geometry_smooth_weight <x>           Stage 7 smoothing weight (default: 1.0)
+      --geometry_smooth_max_iterations <n>   Stage 7 max iterations (default: 250)
+      --geometry_smooth_convergence_tolerance <x>  Stage 7 convergence tolerance (default: 1e-6)
+      --geometry_smooth_preserve_seed_values Preserve Stage 5 seed values during Stage 7 smoothing
+      --geometry_smooth_enforce_non_crossing Enforce Stage 7 non-crossing constraint
+      --geometry_smooth_min_separation <A>   Stage 7 minimum outer-inner separation in angstroms (default: 1.0)
+      --geometry_smooth_export_meshes        Export Stage 7 smoothed meshes
+
+  -h, --help                                 Show this help message
+      --version                              Show version information
+
+)"
+              << "Examples:\n"
+              << "  " << program_name << " --input capsid.pdb --export-final accepted.pdb\n"
+              << "  " << program_name
+              << " -i capsid.pdb --reorient --align-fold 5_0 --align-axis x --export-final aligned.pdb\n";
 }
 
 void printVersion() {
@@ -114,6 +127,14 @@ int main(int argc, char* argv[]) {
     FoldPatchAnalysisConfig::MeshExportFormat mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::obj;
     bool split_in_out_mesh = false;
     double surface_min_separation = 0.0;
+    bool geometry_smooth_enabled = true;
+    double geometry_smooth_weight = 1.0;
+    std::size_t geometry_smooth_max_iterations = 250;
+    double geometry_smooth_convergence_tolerance = 1e-6;
+    bool geometry_smooth_preserve_seed_values = true;
+    bool geometry_smooth_enforce_non_crossing = true;
+    double geometry_smooth_min_separation = 1.0;
+    bool geometry_smooth_export_meshes = true;
 
     const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
 
@@ -163,10 +184,6 @@ int main(int argc, char* argv[]) {
             }
             export_final_output_path = argv[++i];
             continue;
-        }
-        if (arg == "--write-clean-pdb") {
-            std::cerr << "Error: --write-clean-pdb is deprecated. Use --export-final <file>.\n";
-            return 1;
         }
         if (arg == "--reorient") {
             reorient_requested = true;
@@ -329,6 +346,55 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        if (arg == "--geometry_smooth_enabled") {
+            geometry_smooth_enabled = true;
+            continue;
+        }
+        if (arg == "--geometry_smooth_weight") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_smooth_weight\n";
+                return 1;
+            }
+            geometry_smooth_weight = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_smooth_max_iterations") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_smooth_max_iterations\n";
+                return 1;
+            }
+            geometry_smooth_max_iterations = static_cast<std::size_t>(std::stoul(argv[++i]));
+            continue;
+        }
+        if (arg == "--geometry_smooth_convergence_tolerance") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_smooth_convergence_tolerance\n";
+                return 1;
+            }
+            geometry_smooth_convergence_tolerance = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_smooth_preserve_seed_values") {
+            geometry_smooth_preserve_seed_values = true;
+            continue;
+        }
+        if (arg == "--geometry_smooth_enforce_non_crossing") {
+            geometry_smooth_enforce_non_crossing = true;
+            continue;
+        }
+        if (arg == "--geometry_smooth_min_separation") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_smooth_min_separation\n";
+                return 1;
+            }
+            geometry_smooth_min_separation = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_smooth_export_meshes") {
+            geometry_smooth_export_meshes = true;
+            continue;
+        }
+
         std::cerr << "Error: unknown argument: " << arg << '\n';
         return 1;
     }
@@ -428,6 +494,14 @@ int main(int argc, char* argv[]) {
         geometry_config.stage6_mesh_export_format = mesh_export_format;
         geometry_config.stage6_split_in_out_meshes = split_in_out_mesh;
         geometry_config.stage6_min_separation = surface_min_separation;
+        geometry_config.stage7_enabled = geometry_smooth_enabled;
+        geometry_config.stage7_smoothing_weight = geometry_smooth_weight;
+        geometry_config.stage7_max_iterations = geometry_smooth_max_iterations;
+        geometry_config.stage7_convergence_tolerance = geometry_smooth_convergence_tolerance;
+        geometry_config.stage7_preserve_seed_values = geometry_smooth_preserve_seed_values;
+        geometry_config.stage7_enforce_non_crossing = geometry_smooth_enforce_non_crossing;
+        geometry_config.stage7_min_separation = geometry_smooth_min_separation;
+        geometry_config.stage7_export_meshes = geometry_smooth_export_meshes;
 
         const GeometryAnalysisResult geometry_result =
             runFoldPatchGeometryAnalysis(capsid, geometry_config, config, &logger);
