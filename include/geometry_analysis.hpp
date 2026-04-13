@@ -305,6 +305,10 @@ struct GeometryStage6SurfaceReconstructionResult {
     std::size_t inner_obj_vertex_count = 0;
     std::size_t outer_obj_face_count = 0;
     std::size_t inner_obj_face_count = 0;
+    std::size_t outer_reconstructed_scalar_node_count = 0;
+    std::size_t inner_reconstructed_scalar_node_count = 0;
+    std::size_t outer_reconstructed_nodes_not_used_by_any_face = 0;
+    std::size_t inner_reconstructed_nodes_not_used_by_any_face = 0;
 
     std::string outer_reconstructed_csv_path;
     std::string inner_reconstructed_csv_path;
