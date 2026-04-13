@@ -1365,7 +1365,7 @@ void testStage7RequiresSuccessfulStage6() {
     assertTrue(threw, "Stage 7 should require successful Stage 6");
 }
 
-void testStage7SeedPreservationAndRoughnessReduction() {
+void testStage7SeedPinSwitchAndRoughnessReduction() {
     SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
     FoldPatchAnalysisConfig config;
     config.stage7_export_meshes = false;
@@ -1380,11 +1380,18 @@ void testStage7SeedPreservationAndRoughnessReduction() {
 
     const double before_seed = inputs.stage6.z_outer_reconstructed[seed_idx];
     const double before_rough = std::fabs(inputs.stage6.z_outer_reconstructed[noisy_idx] - before_seed);
-    const auto stage7 =
+    const auto stage7_default =
         runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
-    assertTrue(stage7.z_outer_smooth[seed_idx] == before_seed, "Stage 7 should preserve seed-supported outer values");
-    const double after_rough = std::fabs(stage7.z_outer_smooth[noisy_idx] - stage7.z_outer_smooth[seed_idx]);
+    assertTrue(stage7_default.z_outer_smooth[seed_idx] != before_seed,
+               "Stage 7 should update seed-supported outer values when pin-seed is OFF");
+    const double after_rough =
+        std::fabs(stage7_default.z_outer_smooth[noisy_idx] - stage7_default.z_outer_smooth[seed_idx]);
     assertTrue(after_rough < before_rough, "Stage 7 smoothing should reduce local roughness on non-seed nodes");
+
+    config.stage7_preserve_seed_values = true;
+    const auto stage7_pinned = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    assertTrue(stage7_pinned.z_outer_smooth[seed_idx] == before_seed,
+               "Stage 7 should preserve seed-supported outer values when pin-seed is ON");
 }
 
 void testStage7ReliableCoreDefinesMetricDomain() {
@@ -1415,6 +1422,7 @@ void testStage7NonCrossingAndMetadata() {
 
     FoldPatchAnalysisConfig config;
     config.stage7_export_meshes = false;
+    config.stage7_preserve_seed_values = true;
     config.stage7_enforce_non_crossing = true;
     config.stage7_min_separation = 1.25;
     const auto stage7 = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
@@ -1618,7 +1626,7 @@ int main() {
         testStage6CombinedExportDefault();
         testStage1ToStage6Integration();
         testStage7RequiresSuccessfulStage6();
-        testStage7SeedPreservationAndRoughnessReduction();
+        testStage7SeedPinSwitchAndRoughnessReduction();
         testStage7ReliableCoreDefinesMetricDomain();
         testStage7NonCrossingAndMetadata();
         testStage7MeshExportAndDeterminism();

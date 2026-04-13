@@ -10,6 +10,8 @@
 #include <exception>
 #include <iostream>
 #include <cstddef>
+#include <algorithm>
+#include <cctype>
 #include <string>
 
 /**
@@ -60,8 +62,8 @@ void printHelp(const std::string& program_name) {
       --geometry_smooth_weight <x>           Stage 7 smoothing weight (default: 1.0)
       --geometry_smooth_max_iterations <n>   Stage 7 max iterations (default: 250)
       --geometry_smooth_convergence_tolerance <x>  Stage 7 convergence tolerance (default: 1e-6)
-      --geometry_smooth_preserve_seed_values Preserve Stage 5 seed values during Stage 7 smoothing
-      --geometry_smooth_enforce_non_crossing Enforce Stage 7 non-crossing constraint
+      --geometry_smooth_pin_seed <true|false> Pin Stage 5 seed values during Stage 7 smoothing (default: false)
+      --geometry_smooth_enforce_non_crossing <true|false>  Enforce Stage 7 non-crossing constraint (default: true)
       --geometry_smooth_min_separation <A>   Stage 7 minimum outer-inner separation in angstroms (default: 1.0)
       --geometry_smooth_export_meshes        Export Stage 7 smoothed meshes
 
@@ -131,12 +133,25 @@ int main(int argc, char* argv[]) {
     double geometry_smooth_weight = 1.0;
     std::size_t geometry_smooth_max_iterations = 250;
     double geometry_smooth_convergence_tolerance = 1e-6;
-    bool geometry_smooth_preserve_seed_values = true;
+    bool geometry_smooth_pin_seed = false;
     bool geometry_smooth_enforce_non_crossing = true;
     double geometry_smooth_min_separation = 1.0;
     bool geometry_smooth_export_meshes = true;
 
     const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
+
+    const auto parseBoolSwitch = [](std::string value, const char* option_name) -> bool {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        if (value == "true") {
+            return true;
+        }
+        if (value == "false") {
+            return false;
+        }
+        throw std::runtime_error(std::string("Error: ") + option_name + " expects true or false");
+    };
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -374,12 +389,31 @@ int main(int argc, char* argv[]) {
             geometry_smooth_convergence_tolerance = std::stod(argv[++i]);
             continue;
         }
-        if (arg == "--geometry_smooth_preserve_seed_values") {
-            geometry_smooth_preserve_seed_values = true;
+        if (arg == "--geometry_smooth_pin_seed") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_smooth_pin_seed\n";
+                return 1;
+            }
+            try {
+                geometry_smooth_pin_seed = parseBoolSwitch(argv[++i], "--geometry_smooth_pin_seed");
+            } catch (const std::runtime_error& ex) {
+                std::cerr << ex.what() << '\n';
+                return 1;
+            }
             continue;
         }
         if (arg == "--geometry_smooth_enforce_non_crossing") {
-            geometry_smooth_enforce_non_crossing = true;
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_smooth_enforce_non_crossing\n";
+                return 1;
+            }
+            try {
+                geometry_smooth_enforce_non_crossing =
+                    parseBoolSwitch(argv[++i], "--geometry_smooth_enforce_non_crossing");
+            } catch (const std::runtime_error& ex) {
+                std::cerr << ex.what() << '\n';
+                return 1;
+            }
             continue;
         }
         if (arg == "--geometry_smooth_min_separation") {
@@ -498,7 +532,7 @@ int main(int argc, char* argv[]) {
         geometry_config.stage7_smoothing_weight = geometry_smooth_weight;
         geometry_config.stage7_max_iterations = geometry_smooth_max_iterations;
         geometry_config.stage7_convergence_tolerance = geometry_smooth_convergence_tolerance;
-        geometry_config.stage7_preserve_seed_values = geometry_smooth_preserve_seed_values;
+        geometry_config.stage7_preserve_seed_values = geometry_smooth_pin_seed;
         geometry_config.stage7_enforce_non_crossing = geometry_smooth_enforce_non_crossing;
         geometry_config.stage7_min_separation = geometry_smooth_min_separation;
         geometry_config.stage7_export_meshes = geometry_smooth_export_meshes;

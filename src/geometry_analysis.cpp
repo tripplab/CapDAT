@@ -550,6 +550,8 @@ Stage7FieldSmoothResult runStage7FieldSmoothing(const Stage4GridDescriptor& grid
                 if (reconstructed_mask[idx] == 0 || !std::isfinite(current[idx])) {
                     continue;
                 }
+                // ON  (pin seed): paired seed nodes remain fixed at their Stage 6 values.
+                // OFF (allow move): paired seed nodes are updated like all other reconstructed nodes.
                 if (config.stage7_preserve_seed_values && paired_seed_mask[idx] != 0) {
                     continue;
                 }

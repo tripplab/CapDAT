@@ -58,7 +58,7 @@ struct FoldPatchAnalysisConfig {
     double stage7_smoothing_weight = 1.0;
     std::size_t stage7_max_iterations = 250;
     double stage7_convergence_tolerance = 1e-6;
-    bool stage7_preserve_seed_values = true;
+    bool stage7_preserve_seed_values = false;
     bool stage7_enforce_non_crossing = true;
     double stage7_min_separation = 1.0;
     bool stage7_export_meshes = true;
