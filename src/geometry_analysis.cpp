@@ -521,6 +521,18 @@ struct Stage6ObjExportResult {
     std::size_t face_count = 0;
 };
 
+struct Stage6StlExportResult {
+    std::size_t vertex_count = 0;
+    std::size_t face_count = 0;
+};
+
+struct Stage6DualMeshExportResult {
+    std::size_t outer_vertex_count = 0;
+    std::size_t outer_face_count = 0;
+    std::size_t inner_vertex_count = 0;
+    std::size_t inner_face_count = 0;
+};
+
 Stage6ObjExportResult writeStage6ObjMesh(const Stage4GridDescriptor& grid,
                                          const std::vector<uint8_t>& obj_vertex_mask,
                                          const std::vector<double>& values,
@@ -568,6 +580,231 @@ Stage6ObjExportResult writeStage6ObjMesh(const Stage4GridDescriptor& grid,
     }
     if (!out.good()) {
         throw std::runtime_error("Failed while writing Stage 6 OBJ mesh: " + path);
+    }
+    return export_result;
+}
+
+Stage6StlExportResult writeStage6StlMesh(const Stage4GridDescriptor& grid,
+                                         const std::vector<uint8_t>& obj_vertex_mask,
+                                         const std::vector<double>& values,
+                                         const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        throw std::runtime_error("Failed to open Stage 6 STL path for writing: " + path);
+    }
+
+    const auto writeFacet = [&](double x0, double y0, double z0, double x1, double y1, double z1, double x2, double y2, double z2) {
+        const double ux = x1 - x0;
+        const double uy = y1 - y0;
+        const double uz = z1 - z0;
+        const double vx = x2 - x0;
+        const double vy = y2 - y0;
+        const double vz = z2 - z0;
+        double nx = (uy * vz) - (uz * vy);
+        double ny = (uz * vx) - (ux * vz);
+        double nz = (ux * vy) - (uy * vx);
+        const double norm = std::sqrt((nx * nx) + (ny * ny) + (nz * nz));
+        if (norm > 0.0) {
+            nx /= norm;
+            ny /= norm;
+            nz /= norm;
+        }
+        out << "  facet normal " << nx << ' ' << ny << ' ' << nz << '\n'
+            << "    outer loop\n"
+            << "      vertex " << x0 << ' ' << y0 << ' ' << z0 << '\n'
+            << "      vertex " << x1 << ' ' << y1 << ' ' << z1 << '\n'
+            << "      vertex " << x2 << ' ' << y2 << ' ' << z2 << '\n'
+            << "    endloop\n"
+            << "  endfacet\n";
+    };
+
+    Stage6StlExportResult export_result;
+    std::vector<uint8_t> vertex_used(grid.nx * grid.ny, 0);
+    out << "solid capdat_stage6_mesh\n";
+    for (std::size_t j = 0; (j + 1) < grid.ny; ++j) {
+        for (std::size_t i = 0; (i + 1) < grid.nx; ++i) {
+            const std::size_t idx00 = stage4NodeIndex(i, j, grid.nx);
+            const std::size_t idx10 = stage4NodeIndex(i + 1, j, grid.nx);
+            const std::size_t idx01 = stage4NodeIndex(i, j + 1, grid.nx);
+            const std::size_t idx11 = stage4NodeIndex(i + 1, j + 1, grid.nx);
+            if (obj_vertex_mask[idx00] == 0 || obj_vertex_mask[idx10] == 0 || obj_vertex_mask[idx01] == 0 ||
+                obj_vertex_mask[idx11] == 0 || !std::isfinite(values[idx00]) || !std::isfinite(values[idx10]) ||
+                !std::isfinite(values[idx01]) || !std::isfinite(values[idx11])) {
+                continue;
+            }
+
+            writeFacet(grid.x_values[i], grid.y_values[j], values[idx00], grid.x_values[i + 1], grid.y_values[j], values[idx10],
+                       grid.x_values[i], grid.y_values[j + 1], values[idx01]);
+            writeFacet(grid.x_values[i + 1], grid.y_values[j], values[idx10], grid.x_values[i + 1], grid.y_values[j + 1], values[idx11],
+                       grid.x_values[i], grid.y_values[j + 1], values[idx01]);
+            export_result.face_count += 2;
+
+            vertex_used[idx00] = 1;
+            vertex_used[idx10] = 1;
+            vertex_used[idx01] = 1;
+            vertex_used[idx11] = 1;
+        }
+    }
+    out << "endsolid capdat_stage6_mesh\n";
+
+    for (const uint8_t used : vertex_used) {
+        if (used != 0) {
+            ++export_result.vertex_count;
+        }
+    }
+    if (!out.good()) {
+        throw std::runtime_error("Failed while writing Stage 6 STL mesh: " + path);
+    }
+    return export_result;
+}
+
+Stage6DualMeshExportResult writeStage6ObjMeshesCombined(const Stage4GridDescriptor& grid,
+                                                        const std::vector<uint8_t>& obj_vertex_mask,
+                                                        const std::vector<double>& outer_values,
+                                                        const std::vector<double>& inner_values,
+                                                        const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        throw std::runtime_error("Failed to open Stage 6 combined OBJ path for writing: " + path);
+    }
+
+    Stage6DualMeshExportResult export_result;
+    int global_vertex_index = 1;
+    const auto writeSurface = [&](const std::vector<double>& values,
+                                  const std::string& object_name,
+                                  std::size_t& vertex_count,
+                                  std::size_t& face_count) {
+        out << "o " << object_name << '\n';
+        std::vector<int> vertex_indices(grid.nx * grid.ny, -1);
+        for (std::size_t j = 0; j < grid.ny; ++j) {
+            for (std::size_t i = 0; i < grid.nx; ++i) {
+                const std::size_t idx = stage4NodeIndex(i, j, grid.nx);
+                if (obj_vertex_mask[idx] == 0 || !std::isfinite(values[idx])) {
+                    continue;
+                }
+                out << "v " << grid.x_values[i] << ' ' << grid.y_values[j] << ' ' << values[idx] << '\n';
+                vertex_indices[idx] = global_vertex_index;
+                ++global_vertex_index;
+                ++vertex_count;
+            }
+        }
+
+        for (std::size_t j = 0; (j + 1) < grid.ny; ++j) {
+            for (std::size_t i = 0; (i + 1) < grid.nx; ++i) {
+                const std::size_t idx00 = stage4NodeIndex(i, j, grid.nx);
+                const std::size_t idx10 = stage4NodeIndex(i + 1, j, grid.nx);
+                const std::size_t idx01 = stage4NodeIndex(i, j + 1, grid.nx);
+                const std::size_t idx11 = stage4NodeIndex(i + 1, j + 1, grid.nx);
+                if (obj_vertex_mask[idx00] == 0 || obj_vertex_mask[idx10] == 0 || obj_vertex_mask[idx01] == 0 ||
+                    obj_vertex_mask[idx11] == 0 || !std::isfinite(values[idx00]) || !std::isfinite(values[idx10]) ||
+                    !std::isfinite(values[idx01]) || !std::isfinite(values[idx11])) {
+                    continue;
+                }
+                const int v00 = vertex_indices[idx00];
+                const int v10 = vertex_indices[idx10];
+                const int v01 = vertex_indices[idx01];
+                const int v11 = vertex_indices[idx11];
+                out << "f " << v00 << ' ' << v10 << ' ' << v01 << '\n';
+                out << "f " << v10 << ' ' << v11 << ' ' << v01 << '\n';
+                face_count += 2;
+            }
+        }
+    };
+
+    writeSurface(outer_values, "outer_surface", export_result.outer_vertex_count, export_result.outer_face_count);
+    writeSurface(inner_values, "inner_surface", export_result.inner_vertex_count, export_result.inner_face_count);
+
+    if (!out.good()) {
+        throw std::runtime_error("Failed while writing combined Stage 6 OBJ mesh: " + path);
+    }
+    return export_result;
+}
+
+Stage6DualMeshExportResult writeStage6StlMeshesCombined(const Stage4GridDescriptor& grid,
+                                                        const std::vector<uint8_t>& obj_vertex_mask,
+                                                        const std::vector<double>& outer_values,
+                                                        const std::vector<double>& inner_values,
+                                                        const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        throw std::runtime_error("Failed to open Stage 6 combined STL path for writing: " + path);
+    }
+
+    out << "solid capdat_mesh\n";
+    Stage6DualMeshExportResult export_result;
+
+    const auto writeSurface = [&](const std::vector<double>& values, std::size_t& vertex_count, std::size_t& face_count) {
+        std::vector<uint8_t> vertex_used(grid.nx * grid.ny, 0);
+        for (std::size_t j = 0; (j + 1) < grid.ny; ++j) {
+            for (std::size_t i = 0; (i + 1) < grid.nx; ++i) {
+                const std::size_t idx00 = stage4NodeIndex(i, j, grid.nx);
+                const std::size_t idx10 = stage4NodeIndex(i + 1, j, grid.nx);
+                const std::size_t idx01 = stage4NodeIndex(i, j + 1, grid.nx);
+                const std::size_t idx11 = stage4NodeIndex(i + 1, j + 1, grid.nx);
+                if (obj_vertex_mask[idx00] == 0 || obj_vertex_mask[idx10] == 0 || obj_vertex_mask[idx01] == 0 ||
+                    obj_vertex_mask[idx11] == 0 || !std::isfinite(values[idx00]) || !std::isfinite(values[idx10]) ||
+                    !std::isfinite(values[idx01]) || !std::isfinite(values[idx11])) {
+                    continue;
+                }
+
+                const double x00 = grid.x_values[i];
+                const double y00 = grid.y_values[j];
+                const double x10 = grid.x_values[i + 1];
+                const double y10 = grid.y_values[j];
+                const double x01 = grid.x_values[i];
+                const double y01 = grid.y_values[j + 1];
+                const double x11 = grid.x_values[i + 1];
+                const double y11 = grid.y_values[j + 1];
+
+                const auto writeFacet = [&](double x0, double y0, double z0, double x1, double y1, double z1, double x2, double y2, double z2) {
+                    const double ux = x1 - x0;
+                    const double uy = y1 - y0;
+                    const double uz = z1 - z0;
+                    const double vx = x2 - x0;
+                    const double vy = y2 - y0;
+                    const double vz = z2 - z0;
+                    double nx = (uy * vz) - (uz * vy);
+                    double ny = (uz * vx) - (ux * vz);
+                    double nz = (ux * vy) - (uy * vx);
+                    const double norm = std::sqrt((nx * nx) + (ny * ny) + (nz * nz));
+                    if (norm > 0.0) {
+                        nx /= norm;
+                        ny /= norm;
+                        nz /= norm;
+                    }
+                    out << "  facet normal " << nx << ' ' << ny << ' ' << nz << '\n'
+                        << "    outer loop\n"
+                        << "      vertex " << x0 << ' ' << y0 << ' ' << z0 << '\n'
+                        << "      vertex " << x1 << ' ' << y1 << ' ' << z1 << '\n'
+                        << "      vertex " << x2 << ' ' << y2 << ' ' << z2 << '\n'
+                        << "    endloop\n"
+                        << "  endfacet\n";
+                };
+
+                writeFacet(x00, y00, values[idx00], x10, y10, values[idx10], x01, y01, values[idx01]);
+                writeFacet(x10, y10, values[idx10], x11, y11, values[idx11], x01, y01, values[idx01]);
+                face_count += 2;
+
+                vertex_used[idx00] = 1;
+                vertex_used[idx10] = 1;
+                vertex_used[idx01] = 1;
+                vertex_used[idx11] = 1;
+            }
+        }
+
+        for (const uint8_t used : vertex_used) {
+            if (used != 0) {
+                ++vertex_count;
+            }
+        }
+    };
+
+    writeSurface(outer_values, export_result.outer_vertex_count, export_result.outer_face_count);
+    writeSurface(inner_values, export_result.inner_vertex_count, export_result.inner_face_count);
+    out << "endsolid capdat_mesh\n";
+
+    if (!out.good()) {
+        throw std::runtime_error("Failed while writing combined Stage 6 STL mesh: " + path);
     }
     return export_result;
 }
@@ -1909,16 +2146,57 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
     }
 
     if (config.stage6_export_obj_meshes) {
-        result.outer_obj_path = config.output_prefix + "_stage6_outer_surface.obj";
-        result.inner_obj_path = config.output_prefix + "_stage6_inner_surface.obj";
-        const Stage6ObjExportResult outer_obj =
-            writeStage6ObjMesh(result.grid, result.obj_vertex_mask, result.z_outer_reconstructed, result.outer_obj_path);
-        const Stage6ObjExportResult inner_obj =
-            writeStage6ObjMesh(result.grid, result.obj_vertex_mask, result.z_inner_reconstructed, result.inner_obj_path);
-        result.outer_obj_vertex_count = outer_obj.vertex_count;
-        result.outer_obj_face_count = outer_obj.face_count;
-        result.inner_obj_vertex_count = inner_obj.vertex_count;
-        result.inner_obj_face_count = inner_obj.face_count;
+        const bool use_stl = config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl;
+        const std::string extension = use_stl ? ".stl" : ".obj";
+        if (config.stage6_split_in_out_meshes) {
+            result.outer_obj_path = config.output_prefix + "_outer_surface" + extension;
+            result.inner_obj_path = config.output_prefix + "_inner_surface" + extension;
+            if (use_stl) {
+                const Stage6StlExportResult outer_mesh =
+                    writeStage6StlMesh(result.grid, result.obj_vertex_mask, result.z_outer_reconstructed, result.outer_obj_path);
+                const Stage6StlExportResult inner_mesh =
+                    writeStage6StlMesh(result.grid, result.obj_vertex_mask, result.z_inner_reconstructed, result.inner_obj_path);
+                result.outer_obj_vertex_count = outer_mesh.vertex_count;
+                result.outer_obj_face_count = outer_mesh.face_count;
+                result.inner_obj_vertex_count = inner_mesh.vertex_count;
+                result.inner_obj_face_count = inner_mesh.face_count;
+            } else {
+                const Stage6ObjExportResult outer_obj =
+                    writeStage6ObjMesh(result.grid, result.obj_vertex_mask, result.z_outer_reconstructed, result.outer_obj_path);
+                const Stage6ObjExportResult inner_obj =
+                    writeStage6ObjMesh(result.grid, result.obj_vertex_mask, result.z_inner_reconstructed, result.inner_obj_path);
+                result.outer_obj_vertex_count = outer_obj.vertex_count;
+                result.outer_obj_face_count = outer_obj.face_count;
+                result.inner_obj_vertex_count = inner_obj.vertex_count;
+                result.inner_obj_face_count = inner_obj.face_count;
+            }
+        } else {
+            result.outer_obj_path = config.output_prefix + "_surface" + extension;
+            result.inner_obj_path = result.outer_obj_path;
+            if (use_stl) {
+                const Stage6DualMeshExportResult combined =
+                    writeStage6StlMeshesCombined(result.grid,
+                                                 result.obj_vertex_mask,
+                                                 result.z_outer_reconstructed,
+                                                 result.z_inner_reconstructed,
+                                                 result.outer_obj_path);
+                result.outer_obj_vertex_count = combined.outer_vertex_count;
+                result.outer_obj_face_count = combined.outer_face_count;
+                result.inner_obj_vertex_count = combined.inner_vertex_count;
+                result.inner_obj_face_count = combined.inner_face_count;
+            } else {
+                const Stage6DualMeshExportResult combined =
+                    writeStage6ObjMeshesCombined(result.grid,
+                                                 result.obj_vertex_mask,
+                                                 result.z_outer_reconstructed,
+                                                 result.z_inner_reconstructed,
+                                                 result.outer_obj_path);
+                result.outer_obj_vertex_count = combined.outer_vertex_count;
+                result.outer_obj_face_count = combined.outer_face_count;
+                result.inner_obj_vertex_count = combined.inner_vertex_count;
+                result.inner_obj_face_count = combined.inner_face_count;
+            }
+        }
     }
 
     result.messages.push_back("Geometry Stage 6 smoothing weight: " + std::to_string(config.stage6_smoothing_weight));
@@ -1955,10 +2233,14 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
         result.messages.push_back("Geometry Stage 6 summary CSV: " + result.summary_csv_path);
     }
     if (config.stage6_export_obj_meshes) {
-        result.messages.push_back("Geometry Stage 6 outer OBJ: " + result.outer_obj_path +
+        const std::string mesh_label =
+            config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl ? "STL" : "OBJ";
+        const std::string export_mode = config.stage6_split_in_out_meshes ? "split" : "combined";
+        result.messages.push_back("Geometry Stage 6 " + mesh_label + " export mode: " + export_mode);
+        result.messages.push_back("Geometry Stage 6 outer " + mesh_label + ": " + result.outer_obj_path +
                                   " (v=" + std::to_string(result.outer_obj_vertex_count) +
                                   ", f=" + std::to_string(result.outer_obj_face_count) + ")");
-        result.messages.push_back("Geometry Stage 6 inner OBJ: " + result.inner_obj_path +
+        result.messages.push_back("Geometry Stage 6 inner " + mesh_label + ": " + result.inner_obj_path +
                                   " (v=" + std::to_string(result.inner_obj_vertex_count) +
                                   ", f=" + std::to_string(result.inner_obj_face_count) + ")");
     }

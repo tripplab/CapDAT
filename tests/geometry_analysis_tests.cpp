@@ -1109,6 +1109,11 @@ void testStage6RequiresSuccessfulStage5() {
     assertTrue(threw, "Stage 6 should require successful Stage 5");
 }
 
+void testStage6MinSeparationDefaultIsZero() {
+    FoldPatchAnalysisConfig config;
+    assertTrue(near(config.stage6_min_separation, 0.0), "Stage 6 min separation should default to 0.0");
+}
+
 void testStage6SeedPreservationAndInterpolation() {
     const GeometryStage5SurfacePrepResult stage5 = makeSyntheticStage5ResultForStage6();
     FoldPatchAnalysisConfig config;
@@ -1191,6 +1196,7 @@ void testStage6DebugCsvArtifactsAndObjExportAndDeterminism() {
     config.debug = true;
     config.output_prefix = "stage6_debug";
     config.stage6_export_obj_meshes = true;
+    config.stage6_split_in_out_meshes = true;
     const auto first = runGeometryAnalysisStage6SurfaceReconstruction(stage5, config, nullptr);
     assertTrue(std::filesystem::exists(first.outer_reconstructed_csv_path), "outer reconstructed csv should exist");
     assertTrue(std::filesystem::exists(first.inner_reconstructed_csv_path), "inner reconstructed csv should exist");
@@ -1268,6 +1274,56 @@ void testStage6DebugCsvArtifactsAndObjExportAndDeterminism() {
     std::filesystem::remove(hole_result.summary_csv_path);
     std::filesystem::remove(hole_result.outer_obj_path);
     std::filesystem::remove(hole_result.inner_obj_path);
+}
+
+void testStage6StlExport() {
+    GeometryStage5SurfacePrepResult stage5 = makeSyntheticStage5ResultForStage6();
+    const std::size_t promoted_seed = nodeIndex(1, 1, stage5.grid.nx);
+    stage5.paired_interp_allowed_mask[promoted_seed] = 0;
+    stage5.paired_seed_mask[promoted_seed] = 1;
+    stage5.z_outer_seed[promoted_seed] = 9.0;
+    stage5.z_inner_seed[promoted_seed] = 5.0;
+    stage5.paired_interp_allowed_node_count = 0;
+    ++stage5.paired_seed_node_count;
+
+    FoldPatchAnalysisConfig config;
+    config.output_prefix = "stage6_stl";
+    config.stage6_export_obj_meshes = true;
+    config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::stl;
+    config.stage6_split_in_out_meshes = true;
+
+    const auto stage6 = runGeometryAnalysisStage6SurfaceReconstruction(stage5, config, nullptr);
+    assertTrue(std::filesystem::exists(stage6.outer_obj_path), "outer stl should exist");
+    assertTrue(std::filesystem::exists(stage6.inner_obj_path), "inner stl should exist");
+    assertTrue(stage6.outer_obj_path.find(".stl") != std::string::npos, "outer mesh path should use stl extension");
+
+    std::ifstream stl_file(stage6.outer_obj_path);
+    std::string first_line;
+    std::getline(stl_file, first_line);
+    assertTrue(first_line.rfind("solid ", 0) == 0, "STL should begin with a solid header");
+
+    std::filesystem::remove(stage6.outer_obj_path);
+    std::filesystem::remove(stage6.inner_obj_path);
+}
+
+void testStage6CombinedExportDefault() {
+    GeometryStage5SurfacePrepResult stage5 = makeSyntheticStage5ResultForStage6();
+    FoldPatchAnalysisConfig config;
+    config.output_prefix = "stage6_combined";
+    config.stage6_export_obj_meshes = true;
+
+    const auto stage6 = runGeometryAnalysisStage6SurfaceReconstruction(stage5, config, nullptr);
+    assertTrue(stage6.outer_obj_path == stage6.inner_obj_path, "combined export should use one shared mesh path");
+    assertTrue(stage6.outer_obj_path.find("_stage6") == std::string::npos,
+               "combined export path should not include _stage6 token");
+    assertTrue(std::filesystem::exists(stage6.outer_obj_path), "combined mesh should exist");
+
+    std::ifstream mesh_file(stage6.outer_obj_path);
+    std::string mesh_text((std::istreambuf_iterator<char>(mesh_file)), std::istreambuf_iterator<char>());
+    assertTrue(mesh_text.find("o outer_surface") != std::string::npos, "combined OBJ should contain outer object");
+    assertTrue(mesh_text.find("o inner_surface") != std::string::npos, "combined OBJ should contain inner object");
+
+    std::filesystem::remove(stage6.outer_obj_path);
 }
 
 void testStage1ToStage6Integration() {
@@ -1354,10 +1410,13 @@ int main() {
         testStage5DebugCsvExportAndDeterminism();
         testStage1ToStage5Integration();
         testStage6RequiresSuccessfulStage5();
+        testStage6MinSeparationDefaultIsZero();
         testStage6SeedPreservationAndInterpolation();
         testStage6HardInvalidAndMasks();
         testStage6NonCrossingEnforcementAndConvergenceMetadata();
         testStage6DebugCsvArtifactsAndObjExportAndDeterminism();
+        testStage6StlExport();
+        testStage6CombinedExportDefault();
         testStage1ToStage6Integration();
         std::cout << "All geometry analysis Stage 1/2/3/4/5/6 tests passed.\n";
         return 0;
