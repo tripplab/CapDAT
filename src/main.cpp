@@ -58,14 +58,14 @@ void printHelp(const std::string& program_name) {
       --surf_min_separation <A>              Stage 6 minimum outer-inner separation in angstroms (default: 0.0)
 
   [Geometry smoothing]
-      --geometry_smooth_enabled              Enable Stage 7 smoothing / regularization
+      --geometry_smooth_enabled <true|false> Enable Stage 7 smoothing / regularization (default: true)
       --geometry_smooth_weight <x>           Stage 7 smoothing weight (default: 1.0)
       --geometry_smooth_max_iterations <n>   Stage 7 max iterations (default: 250)
       --geometry_smooth_convergence_tolerance <x>  Stage 7 convergence tolerance (default: 1e-6)
       --geometry_smooth_pin_seed <true|false> Pin Stage 5 seed values during Stage 7 smoothing (default: false)
       --geometry_smooth_enforce_non_crossing <true|false>  Enforce Stage 7 non-crossing constraint (default: true)
       --geometry_smooth_min_separation <A>   Stage 7 minimum outer-inner separation in angstroms (default: 1.0)
-      --geometry_smooth_export_meshes        Export Stage 7 smoothed meshes
+      --geometry_smooth_export_meshes <true|false> Export Stage 7 smoothed meshes (default: true)
 
   -h, --help                                 Show this help message
       --version                              Show version information
@@ -129,6 +129,7 @@ int main(int argc, char* argv[]) {
     FoldPatchAnalysisConfig::MeshExportFormat mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::obj;
     bool split_in_out_mesh = false;
     double surface_min_separation = 0.0;
+    // Stage 7 smoothing/regularization runs by default for geometry-analysis workflows.
     bool geometry_smooth_enabled = true;
     double geometry_smooth_weight = 1.0;
     std::size_t geometry_smooth_max_iterations = 250;
@@ -136,6 +137,7 @@ int main(int argc, char* argv[]) {
     bool geometry_smooth_pin_seed = false;
     bool geometry_smooth_enforce_non_crossing = true;
     double geometry_smooth_min_separation = 1.0;
+    // Stage 7 mesh export runs by default when Stage 7 smoothing is enabled.
     bool geometry_smooth_export_meshes = true;
 
     const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
@@ -362,7 +364,16 @@ int main(int argc, char* argv[]) {
         }
 
         if (arg == "--geometry_smooth_enabled") {
-            geometry_smooth_enabled = true;
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_smooth_enabled\n";
+                return 1;
+            }
+            try {
+                geometry_smooth_enabled = parseBoolSwitch(argv[++i], "--geometry_smooth_enabled");
+            } catch (const std::runtime_error& ex) {
+                std::cerr << ex.what() << '\n';
+                return 1;
+            }
             continue;
         }
         if (arg == "--geometry_smooth_weight") {
@@ -425,7 +436,16 @@ int main(int argc, char* argv[]) {
             continue;
         }
         if (arg == "--geometry_smooth_export_meshes") {
-            geometry_smooth_export_meshes = true;
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_smooth_export_meshes\n";
+                return 1;
+            }
+            try {
+                geometry_smooth_export_meshes = parseBoolSwitch(argv[++i], "--geometry_smooth_export_meshes");
+            } catch (const std::runtime_error& ex) {
+                std::cerr << ex.what() << '\n';
+                return 1;
+            }
             continue;
         }
 

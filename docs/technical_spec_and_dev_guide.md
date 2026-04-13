@@ -161,8 +161,8 @@ The CLI currently supports the following user-facing options:
 - `--align-axis <x|y|z>`  
   Target alignment axis. Defaults to `z` if omitted.
 
-- `--geometry_smooth_enabled`
-  Enable Stage 7 smoothing / regularization.
+- `--geometry_smooth_enabled <true|false>`
+  Enable/disable Stage 7 smoothing / regularization. Defaults to `true`.
 
 - `--geometry_smooth_weight <x>`
   Stage 7 smoothing weight.
@@ -182,8 +182,8 @@ The CLI currently supports the following user-facing options:
 - `--geometry_smooth_min_separation <A>`
   Stage 7 minimum outer-inner separation in angstroms.
 
-- `--geometry_smooth_export_meshes`
-  Export Stage 7 smoothed meshes.
+- `--geometry_smooth_export_meshes <true|false>`
+  Enable/disable Stage 7 smoothed mesh export. Defaults to `true`.
 
 - `-h, --help`
 - `--version`
