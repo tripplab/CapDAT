@@ -45,6 +45,9 @@ void printHelp(const std::string& program_name) {
         << "      --geometry_min_support_nodes <n>  Stage 5 minimum nearby support seeds (default: 4)\n"
         << "      --geometry_reliable_radius <A>  Stage 5 reliable core radius (default: auto)\n"
         << "      --geometry_out_prefix <path>  Prefix for geometry analysis outputs (default: geometry)\n"
+        << "      --export_mesh_format <name>   Stage 6 mesh export format: obj|stl (default: obj)\n"
+        << "      --split_in_out_mesh   Export Stage 6 inner and outer meshes as separate files\n"
+        << "      --surf_min_separation <A>  Stage 6 minimum outer-inner separation in angstroms (default: 0.0)\n"
         << "      --quiet             Reduce terminal output\n"
         << "  -h, --help              Show this help message\n"
         << "      --version           Show version information\n\n"
@@ -108,6 +111,9 @@ int main(int argc, char* argv[]) {
     std::size_t geometry_min_support_nodes = 4;
     double geometry_reliable_radius = 0.0;
     std::string geometry_output_prefix = "geometry";
+    FoldPatchAnalysisConfig::MeshExportFormat mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::obj;
+    bool split_in_out_mesh = false;
+    double surface_min_separation = 0.0;
 
     const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
 
@@ -293,6 +299,35 @@ int main(int argc, char* argv[]) {
             geometry_output_prefix = argv[++i];
             continue;
         }
+        if (arg == "--export_mesh_format") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --export_mesh_format\n";
+                return 1;
+            }
+            const std::string format_arg = argv[++i];
+            if (format_arg == "obj" || format_arg == "OBJ") {
+                mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::obj;
+                continue;
+            }
+            if (format_arg == "stl" || format_arg == "STL") {
+                mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::stl;
+                continue;
+            }
+            std::cerr << "Error: --export_mesh_format must be one of obj, stl\n";
+            return 1;
+        }
+        if (arg == "--split_in_out_mesh") {
+            split_in_out_mesh = true;
+            continue;
+        }
+        if (arg == "--surf_min_separation") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --surf_min_separation\n";
+                return 1;
+            }
+            surface_min_separation = std::stod(argv[++i]);
+            continue;
+        }
 
         std::cerr << "Error: unknown argument: " << arg << '\n';
         return 1;
@@ -390,6 +425,9 @@ int main(int argc, char* argv[]) {
         geometry_config.stage5_reliable_radius = geometry_reliable_radius;
         geometry_config.export_rotated_capsid = debug;
         geometry_config.output_prefix = geometry_output_prefix;
+        geometry_config.stage6_mesh_export_format = mesh_export_format;
+        geometry_config.stage6_split_in_out_meshes = split_in_out_mesh;
+        geometry_config.stage6_min_separation = surface_min_separation;
 
         const GeometryAnalysisResult geometry_result =
             runFoldPatchGeometryAnalysis(capsid, geometry_config, config, &logger);

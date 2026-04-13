@@ -54,6 +54,9 @@ struct FoldPatchAnalysisConfig {
     bool stage6_enforce_non_crossing = true;
     double stage6_min_separation = 0.0;
     bool stage6_export_obj_meshes = true;
+    enum class MeshExportFormat : uint8_t { obj = 0, stl = 1 };
+    MeshExportFormat stage6_mesh_export_format = MeshExportFormat::obj;
+    bool stage6_split_in_out_meshes = false;
     bool export_rotated_capsid = false;
     std::string output_prefix = "geometry";
 };
