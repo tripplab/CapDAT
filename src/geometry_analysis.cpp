@@ -504,7 +504,8 @@ bool writeStage6SummaryCsv(const GeometryStage6SurfaceReconstructionResult& resu
            "outer_iterations_used,inner_iterations_used,outer_final_max_update,inner_final_max_update,"
            "non_crossing_adjusted_nodes,min_reconstructed_separation,max_reconstructed_separation,"
            "mean_reconstructed_separation,outer_obj_vertex_count,outer_obj_face_count,inner_obj_vertex_count,"
-           "inner_obj_face_count\n";
+           "inner_obj_face_count,outer_reconstructed_scalar_node_count,outer_reconstructed_nodes_not_used_by_any_face,"
+           "inner_reconstructed_scalar_node_count,inner_reconstructed_nodes_not_used_by_any_face\n";
     out << result.node_count << ',' << result.seed_node_count << ',' << result.interp_node_count << ','
         << result.reconstructed_node_count << ',' << result.final_valid_analysis_node_count << ','
         << result.unresolved_node_count << ',' << result.outer_iterations_used << ',' << result.inner_iterations_used
@@ -512,8 +513,53 @@ bool writeStage6SummaryCsv(const GeometryStage6SurfaceReconstructionResult& resu
         << result.non_crossing_adjusted_node_count << ',' << result.min_reconstructed_separation << ','
         << result.max_reconstructed_separation << ',' << result.mean_reconstructed_separation << ','
         << result.outer_obj_vertex_count << ',' << result.outer_obj_face_count << ',' << result.inner_obj_vertex_count
-        << ',' << result.inner_obj_face_count << '\n';
+        << ',' << result.inner_obj_face_count << ',' << result.outer_reconstructed_scalar_node_count << ','
+        << result.outer_reconstructed_nodes_not_used_by_any_face << ','
+        << result.inner_reconstructed_scalar_node_count << ','
+        << result.inner_reconstructed_nodes_not_used_by_any_face << '\n';
     return out.good();
+}
+
+std::size_t countStage6ReconstructedScalarNodes(const Stage4GridDescriptor& grid,
+                                                const std::vector<uint8_t>& obj_vertex_mask,
+                                                const std::vector<double>& values) {
+    std::size_t count = 0;
+    for (std::size_t idx = 0; idx < (grid.nx * grid.ny); ++idx) {
+        if (obj_vertex_mask[idx] != 0 && std::isfinite(values[idx])) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::size_t countStage6ReconstructedNodesUsedByFaces(const Stage4GridDescriptor& grid,
+                                                     const std::vector<uint8_t>& obj_vertex_mask,
+                                                     const std::vector<double>& values) {
+    std::vector<uint8_t> used(grid.nx * grid.ny, 0);
+    for (std::size_t j = 0; (j + 1) < grid.ny; ++j) {
+        for (std::size_t i = 0; (i + 1) < grid.nx; ++i) {
+            const std::size_t idx00 = stage4NodeIndex(i, j, grid.nx);
+            const std::size_t idx10 = stage4NodeIndex(i + 1, j, grid.nx);
+            const std::size_t idx01 = stage4NodeIndex(i, j + 1, grid.nx);
+            const std::size_t idx11 = stage4NodeIndex(i + 1, j + 1, grid.nx);
+            if (obj_vertex_mask[idx00] == 0 || obj_vertex_mask[idx10] == 0 || obj_vertex_mask[idx01] == 0 ||
+                obj_vertex_mask[idx11] == 0 || !std::isfinite(values[idx00]) || !std::isfinite(values[idx10]) ||
+                !std::isfinite(values[idx01]) || !std::isfinite(values[idx11])) {
+                continue;
+            }
+            used[idx00] = 1;
+            used[idx10] = 1;
+            used[idx01] = 1;
+            used[idx11] = 1;
+        }
+    }
+    std::size_t count = 0;
+    for (const uint8_t flag : used) {
+        if (flag != 0) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 struct Stage6ObjExportResult {
@@ -2197,6 +2243,24 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
                 result.inner_obj_face_count = combined.inner_face_count;
             }
         }
+
+        result.outer_reconstructed_scalar_node_count =
+            countStage6ReconstructedScalarNodes(result.grid, result.obj_vertex_mask, result.z_outer_reconstructed);
+        result.inner_reconstructed_scalar_node_count =
+            countStage6ReconstructedScalarNodes(result.grid, result.obj_vertex_mask, result.z_inner_reconstructed);
+
+        const std::size_t outer_used_by_faces =
+            countStage6ReconstructedNodesUsedByFaces(result.grid, result.obj_vertex_mask, result.z_outer_reconstructed);
+        const std::size_t inner_used_by_faces =
+            countStage6ReconstructedNodesUsedByFaces(result.grid, result.obj_vertex_mask, result.z_inner_reconstructed);
+        result.outer_reconstructed_nodes_not_used_by_any_face =
+            result.outer_reconstructed_scalar_node_count > outer_used_by_faces
+                ? result.outer_reconstructed_scalar_node_count - outer_used_by_faces
+                : 0;
+        result.inner_reconstructed_nodes_not_used_by_any_face =
+            result.inner_reconstructed_scalar_node_count > inner_used_by_faces
+                ? result.inner_reconstructed_scalar_node_count - inner_used_by_faces
+                : 0;
     }
 
     result.messages.push_back("Geometry Stage 6 smoothing weight: " + std::to_string(config.stage6_smoothing_weight));
@@ -2238,11 +2302,19 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
         const std::string export_mode = config.stage6_split_in_out_meshes ? "split" : "combined";
         result.messages.push_back("Geometry Stage 6 " + mesh_label + " export mode: " + export_mode);
         result.messages.push_back("Geometry Stage 6 outer " + mesh_label + ": " + result.outer_obj_path +
-                                  " (v=" + std::to_string(result.outer_obj_vertex_count) +
-                                  ", f=" + std::to_string(result.outer_obj_face_count) + ")");
+                                  " (reconstructed scalar nodes=" +
+                                  std::to_string(result.outer_reconstructed_scalar_node_count) +
+                                  ", mesh vertices emitted=" + std::to_string(result.outer_obj_vertex_count) +
+                                  ", mesh faces emitted=" + std::to_string(result.outer_obj_face_count) +
+                                  ", reconstructed nodes not used by any face=" +
+                                  std::to_string(result.outer_reconstructed_nodes_not_used_by_any_face) + ")");
         result.messages.push_back("Geometry Stage 6 inner " + mesh_label + ": " + result.inner_obj_path +
-                                  " (v=" + std::to_string(result.inner_obj_vertex_count) +
-                                  ", f=" + std::to_string(result.inner_obj_face_count) + ")");
+                                  " (reconstructed scalar nodes=" +
+                                  std::to_string(result.inner_reconstructed_scalar_node_count) +
+                                  ", mesh vertices emitted=" + std::to_string(result.inner_obj_vertex_count) +
+                                  ", mesh faces emitted=" + std::to_string(result.inner_obj_face_count) +
+                                  ", reconstructed nodes not used by any face=" +
+                                  std::to_string(result.inner_reconstructed_nodes_not_used_by_any_face) + ")");
     }
     result.messages.push_back("Geometry analysis: completed Stage 6 smooth surface reconstruction.");
 
