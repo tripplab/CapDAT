@@ -1096,6 +1096,29 @@ GeometryStage5SurfacePrepResult makeSyntheticStage5ResultForStage6() {
     return stage5;
 }
 
+struct SyntheticStage7Inputs {
+    GeometryStage5SurfacePrepResult stage5;
+    GeometryStage6SurfaceReconstructionResult stage6;
+};
+
+SyntheticStage7Inputs makeSyntheticStage7Inputs() {
+    SyntheticStage7Inputs inputs;
+    inputs.stage5 = makeSyntheticStage5ResultForStage6();
+    inputs.stage5.reliable_core_mask.assign(inputs.stage5.node_count, 0);
+    inputs.stage5.reliable_core_node_count = 0;
+    for (std::size_t idx = 0; idx < inputs.stage5.node_count; ++idx) {
+        if (inputs.stage5.inside_disk_mask[idx] != 0) {
+            inputs.stage5.reliable_core_mask[idx] = 1;
+            ++inputs.stage5.reliable_core_node_count;
+        }
+    }
+
+    FoldPatchAnalysisConfig stage6_config;
+    stage6_config.stage6_export_obj_meshes = false;
+    inputs.stage6 = runGeometryAnalysisStage6SurfaceReconstruction(inputs.stage5, stage6_config, nullptr);
+    return inputs;
+}
+
 void testStage6RequiresSuccessfulStage5() {
     GeometryStage5SurfacePrepResult stage5;
     stage5.success = false;
@@ -1326,6 +1349,126 @@ void testStage6CombinedExportDefault() {
     std::filesystem::remove(stage6.outer_obj_path);
 }
 
+void testStage7RequiresSuccessfulStage6() {
+    GeometryStage6SurfaceReconstructionResult stage6;
+    stage6.success = false;
+    GeometryStage5SurfacePrepResult stage5 = makeSyntheticStage5ResultForStage6();
+    stage5.reliable_core_mask.assign(stage5.node_count, 1);
+    stage5.reliable_core_node_count = stage5.node_count;
+    FoldPatchAnalysisConfig config;
+    bool threw = false;
+    try {
+        (void)runGeometryAnalysisStage7SurfaceSmoothing(stage6, stage5, config, nullptr);
+    } catch (const std::runtime_error& e) {
+        threw = std::string(e.what()).find("before successful Stage 6") != std::string::npos;
+    }
+    assertTrue(threw, "Stage 7 should require successful Stage 6");
+}
+
+void testStage7SeedPreservationAndRoughnessReduction() {
+    SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
+    FoldPatchAnalysisConfig config;
+    config.stage7_export_meshes = false;
+    config.stage7_smoothing_weight = 2.0;
+    config.stage7_max_iterations = 100;
+
+    const std::size_t seed_idx = nodeIndex(2, 2, inputs.stage5.grid.nx);
+    const std::size_t noisy_idx = nodeIndex(1, 1, inputs.stage5.grid.nx);
+    inputs.stage6.z_outer_reconstructed[noisy_idx] += 8.0;
+    inputs.stage6.z_inner_reconstructed[noisy_idx] += 8.0;
+    inputs.stage6.reconstructed_mask[noisy_idx] = 1;
+
+    const double before_seed = inputs.stage6.z_outer_reconstructed[seed_idx];
+    const double before_rough = std::fabs(inputs.stage6.z_outer_reconstructed[noisy_idx] - before_seed);
+    const auto stage7 =
+        runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    assertTrue(stage7.z_outer_smooth[seed_idx] == before_seed, "Stage 7 should preserve seed-supported outer values");
+    const double after_rough = std::fabs(stage7.z_outer_smooth[noisy_idx] - stage7.z_outer_smooth[seed_idx]);
+    assertTrue(after_rough < before_rough, "Stage 7 smoothing should reduce local roughness on non-seed nodes");
+}
+
+void testStage7ReliableCoreDefinesMetricDomain() {
+    SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
+    inputs.stage5.reliable_core_mask.assign(inputs.stage5.node_count, 0);
+    inputs.stage5.reliable_core_node_count = 0;
+    const std::size_t core_idx = nodeIndex(2, 2, inputs.stage5.grid.nx);
+    const std::size_t core_idx2 = nodeIndex(2, 1, inputs.stage5.grid.nx);
+    inputs.stage5.reliable_core_mask[core_idx] = 1;
+    inputs.stage5.reliable_core_mask[core_idx2] = 1;
+    inputs.stage5.reliable_core_node_count = 2;
+
+    FoldPatchAnalysisConfig config;
+    config.stage7_export_meshes = false;
+    const auto stage7 = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    for (std::size_t idx = 0; idx < stage7.node_count; ++idx) {
+        const uint8_t expected =
+            (stage7.smooth_valid_mask[idx] != 0 && stage7.reliable_core_mask[idx] != 0) ? static_cast<uint8_t>(1) : 0;
+        assertTrue(stage7.metric_domain_mask[idx] == expected, "metric domain must equal smooth_valid AND reliable_core");
+    }
+}
+
+void testStage7NonCrossingAndMetadata() {
+    SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
+    const std::size_t idx = nodeIndex(2, 2, inputs.stage5.grid.nx);
+    inputs.stage6.z_outer_reconstructed[idx] = 2.0;
+    inputs.stage6.z_inner_reconstructed[idx] = 4.5;
+
+    FoldPatchAnalysisConfig config;
+    config.stage7_export_meshes = false;
+    config.stage7_enforce_non_crossing = true;
+    config.stage7_min_separation = 1.25;
+    const auto stage7 = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+
+    assertTrue(stage7.smooth_non_crossing_adjustment_mask[idx] == 1, "Stage 7 should mark adjusted non-crossing nodes");
+    assertTrue(stage7.z_outer_smooth[idx] >= stage7.z_inner_smooth[idx] + config.stage7_min_separation - 1e-12,
+               "Stage 7 should enforce minimum smooth separation");
+    assertTrue(stage7.normal_orientation_outer == "toward_positive_z", "outer normal convention metadata should be explicit");
+    assertTrue(stage7.normal_orientation_inner == "toward_negative_z", "inner normal convention metadata should be explicit");
+    assertTrue(stage7.local_thickness_definition == "vertical_z_difference",
+               "local thickness definition metadata should be vertical Z separation");
+    assertTrue(stage7.metric_surface_definition ==
+                   "stage6_reconstructed_then_stage7_smoothed_restricted_to_reliable_core",
+               "metric-surface definition metadata should match Stage 7 contract");
+}
+
+void testStage7MeshExportAndDeterminism() {
+    SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
+    FoldPatchAnalysisConfig config;
+    config.debug = true;
+    config.output_prefix = "stage7_debug";
+    config.stage7_export_meshes = true;
+    config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::obj;
+    config.stage6_split_in_out_meshes = true;
+
+    const auto first = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    assertTrue(std::filesystem::exists(first.outer_mesh_path), "Stage 7 outer mesh export should exist");
+    assertTrue(std::filesystem::exists(first.inner_mesh_path), "Stage 7 inner mesh export should exist");
+    assertTrue(std::filesystem::exists(first.summary_csv_path), "Stage 7 summary CSV should exist");
+    assertTrue(first.outer_mesh_vertex_count > 0, "Stage 7 outer mesh should include vertices");
+
+    const auto second = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    std::ifstream csv1(first.outer_smooth_csv_path);
+    std::ifstream csv2(second.outer_smooth_csv_path);
+    const std::string csv_first((std::istreambuf_iterator<char>(csv1)), std::istreambuf_iterator<char>());
+    const std::string csv_second((std::istreambuf_iterator<char>(csv2)), std::istreambuf_iterator<char>());
+    assertTrue(csv_first == csv_second, "Stage 7 CSV output should be deterministic");
+
+    std::ifstream mesh1(first.outer_mesh_path);
+    std::ifstream mesh2(second.outer_mesh_path);
+    const std::string mesh_first((std::istreambuf_iterator<char>(mesh1)), std::istreambuf_iterator<char>());
+    const std::string mesh_second((std::istreambuf_iterator<char>(mesh2)), std::istreambuf_iterator<char>());
+    assertTrue(mesh_first == mesh_second, "Stage 7 mesh output should be deterministic");
+
+    removeIfExists(first.outer_smooth_csv_path);
+    removeIfExists(first.inner_smooth_csv_path);
+    removeIfExists(first.smooth_valid_mask_csv_path);
+    removeIfExists(first.metric_domain_mask_csv_path);
+    removeIfExists(first.smooth_non_crossing_adjustment_mask_csv_path);
+    removeIfExists(first.summary_csv_path);
+    removeIfExists(first.outer_mesh_path);
+    removeIfExists(first.inner_mesh_path);
+}
+
 void testStage1ToStage6Integration() {
     Capsid capsid = makeSimpleCapsid();
     FoldPatchAnalysisConfig config;
@@ -1377,6 +1520,62 @@ void testStage1ToStage6Integration() {
     std::filesystem::remove(result.stage6_surfaces.inner_obj_path);
 }
 
+void testStage1ToStage7Integration() {
+    Capsid capsid = makeSimpleCapsid();
+    FoldPatchAnalysisConfig config;
+    config.enabled = true;
+    config.fold_type = 2;
+    config.fold_index = 0;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    config.min_atoms_in_patch = 2;
+    config.debug = true;
+    config.stage6_export_obj_meshes = false;
+    config.stage7_export_meshes = true;
+    config.output_prefix = "stage7_integration";
+
+    const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
+    assertTrue(result.success, "Stage 1-7 integration should succeed");
+    assertTrue(result.stage7_smooth.success, "Stage 7 should succeed in full pipeline");
+    assertTrue(result.stage7_smooth.metric_domain_node_count > 0, "Stage 7 should produce non-empty metric domain");
+    assertTrue(std::isfinite(result.stage7_smooth.mean_smooth_separation), "Stage 7 mean smooth separation should be finite");
+    assertTrue(std::filesystem::exists(result.stage7_smooth.summary_csv_path), "Stage 7 summary csv should exist");
+    assertTrue(std::filesystem::exists(result.stage7_smooth.outer_mesh_path), "Stage 7 outer mesh should exist");
+
+    removeIfExists(result.stage2_patch.export_path);
+    removeIfExists(result.stage4_raw.outer_csv_path);
+    removeIfExists(result.stage4_raw.inner_csv_path);
+    removeIfExists(result.stage4_raw.valid_mask_csv_path);
+    removeIfExists(result.stage4_raw.outer_only_mask_csv_path);
+    removeIfExists(result.stage4_raw.inner_only_mask_csv_path);
+    removeIfExists(result.stage4_raw.negative_thickness_mask_csv_path);
+    removeIfExists(result.stage4_raw.summary_csv_path);
+    removeIfExists(result.stage4_raw.contact_atoms_pdb_path);
+    removeIfExists(result.stage4_raw.stage3_normalized_atoms_csv_path);
+    removeIfExists(result.stage5_prep.outer_seed_csv_path);
+    removeIfExists(result.stage5_prep.inner_seed_csv_path);
+    removeIfExists(result.stage5_prep.paired_seed_mask_csv_path);
+    removeIfExists(result.stage5_prep.boundary_exclusion_mask_csv_path);
+    removeIfExists(result.stage5_prep.interp_allowed_mask_csv_path);
+    removeIfExists(result.stage5_prep.hard_invalid_mask_csv_path);
+    removeIfExists(result.stage5_prep.reliable_core_mask_csv_path);
+    removeIfExists(result.stage5_prep.summary_csv_path);
+    removeIfExists(result.stage6_surfaces.outer_reconstructed_csv_path);
+    removeIfExists(result.stage6_surfaces.inner_reconstructed_csv_path);
+    removeIfExists(result.stage6_surfaces.reconstructed_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.final_valid_analysis_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.non_crossing_adjustment_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.summary_csv_path);
+    removeIfExists(result.stage7_smooth.outer_smooth_csv_path);
+    removeIfExists(result.stage7_smooth.inner_smooth_csv_path);
+    removeIfExists(result.stage7_smooth.smooth_valid_mask_csv_path);
+    removeIfExists(result.stage7_smooth.metric_domain_mask_csv_path);
+    removeIfExists(result.stage7_smooth.smooth_non_crossing_adjustment_mask_csv_path);
+    removeIfExists(result.stage7_smooth.summary_csv_path);
+    removeIfExists(result.stage7_smooth.outer_mesh_path);
+    removeIfExists(result.stage7_smooth.inner_mesh_path);
+}
+
 } // namespace
 
 int main() {
@@ -1418,7 +1617,13 @@ int main() {
         testStage6StlExport();
         testStage6CombinedExportDefault();
         testStage1ToStage6Integration();
-        std::cout << "All geometry analysis Stage 1/2/3/4/5/6 tests passed.\n";
+        testStage7RequiresSuccessfulStage6();
+        testStage7SeedPreservationAndRoughnessReduction();
+        testStage7ReliableCoreDefinesMetricDomain();
+        testStage7NonCrossingAndMetadata();
+        testStage7MeshExportAndDeterminism();
+        testStage1ToStage7Integration();
+        std::cout << "All geometry analysis Stage 1/2/3/4/5/6/7 tests passed.\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Geometry analysis test failure: " << e.what() << '\n';
