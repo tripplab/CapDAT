@@ -75,6 +75,16 @@ struct FoldPatchAnalysisConfig {
     bool stage7_enforce_non_crossing = true;
     double stage7_min_separation = 1.0;
     bool stage7_export_meshes = true;
+    bool stage8_enabled = true;
+    double stage8_fit_radius = 0.0;
+    std::size_t stage8_min_points = 9;
+    std::size_t stage8_max_points = 0;
+    double stage8_max_rms_residual = 0.25;
+    double stage8_max_abs_residual = 0.75;
+    double stage8_max_condition_indicator = 1e8;
+    bool stage8_require_centered_support = true;
+    double stage8_min_directional_span = 0.0;
+    bool stage8_export_csv = true;
     MeshExportFormat stage6_mesh_export_format = MeshExportFormat::stl;
     bool stage6_split_in_out_meshes = false;
     bool export_rotated_capsid = false;
@@ -427,6 +437,64 @@ struct GeometryStage7SmoothedSurfaceResult {
     std::vector<std::string> messages;
 };
 
+struct GeometryStage8DerivativeEstimationResult {
+    bool success = false;
+    Stage4GridDescriptor grid;
+
+    std::vector<uint8_t> reconstructed_mask;
+    std::vector<uint8_t> reliable_core_mask;
+    std::vector<uint8_t> metric_domain_mask;
+
+    std::vector<uint8_t> derivative_fit_attempted_mask;
+    std::vector<uint8_t> derivative_valid_mask;
+    std::vector<uint8_t> derivative_invalid_insufficient_points_mask;
+    std::vector<uint8_t> derivative_invalid_rank_deficient_mask;
+    std::vector<uint8_t> derivative_invalid_poor_conditioning_mask;
+    std::vector<uint8_t> derivative_invalid_high_residual_mask;
+    std::vector<uint8_t> derivative_invalid_boundary_neighbor_geometry_mask;
+
+    std::vector<double> outer_dz_dx;
+    std::vector<double> outer_dz_dy;
+    std::vector<double> outer_d2z_dx2;
+    std::vector<double> outer_d2z_dy2;
+    std::vector<double> outer_d2z_dxdy;
+
+    std::vector<double> inner_dz_dx;
+    std::vector<double> inner_dz_dy;
+    std::vector<double> inner_d2z_dx2;
+    std::vector<double> inner_d2z_dy2;
+    std::vector<double> inner_d2z_dxdy;
+
+    std::vector<double> outer_fit_rms_residual;
+    std::vector<double> inner_fit_rms_residual;
+    std::vector<double> outer_fit_max_abs_residual;
+    std::vector<double> inner_fit_max_abs_residual;
+    std::vector<double> outer_fit_condition_indicator;
+    std::vector<double> inner_fit_condition_indicator;
+
+    std::vector<int> derivative_neighbor_count;
+    std::vector<double> derivative_neighbor_max_radius;
+
+    std::size_t node_count = 0;
+    std::size_t metric_domain_node_count = 0;
+    std::size_t derivative_fit_attempted_node_count = 0;
+    std::size_t derivative_valid_node_count = 0;
+    std::size_t derivative_invalid_node_count = 0;
+    std::size_t derivative_invalid_insufficient_points_count = 0;
+    std::size_t derivative_invalid_rank_deficient_count = 0;
+    std::size_t derivative_invalid_poor_conditioning_count = 0;
+    std::size_t derivative_invalid_high_residual_count = 0;
+    std::size_t derivative_invalid_boundary_neighbor_geometry_count = 0;
+
+    std::string outer_derivatives_csv_path;
+    std::string inner_derivatives_csv_path;
+    std::string derivative_valid_mask_csv_path;
+    std::string derivative_failure_reason_csv_path;
+    std::string derivative_summary_csv_path;
+
+    std::vector<std::string> messages;
+};
+
 struct GeometryAnalysisResult {
     bool success = false;
     GeometryPreparationResult preparation;
@@ -436,6 +504,7 @@ struct GeometryAnalysisResult {
     GeometryStage5SurfacePrepResult stage5_prep;
     GeometryStage6SurfaceReconstructionResult stage6_surfaces;
     GeometryStage7SmoothedSurfaceResult stage7_smooth;
+    GeometryStage8DerivativeEstimationResult stage8_derivatives;
     std::vector<std::string> messages;
 };
 
@@ -502,6 +571,13 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
 
 GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     const GeometryStage6SurfaceReconstructionResult& stage6_result,
+    const GeometryStage5SurfacePrepResult& stage5_result,
+    const FoldPatchAnalysisConfig& config,
+    Logger* logger,
+    double tolerance = 1e-12);
+
+GeometryStage8DerivativeEstimationResult runGeometryAnalysisStage8DerivativeEstimation(
+    const GeometryStage7SmoothedSurfaceResult& stage7_result,
     const GeometryStage5SurfacePrepResult& stage5_result,
     const FoldPatchAnalysisConfig& config,
     Logger* logger,

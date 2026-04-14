@@ -163,6 +163,19 @@ bool writeGeometryRunSummaryJson(const FoldPatchAnalysisConfig& config,
     out << "    \"min_separation\": " << config.stage7_min_separation << ",\n";
     out << "    \"export_meshes\": " << (config.stage7_export_meshes ? "true" : "false") << "\n";
     out << "  },\n";
+    out << "  \"stage8\": {\n";
+    out << "    \"enabled\": " << (config.stage8_enabled ? "true" : "false") << ",\n";
+    out << "    \"fit_radius\": " << config.stage8_fit_radius << ",\n";
+    out << "    \"min_points\": " << config.stage8_min_points << ",\n";
+    out << "    \"max_points\": " << config.stage8_max_points << ",\n";
+    out << "    \"max_rms_residual\": " << config.stage8_max_rms_residual << ",\n";
+    out << "    \"max_abs_residual\": " << config.stage8_max_abs_residual << ",\n";
+    out << "    \"max_condition_indicator\": " << config.stage8_max_condition_indicator << ",\n";
+    out << "    \"require_centered_support\": " << (config.stage8_require_centered_support ? "true" : "false")
+        << ",\n";
+    out << "    \"min_directional_span\": " << config.stage8_min_directional_span << ",\n";
+    out << "    \"export_csv\": " << (config.stage8_export_csv ? "true" : "false") << "\n";
+    out << "  },\n";
     out << "  \"parser\": {\n";
     out << "    \"include_hetatm\": " << (parser_config.include_hetatm ? "true" : "false") << ",\n";
     out << "    \"strict_mode\": " << (parser_config.strict_mode ? "true" : "false") << ",\n";
@@ -3449,6 +3462,568 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     return result;
 }
 
+namespace {
+
+enum class Stage8FailureReason : uint8_t {
+    none = 0,
+    insufficient_points = 1,
+    boundary_neighbor_geometry = 2,
+    rank_deficient = 3,
+    poor_conditioning = 4,
+    high_residual = 5
+};
+
+struct Stage8SupportNode {
+    std::size_t idx = 0;
+    double u = 0.0;
+    double v = 0.0;
+    double dist2 = 0.0;
+};
+
+struct Stage8QuadraticFitResult {
+    bool solved = false;
+    bool rank_deficient = false;
+    double condition_indicator = std::numeric_limits<double>::infinity();
+    double rms_residual = std::numeric_limits<double>::quiet_NaN();
+    double max_abs_residual = std::numeric_limits<double>::quiet_NaN();
+    // z(u,v) = a + b*u + c*v + d*u^2 + e*u*v + f*v^2
+    // Derivatives at center (u=v=0):
+    // dz/dx = b, dz/dy = c, d2z/dx2 = 2d, d2z/dy2 = 2f, d2z/dxdy = e.
+    double a = std::numeric_limits<double>::quiet_NaN();
+    double b = std::numeric_limits<double>::quiet_NaN();
+    double c = std::numeric_limits<double>::quiet_NaN();
+    double d = std::numeric_limits<double>::quiet_NaN();
+    double e = std::numeric_limits<double>::quiet_NaN();
+    double f = std::numeric_limits<double>::quiet_NaN();
+};
+
+double stage8DefaultFitRadius(const Stage4GridDescriptor& grid) { return 2.5 * grid.spacing; }
+double stage8DefaultMinDirectionalSpan(const Stage4GridDescriptor& grid) { return 1.5 * grid.spacing; }
+
+Stage8QuadraticFitResult fitLocalQuadraticLeastSquares(const std::vector<Stage8SupportNode>& support,
+                                                       const std::vector<double>& z_values,
+                                                       double tolerance) {
+    Stage8QuadraticFitResult result;
+    if (support.size() < 6) {
+        result.rank_deficient = true;
+        return result;
+    }
+
+    double ata[6][6] = {};
+    double atz[6] = {};
+    for (const Stage8SupportNode& node : support) {
+        const double row[6] = {1.0, node.u, node.v, node.u * node.u, node.u * node.v, node.v * node.v};
+        const double z = z_values[node.idx];
+        for (int r = 0; r < 6; ++r) {
+            atz[r] += row[r] * z;
+            for (int c = 0; c < 6; ++c) {
+                ata[r][c] += row[r] * row[c];
+            }
+        }
+    }
+
+    double scale = 0.0;
+    for (int r = 0; r < 6; ++r) {
+        for (int c = 0; c < 6; ++c) {
+            scale = std::max(scale, std::fabs(ata[r][c]));
+        }
+    }
+    if (scale <= tolerance) {
+        result.rank_deficient = true;
+        return result;
+    }
+
+    double aug[6][7] = {};
+    for (int r = 0; r < 6; ++r) {
+        for (int c = 0; c < 6; ++c) {
+            aug[r][c] = ata[r][c];
+        }
+        aug[r][6] = atz[r];
+    }
+
+    double min_pivot = std::numeric_limits<double>::infinity();
+    double max_pivot = 0.0;
+    for (int col = 0; col < 6; ++col) {
+        int pivot_row = col;
+        double pivot_abs = std::fabs(aug[col][col]);
+        for (int r = col + 1; r < 6; ++r) {
+            const double candidate = std::fabs(aug[r][col]);
+            if (candidate > pivot_abs) {
+                pivot_abs = candidate;
+                pivot_row = r;
+            }
+        }
+        const double pivot_tol = tolerance * std::max(1.0, scale);
+        if (pivot_abs <= pivot_tol) {
+            result.rank_deficient = true;
+            return result;
+        }
+        if (pivot_row != col) {
+            for (int c = col; c < 7; ++c) {
+                std::swap(aug[col][c], aug[pivot_row][c]);
+            }
+        }
+        min_pivot = std::min(min_pivot, pivot_abs);
+        max_pivot = std::max(max_pivot, pivot_abs);
+
+        for (int r = col + 1; r < 6; ++r) {
+            const double factor = aug[r][col] / aug[col][col];
+            if (factor == 0.0) {
+                continue;
+            }
+            for (int c = col; c < 7; ++c) {
+                aug[r][c] -= factor * aug[col][c];
+            }
+        }
+    }
+
+    if (!(min_pivot > 0.0) || !std::isfinite(min_pivot) || !std::isfinite(max_pivot)) {
+        result.rank_deficient = true;
+        return result;
+    }
+    result.condition_indicator = max_pivot / min_pivot;
+
+    double x[6] = {};
+    for (int r = 5; r >= 0; --r) {
+        double rhs = aug[r][6];
+        for (int c = r + 1; c < 6; ++c) {
+            rhs -= aug[r][c] * x[c];
+        }
+        x[r] = rhs / aug[r][r];
+    }
+
+    result.a = x[0];
+    result.b = x[1];
+    result.c = x[2];
+    result.d = x[3];
+    result.e = x[4];
+    result.f = x[5];
+
+    double sum_sq_res = 0.0;
+    double max_abs_res = 0.0;
+    for (const Stage8SupportNode& node : support) {
+        const double pred = result.a + (result.b * node.u) + (result.c * node.v) + (result.d * node.u * node.u) +
+                            (result.e * node.u * node.v) + (result.f * node.v * node.v);
+        const double res = z_values[node.idx] - pred;
+        sum_sq_res += res * res;
+        max_abs_res = std::max(max_abs_res, std::fabs(res));
+    }
+    result.rms_residual = std::sqrt(sum_sq_res / static_cast<double>(support.size()));
+    result.max_abs_residual = max_abs_res;
+    result.solved = true;
+    return result;
+}
+
+bool writeStage8DerivativeCsv(const GeometryStage8DerivativeEstimationResult& result,
+                              const std::string& path,
+                              const std::vector<double>& dz_dx,
+                              const std::vector<double>& dz_dy,
+                              const std::vector<double>& d2z_dx2,
+                              const std::vector<double>& d2z_dy2,
+                              const std::vector<double>& d2z_dxdy,
+                              const std::vector<double>& fit_rms,
+                              const std::vector<double>& fit_max_abs,
+                              const std::vector<double>& fit_condition) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,reconstructed,reliable_core,metric_domain,derivative_fit_attempted,derivative_valid,"
+           "neighbor_count,neighbor_max_radius,fit_rms_residual,fit_max_abs_residual,fit_condition_indicator,"
+           "dz_dx,dz_dy,d2z_dx2,d2z_dy2,d2z_dxdy\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.reconstructed_mask[idx]) << ',' << static_cast<int>(result.reliable_core_mask[idx])
+                << ',' << static_cast<int>(result.metric_domain_mask[idx]) << ','
+                << static_cast<int>(result.derivative_fit_attempted_mask[idx]) << ','
+                << static_cast<int>(result.derivative_valid_mask[idx]) << ',' << result.derivative_neighbor_count[idx] << ','
+                << result.derivative_neighbor_max_radius[idx] << ',' << fit_rms[idx] << ',' << fit_max_abs[idx] << ','
+                << fit_condition[idx] << ',' << dz_dx[idx] << ',' << dz_dy[idx] << ',' << d2z_dx2[idx] << ','
+                << d2z_dy2[idx] << ',' << d2z_dxdy[idx] << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage8DerivativeValidMaskCsv(const GeometryStage8DerivativeEstimationResult& result, const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,metric_domain,derivative_fit_attempted,derivative_valid\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.metric_domain_mask[idx]) << ','
+                << static_cast<int>(result.derivative_fit_attempted_mask[idx]) << ','
+                << static_cast<int>(result.derivative_valid_mask[idx]) << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage8DerivativeFailureReasonCsv(const GeometryStage8DerivativeEstimationResult& result, const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,metric_domain,fit_attempted,invalid_insufficient_points,invalid_rank_deficient,"
+           "invalid_poor_conditioning,invalid_high_residual,invalid_boundary_neighbor_geometry\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.metric_domain_mask[idx]) << ','
+                << static_cast<int>(result.derivative_fit_attempted_mask[idx]) << ','
+                << static_cast<int>(result.derivative_invalid_insufficient_points_mask[idx]) << ','
+                << static_cast<int>(result.derivative_invalid_rank_deficient_mask[idx]) << ','
+                << static_cast<int>(result.derivative_invalid_poor_conditioning_mask[idx]) << ','
+                << static_cast<int>(result.derivative_invalid_high_residual_mask[idx]) << ','
+                << static_cast<int>(result.derivative_invalid_boundary_neighbor_geometry_mask[idx]) << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage8SummaryCsv(const GeometryStage8DerivativeEstimationResult& result, const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "node_count,metric_domain_node_count,derivative_fit_attempted_node_count,derivative_valid_node_count,"
+           "derivative_invalid_node_count,derivative_invalid_insufficient_points_count,"
+           "derivative_invalid_rank_deficient_count,derivative_invalid_poor_conditioning_count,"
+           "derivative_invalid_high_residual_count,derivative_invalid_boundary_neighbor_geometry_count,"
+           "mean_outer_rms_residual_valid,mean_inner_rms_residual_valid,mean_outer_condition_indicator_valid,"
+           "mean_inner_condition_indicator_valid,mean_neighbor_count_valid\n";
+
+    double sum_outer_rms = 0.0;
+    double sum_inner_rms = 0.0;
+    double sum_outer_cond = 0.0;
+    double sum_inner_cond = 0.0;
+    double sum_neighbor_count = 0.0;
+    std::size_t count = 0;
+    for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+        if (result.derivative_valid_mask[idx] == 0) {
+            continue;
+        }
+        sum_outer_rms += result.outer_fit_rms_residual[idx];
+        sum_inner_rms += result.inner_fit_rms_residual[idx];
+        sum_outer_cond += result.outer_fit_condition_indicator[idx];
+        sum_inner_cond += result.inner_fit_condition_indicator[idx];
+        sum_neighbor_count += static_cast<double>(result.derivative_neighbor_count[idx]);
+        ++count;
+    }
+    const double denom = count > 0 ? static_cast<double>(count) : 1.0;
+    out << result.node_count << ',' << result.metric_domain_node_count << ',' << result.derivative_fit_attempted_node_count
+        << ',' << result.derivative_valid_node_count << ',' << result.derivative_invalid_node_count << ','
+        << result.derivative_invalid_insufficient_points_count << ',' << result.derivative_invalid_rank_deficient_count
+        << ',' << result.derivative_invalid_poor_conditioning_count << ',' << result.derivative_invalid_high_residual_count
+        << ',' << result.derivative_invalid_boundary_neighbor_geometry_count << ',' << (sum_outer_rms / denom) << ','
+        << (sum_inner_rms / denom) << ',' << (sum_outer_cond / denom) << ',' << (sum_inner_cond / denom) << ','
+        << (sum_neighbor_count / denom) << '\n';
+    return out.good();
+}
+
+} // namespace
+
+GeometryStage8DerivativeEstimationResult runGeometryAnalysisStage8DerivativeEstimation(
+    const GeometryStage7SmoothedSurfaceResult& stage7_result,
+    const GeometryStage5SurfacePrepResult& stage5_result,
+    const FoldPatchAnalysisConfig& config,
+    Logger* logger,
+    double tolerance) {
+    GeometryStage8DerivativeEstimationResult result;
+    if (!stage7_result.success) {
+        throw std::runtime_error("Stage 8 cannot run before successful Stage 7 surface smoothing");
+    }
+    if (stage7_result.node_count == 0 || stage7_result.grid.nx == 0 || stage7_result.grid.ny == 0) {
+        throw std::runtime_error("Stage 8 requires a non-empty Stage 7 grid");
+    }
+    if (config.stage8_min_points < 6) {
+        throw std::runtime_error("Stage 8 requires stage8_min_points >= 6 for quadratic fitting");
+    }
+    if (config.stage8_max_rms_residual < 0.0 || config.stage8_max_abs_residual < 0.0 ||
+        config.stage8_max_condition_indicator <= 0.0) {
+        throw std::runtime_error("Stage 8 requires non-negative residual thresholds and positive condition threshold");
+    }
+
+    const std::size_t node_count = stage7_result.node_count;
+    result.messages.push_back("Geometry Stage 8");
+    result.messages.push_back("Geometry analysis: starting Stage 8 local quadratic derivative estimation.");
+    result.grid = stage7_result.grid;
+    result.node_count = node_count;
+    result.reconstructed_mask = stage7_result.reconstructed_mask;
+    result.reliable_core_mask = stage5_result.reliable_core_mask;
+    result.metric_domain_mask = stage7_result.metric_domain_mask;
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    result.derivative_fit_attempted_mask.assign(node_count, 0);
+    result.derivative_valid_mask.assign(node_count, 0);
+    result.derivative_invalid_insufficient_points_mask.assign(node_count, 0);
+    result.derivative_invalid_rank_deficient_mask.assign(node_count, 0);
+    result.derivative_invalid_poor_conditioning_mask.assign(node_count, 0);
+    result.derivative_invalid_high_residual_mask.assign(node_count, 0);
+    result.derivative_invalid_boundary_neighbor_geometry_mask.assign(node_count, 0);
+
+    result.outer_dz_dx.assign(node_count, nan);
+    result.outer_dz_dy.assign(node_count, nan);
+    result.outer_d2z_dx2.assign(node_count, nan);
+    result.outer_d2z_dy2.assign(node_count, nan);
+    result.outer_d2z_dxdy.assign(node_count, nan);
+    result.inner_dz_dx.assign(node_count, nan);
+    result.inner_dz_dy.assign(node_count, nan);
+    result.inner_d2z_dx2.assign(node_count, nan);
+    result.inner_d2z_dy2.assign(node_count, nan);
+    result.inner_d2z_dxdy.assign(node_count, nan);
+
+    result.outer_fit_rms_residual.assign(node_count, nan);
+    result.inner_fit_rms_residual.assign(node_count, nan);
+    result.outer_fit_max_abs_residual.assign(node_count, nan);
+    result.inner_fit_max_abs_residual.assign(node_count, nan);
+    result.outer_fit_condition_indicator.assign(node_count, nan);
+    result.inner_fit_condition_indicator.assign(node_count, nan);
+    result.derivative_neighbor_count.assign(node_count, 0);
+    result.derivative_neighbor_max_radius.assign(node_count, nan);
+
+    const double fit_radius = config.stage8_fit_radius > 0.0 ? config.stage8_fit_radius : stage8DefaultFitRadius(result.grid);
+    const double min_directional_span = config.stage8_min_directional_span > 0.0
+                                            ? config.stage8_min_directional_span
+                                            : stage8DefaultMinDirectionalSpan(result.grid);
+    const double fit_radius2 = fit_radius * fit_radius;
+
+    for (const uint8_t m : result.metric_domain_mask) {
+        if (m != 0) {
+            ++result.metric_domain_node_count;
+        }
+    }
+
+    for (std::size_t j0 = 0; j0 < result.grid.ny; ++j0) {
+        for (std::size_t i0 = 0; i0 < result.grid.nx; ++i0) {
+            const std::size_t center_idx = stage4NodeIndex(i0, j0, result.grid.nx);
+            const bool candidate = result.metric_domain_mask[center_idx] != 0 && stage7_result.smooth_valid_mask[center_idx] != 0 &&
+                                   std::isfinite(stage7_result.z_outer_smooth[center_idx]) &&
+                                   std::isfinite(stage7_result.z_inner_smooth[center_idx]);
+            if (!candidate) {
+                continue;
+            }
+
+            result.derivative_fit_attempted_mask[center_idx] = 1;
+            ++result.derivative_fit_attempted_node_count;
+
+            const double x0 = result.grid.x_values[i0];
+            const double y0 = result.grid.y_values[j0];
+            std::vector<Stage8SupportNode> support;
+            support.reserve(64);
+            for (std::size_t j = 0; j < result.grid.ny; ++j) {
+                const double y = result.grid.y_values[j];
+                const double v = y - y0;
+                for (std::size_t i = 0; i < result.grid.nx; ++i) {
+                    const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+                    if (result.metric_domain_mask[idx] == 0 || stage7_result.smooth_valid_mask[idx] == 0 ||
+                        !std::isfinite(stage7_result.z_outer_smooth[idx]) || !std::isfinite(stage7_result.z_inner_smooth[idx])) {
+                        continue;
+                    }
+                    const double x = result.grid.x_values[i];
+                    const double u = x - x0;
+                    const double dist2 = (u * u) + (v * v);
+                    if (dist2 <= fit_radius2 + tolerance) {
+                        support.push_back({idx, u, v, dist2});
+                    }
+                }
+            }
+
+            std::sort(support.begin(), support.end(), [](const Stage8SupportNode& a, const Stage8SupportNode& b) {
+                if (a.dist2 != b.dist2) {
+                    return a.dist2 < b.dist2;
+                }
+                return a.idx < b.idx;
+            });
+            if (config.stage8_max_points > 0 && support.size() > config.stage8_max_points) {
+                support.resize(config.stage8_max_points);
+            }
+
+            result.derivative_neighbor_count[center_idx] = static_cast<int>(support.size());
+            result.derivative_neighbor_max_radius[center_idx] =
+                support.empty() ? nan : std::sqrt(support.back().dist2);
+
+            Stage8FailureReason reason = Stage8FailureReason::none;
+            if (support.size() < config.stage8_min_points) {
+                reason = Stage8FailureReason::insufficient_points;
+            }
+
+            bool has_pos_u = false;
+            bool has_neg_u = false;
+            bool has_pos_v = false;
+            bool has_neg_v = false;
+            double min_u = std::numeric_limits<double>::infinity();
+            double max_u = -std::numeric_limits<double>::infinity();
+            double min_v = std::numeric_limits<double>::infinity();
+            double max_v = -std::numeric_limits<double>::infinity();
+            for (const Stage8SupportNode& node : support) {
+                min_u = std::min(min_u, node.u);
+                max_u = std::max(max_u, node.u);
+                min_v = std::min(min_v, node.v);
+                max_v = std::max(max_v, node.v);
+                has_pos_u = has_pos_u || (node.u > tolerance);
+                has_neg_u = has_neg_u || (node.u < -tolerance);
+                has_pos_v = has_pos_v || (node.v > tolerance);
+                has_neg_v = has_neg_v || (node.v < -tolerance);
+            }
+            const bool centered_ok = (!config.stage8_require_centered_support) || (has_pos_u && has_neg_u && has_pos_v && has_neg_v);
+            const bool span_ok = support.empty() ? false : ((max_u - min_u) >= min_directional_span &&
+                                                            (max_v - min_v) >= min_directional_span);
+            if (reason == Stage8FailureReason::none && (!centered_ok || !span_ok)) {
+                reason = Stage8FailureReason::boundary_neighbor_geometry;
+            }
+
+            Stage8QuadraticFitResult outer_fit;
+            Stage8QuadraticFitResult inner_fit;
+            if (reason == Stage8FailureReason::none) {
+                outer_fit = fitLocalQuadraticLeastSquares(support, stage7_result.z_outer_smooth, tolerance);
+                inner_fit = fitLocalQuadraticLeastSquares(support, stage7_result.z_inner_smooth, tolerance);
+                result.outer_fit_rms_residual[center_idx] = outer_fit.rms_residual;
+                result.inner_fit_rms_residual[center_idx] = inner_fit.rms_residual;
+                result.outer_fit_max_abs_residual[center_idx] = outer_fit.max_abs_residual;
+                result.inner_fit_max_abs_residual[center_idx] = inner_fit.max_abs_residual;
+                result.outer_fit_condition_indicator[center_idx] = outer_fit.condition_indicator;
+                result.inner_fit_condition_indicator[center_idx] = inner_fit.condition_indicator;
+
+                if (outer_fit.rank_deficient || inner_fit.rank_deficient || !outer_fit.solved || !inner_fit.solved) {
+                    reason = Stage8FailureReason::rank_deficient;
+                } else if (!std::isfinite(outer_fit.condition_indicator) || !std::isfinite(inner_fit.condition_indicator) ||
+                           outer_fit.condition_indicator > config.stage8_max_condition_indicator ||
+                           inner_fit.condition_indicator > config.stage8_max_condition_indicator) {
+                    reason = Stage8FailureReason::poor_conditioning;
+                } else if (!std::isfinite(outer_fit.rms_residual) || !std::isfinite(inner_fit.rms_residual) ||
+                           !std::isfinite(outer_fit.max_abs_residual) || !std::isfinite(inner_fit.max_abs_residual) ||
+                           outer_fit.rms_residual > config.stage8_max_rms_residual ||
+                           inner_fit.rms_residual > config.stage8_max_rms_residual ||
+                           outer_fit.max_abs_residual > config.stage8_max_abs_residual ||
+                           inner_fit.max_abs_residual > config.stage8_max_abs_residual) {
+                    reason = Stage8FailureReason::high_residual;
+                }
+            }
+
+            if (reason == Stage8FailureReason::none) {
+                result.derivative_valid_mask[center_idx] = 1;
+                ++result.derivative_valid_node_count;
+                result.outer_dz_dx[center_idx] = outer_fit.b;
+                result.outer_dz_dy[center_idx] = outer_fit.c;
+                result.outer_d2z_dx2[center_idx] = 2.0 * outer_fit.d;
+                result.outer_d2z_dy2[center_idx] = 2.0 * outer_fit.f;
+                result.outer_d2z_dxdy[center_idx] = outer_fit.e;
+                result.inner_dz_dx[center_idx] = inner_fit.b;
+                result.inner_dz_dy[center_idx] = inner_fit.c;
+                result.inner_d2z_dx2[center_idx] = 2.0 * inner_fit.d;
+                result.inner_d2z_dy2[center_idx] = 2.0 * inner_fit.f;
+                result.inner_d2z_dxdy[center_idx] = inner_fit.e;
+            } else {
+                ++result.derivative_invalid_node_count;
+                switch (reason) {
+                case Stage8FailureReason::insufficient_points:
+                    result.derivative_invalid_insufficient_points_mask[center_idx] = 1;
+                    ++result.derivative_invalid_insufficient_points_count;
+                    break;
+                case Stage8FailureReason::boundary_neighbor_geometry:
+                    result.derivative_invalid_boundary_neighbor_geometry_mask[center_idx] = 1;
+                    ++result.derivative_invalid_boundary_neighbor_geometry_count;
+                    break;
+                case Stage8FailureReason::rank_deficient:
+                    result.derivative_invalid_rank_deficient_mask[center_idx] = 1;
+                    ++result.derivative_invalid_rank_deficient_count;
+                    break;
+                case Stage8FailureReason::poor_conditioning:
+                    result.derivative_invalid_poor_conditioning_mask[center_idx] = 1;
+                    ++result.derivative_invalid_poor_conditioning_count;
+                    break;
+                case Stage8FailureReason::high_residual:
+                    result.derivative_invalid_high_residual_mask[center_idx] = 1;
+                    ++result.derivative_invalid_high_residual_count;
+                    break;
+                case Stage8FailureReason::none:
+                    break;
+                }
+            }
+        }
+    }
+
+    if (config.stage8_export_csv) {
+        result.outer_derivatives_csv_path = config.output_prefix + "_outer_derivatives.csv";
+        result.inner_derivatives_csv_path = config.output_prefix + "_inner_derivatives.csv";
+        result.derivative_valid_mask_csv_path = config.output_prefix + "_derivative_valid_mask.csv";
+        result.derivative_failure_reason_csv_path = config.output_prefix + "_derivative_failure_reasons.csv";
+        result.derivative_summary_csv_path = config.output_prefix + "_stage8_summary.csv";
+        if (!writeStage8DerivativeCsv(result,
+                                      result.outer_derivatives_csv_path,
+                                      result.outer_dz_dx,
+                                      result.outer_dz_dy,
+                                      result.outer_d2z_dx2,
+                                      result.outer_d2z_dy2,
+                                      result.outer_d2z_dxdy,
+                                      result.outer_fit_rms_residual,
+                                      result.outer_fit_max_abs_residual,
+                                      result.outer_fit_condition_indicator)) {
+            throw std::runtime_error("Failed to write Stage 8 outer derivatives CSV");
+        }
+        if (!writeStage8DerivativeCsv(result,
+                                      result.inner_derivatives_csv_path,
+                                      result.inner_dz_dx,
+                                      result.inner_dz_dy,
+                                      result.inner_d2z_dx2,
+                                      result.inner_d2z_dy2,
+                                      result.inner_d2z_dxdy,
+                                      result.inner_fit_rms_residual,
+                                      result.inner_fit_max_abs_residual,
+                                      result.inner_fit_condition_indicator)) {
+            throw std::runtime_error("Failed to write Stage 8 inner derivatives CSV");
+        }
+        if (!writeStage8DerivativeValidMaskCsv(result, result.derivative_valid_mask_csv_path)) {
+            throw std::runtime_error("Failed to write Stage 8 derivative-valid mask CSV");
+        }
+        if (!writeStage8DerivativeFailureReasonCsv(result, result.derivative_failure_reason_csv_path)) {
+            throw std::runtime_error("Failed to write Stage 8 derivative failure-reason CSV");
+        }
+        if (!writeStage8SummaryCsv(result, result.derivative_summary_csv_path)) {
+            throw std::runtime_error("Failed to write Stage 8 summary CSV");
+        }
+    }
+
+    result.messages.push_back("Geometry Stage 8 fit radius: " + std::to_string(fit_radius));
+    result.messages.push_back("Geometry Stage 8 minimum support points: " + std::to_string(config.stage8_min_points));
+    result.messages.push_back("Geometry Stage 8 metric-domain node count: " + std::to_string(result.metric_domain_node_count));
+    result.messages.push_back("Geometry Stage 8 fit-attempted node count: " +
+                              std::to_string(result.derivative_fit_attempted_node_count));
+    result.messages.push_back("Geometry Stage 8 derivative-valid node count: " +
+                              std::to_string(result.derivative_valid_node_count));
+    result.messages.push_back("Geometry Stage 8 invalid insufficient-points count: " +
+                              std::to_string(result.derivative_invalid_insufficient_points_count));
+    result.messages.push_back("Geometry Stage 8 invalid rank-deficient count: " +
+                              std::to_string(result.derivative_invalid_rank_deficient_count));
+    result.messages.push_back("Geometry Stage 8 invalid poor-conditioning count: " +
+                              std::to_string(result.derivative_invalid_poor_conditioning_count));
+    result.messages.push_back("Geometry Stage 8 invalid high-residual count: " +
+                              std::to_string(result.derivative_invalid_high_residual_count));
+    result.messages.push_back("Geometry Stage 8 invalid boundary-neighbor-geometry count: " +
+                              std::to_string(result.derivative_invalid_boundary_neighbor_geometry_count));
+    if (config.stage8_export_csv) {
+        result.messages.push_back("Geometry Stage 8 outer derivatives CSV: " + result.outer_derivatives_csv_path);
+        result.messages.push_back("Geometry Stage 8 inner derivatives CSV: " + result.inner_derivatives_csv_path);
+        result.messages.push_back("Geometry Stage 8 derivative-valid mask CSV: " + result.derivative_valid_mask_csv_path);
+        result.messages.push_back("Geometry Stage 8 derivative failure-reason CSV: " +
+                                  result.derivative_failure_reason_csv_path);
+        result.messages.push_back("Geometry Stage 8 summary CSV: " + result.derivative_summary_csv_path);
+    }
+    result.messages.push_back("Geometry analysis: completed Stage 8 local quadratic derivative estimation.");
+
+    result.success = true;
+    logMessages(result.messages, logger);
+    return result;
+}
+
 GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                                                     const FoldPatchAnalysisConfig& config,
                                                     const ParserConfig& parser_config,
@@ -3476,9 +4051,26 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
         result.stage7_smooth.success = true;
         result.stage7_smooth.messages.push_back("Geometry Stage 7 smoothing disabled by configuration.");
     }
+    const bool stage8_allowed_by_stage7_method =
+        config.stage7_method == FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit;
+    if (config.stage8_enabled && stage8_allowed_by_stage7_method) {
+        result.stage8_derivatives =
+            runGeometryAnalysisStage8DerivativeEstimation(result.stage7_smooth, result.stage5_prep, config, logger);
+    } else {
+        result.stage8_derivatives.success = true;
+        if (!config.stage8_enabled) {
+            result.stage8_derivatives.messages.push_back("Geometry Stage 8 derivative estimation disabled by configuration.");
+        } else {
+            result.stage8_derivatives.messages.push_back(
+                "Geometry Stage 8 derivative estimation skipped: requires Stage 7 thin_plate_grid_fit method.");
+        }
+        result.messages.insert(result.messages.end(),
+                               result.stage8_derivatives.messages.begin(),
+                               result.stage8_derivatives.messages.end());
+    }
     result.success = result.preparation.success && result.stage2_patch.success && result.stage3_patch.success &&
                      result.stage4_raw.success && result.stage5_prep.success && result.stage6_surfaces.success &&
-                     result.stage7_smooth.success;
+                     result.stage7_smooth.success && result.stage8_derivatives.success;
     const std::string run_summary_json_path = config.output_prefix + "_run_summary.json";
     if (!writeGeometryRunSummaryJson(config, parser_config, run_summary_json_path)) {
         throw std::runtime_error("Failed to write geometry run summary JSON: " + run_summary_json_path);
