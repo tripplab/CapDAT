@@ -80,6 +80,12 @@ std::string meshFormatLabel(FoldPatchAnalysisConfig::MeshExportFormat format) {
     return format == FoldPatchAnalysisConfig::MeshExportFormat::stl ? "stl" : "obj";
 }
 
+std::string formatScientific(double value) {
+    std::ostringstream out;
+    out << std::scientific << std::setprecision(6) << value;
+    return out.str();
+}
+
 const char* stage7MethodLabel(FoldPatchAnalysisConfig::Stage7Method method) {
     switch (method) {
     case FoldPatchAnalysisConfig::Stage7Method::smooth:
@@ -3192,8 +3198,8 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     result.messages.push_back("Geometry Stage 7 inner iterations used: " + std::to_string(result.inner_iterations_used));
     result.messages.push_back("Geometry Stage 7 outer final update: " + std::to_string(result.outer_final_max_update));
     result.messages.push_back("Geometry Stage 7 inner final update: " + std::to_string(result.inner_final_max_update));
-    result.messages.push_back("Geometry Stage 7 outer fit residual: " + std::to_string(result.outer_fit_final_residual));
-    result.messages.push_back("Geometry Stage 7 inner fit residual: " + std::to_string(result.inner_fit_final_residual));
+    result.messages.push_back("Geometry Stage 7 outer fit residual: " + formatScientific(result.outer_fit_final_residual));
+    result.messages.push_back("Geometry Stage 7 inner fit residual: " + formatScientific(result.inner_fit_final_residual));
     result.messages.push_back("Geometry Stage 7 smooth valid node count: " + std::to_string(result.smooth_valid_node_count));
     result.messages.push_back("Geometry Stage 7 metric domain node count: " + std::to_string(result.metric_domain_node_count));
     result.messages.push_back("Geometry Stage 7 smooth non-crossing adjusted node count: " +
