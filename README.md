@@ -270,5 +270,7 @@ The authoritative references for future README updates on this branch should be:
 - the geometry-analysis implementation and tests for stage-level behavior as the pipeline evolves.
 
 
-For more details look into the `docs` directory.
+For more details look into the `docs` directory:
+
+<https://github.com/tripplab/CapDAT/blob/geometry/docs/technical_spec_and_dev_guide.md>
 
