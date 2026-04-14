@@ -146,9 +146,13 @@ struct Stage4RawContactRecord {
 struct Stage4NodeFirstContact {
     bool valid = false;
     std::size_t candidate_patch_atom_count = 0;
+    /// Winning outer raw envelope contact height (max ray-sphere z_high).
     double z_outer_raw = 0.0;
+    /// Winning inner raw envelope contact height (min ray-sphere z_low).
     double z_inner_raw = 0.0;
+    /// Patch-atom index of the winning outer z_high contact.
     std::size_t outer_patch_atom_index = 0;
+    /// Patch-atom index of the winning inner z_low contact.
     std::size_t inner_patch_atom_index = 0;
 };
 

@@ -243,59 +243,191 @@ void testLineSphereIntersectionHelper() {
 
 void testSingleNodeFirstContact() {
     std::vector<PatchAtom> atoms;
-
     PatchAtom a;
     a.position = {0.0, 0.0, 5.0};
     a.vdw_radius = 2.0;
     atoms.push_back(a);
 
-    const auto single = detectRawFirstContactAtNode(0.0, 0.0, atoms);
-    assertTrue(single.valid, "one intersecting sphere should be valid");
-    assertTrue(near(single.z_outer_raw, 5.0), "single sphere outer should be atom z");
-    assertTrue(near(single.z_inner_raw, 5.0), "single sphere inner should be atom z");
-    assertTrue(single.candidate_patch_atom_count == 1, "single intersecting atom should be counted as candidate");
+    const auto center_hit = detectRawFirstContactAtNode(0.0, 0.0, atoms);
+    assertTrue(center_hit.valid, "one intersecting sphere should be valid");
+    assertTrue(center_hit.candidate_patch_atom_count == 1, "single intersecting atom should be counted as candidate");
+    assertTrue(near(center_hit.z_inner_raw, 3.0), "single-sphere center ray should use z_low=3");
+    assertTrue(near(center_hit.z_outer_raw, 7.0), "single-sphere center ray should use z_high=7");
+    assertTrue(center_hit.outer_patch_atom_index == 0 && center_hit.inner_patch_atom_index == 0,
+               "single-sphere winner provenance should point to the only atom");
 
-    PatchAtom b;
-    b.position = {0.0, 0.0, 8.0};
-    b.vdw_radius = 4.0;
-    atoms.push_back(b);
+    const auto tangent_hit = detectRawFirstContactAtNode(2.0, 0.0, atoms);
+    assertTrue(tangent_hit.valid, "tangent intersection should be valid");
+    assertTrue(near(tangent_hit.z_inner_raw, 5.0), "tangent z_low should equal center z");
+    assertTrue(near(tangent_hit.z_outer_raw, 5.0), "tangent z_high should equal center z");
 
-    const auto multi = detectRawFirstContactAtNode(0.0, 0.0, atoms);
-    assertTrue(multi.valid, "multiple intersecting spheres should be valid");
-    assertTrue(near(multi.z_outer_raw, 8.0), "outer should be maximum atom z");
-    assertTrue(near(multi.z_inner_raw, 5.0), "inner should be minimum atom z");
-    assertTrue(multi.candidate_patch_atom_count == 2, "both intersecting atoms should be counted as candidates");
+    const auto proper_off_center = detectRawFirstContactAtNode(1.0, 0.0, atoms);
+    assertTrue(proper_off_center.valid, "proper off-center hit should be valid");
+    assertTrue(near(proper_off_center.z_inner_raw, 5.0 - std::sqrt(3.0)), "off-center inner should use z_low");
+    assertTrue(near(proper_off_center.z_outer_raw, 5.0 + std::sqrt(3.0)), "off-center outer should use z_high");
 
     const auto none = detectRawFirstContactAtNode(20.0, 20.0, atoms);
     assertTrue(!none.valid, "no intersection should be invalid");
+}
 
-    std::vector<PatchAtom> tie_atoms;
-    PatchAtom t0;
-    t0.position = {0.0, 0.0, 5.0};
-    t0.vdw_radius = 2.0;
-    tie_atoms.push_back(t0);
-    PatchAtom t1;
-    t1.position = {0.0, 0.0, 5.0};
-    t1.vdw_radius = 2.0;
-    tie_atoms.push_back(t1);
-    const auto tie = detectRawFirstContactAtNode(0.0, 0.0, tie_atoms);
+void testStage4FirstContactEnvelopeCompetingWinners() {
+    std::vector<PatchAtom> atoms;
+
+    PatchAtom high_center_small_radius;
+    high_center_small_radius.position = {0.0, 0.0, 7.0};
+    high_center_small_radius.vdw_radius = 0.6;
+    atoms.push_back(high_center_small_radius); // z_high = 7.6, z_low = 6.4 at x=y=0
+
+    PatchAtom lower_center_large_radius;
+    lower_center_large_radius.position = {0.0, 0.0, 6.0};
+    lower_center_large_radius.vdw_radius = 2.0;
+    atoms.push_back(lower_center_large_radius); // z_high = 8.0, z_low = 4.0 at x=y=0
+
+    const auto node = detectRawFirstContactAtNode(0.0, 0.0, atoms);
+    assertTrue(node.valid, "two intersecting spheres should produce a valid envelope node");
+    assertTrue(node.candidate_patch_atom_count == 2, "both intersecting atoms should be counted as candidates");
+    assertTrue(near(node.z_outer_raw, 8.0), "outer winner must be the largest z_high envelope contact");
+    assertTrue(near(node.z_inner_raw, 4.0), "inner winner must be the smallest z_low envelope contact");
+    assertTrue(node.outer_patch_atom_index == 1,
+               "outer winner should be selected by z_high, not by highest atom center z");
+    assertTrue(node.inner_patch_atom_index == 1, "inner winner should be selected by z_low");
+}
+
+void testStage4InnerWinnerCanDisagreeWithLowestCenterZ() {
+    std::vector<PatchAtom> atoms;
+
+    PatchAtom lowest_center_but_shallow;
+    lowest_center_but_shallow.position = {0.0, 0.0, 4.0};
+    lowest_center_but_shallow.vdw_radius = 1.0;
+    atoms.push_back(lowest_center_but_shallow); // z_low = 3.0
+
+    PatchAtom higher_center_but_deeper;
+    higher_center_but_deeper.position = {0.0, 0.0, 5.0};
+    higher_center_but_deeper.vdw_radius = 2.5;
+    atoms.push_back(higher_center_but_deeper); // z_low = 2.5
+
+    const auto node = detectRawFirstContactAtNode(0.0, 0.0, atoms);
+    assertTrue(node.valid, "node should be valid when both atoms intersect");
+    assertTrue(node.inner_patch_atom_index == 1,
+               "inner winner should be selected by z_low envelope, not by lowest center z");
+    assertTrue(near(node.z_inner_raw, 2.5), "inner raw contact should match winning z_low");
+}
+
+void testStage4FirstContactTieStability() {
+    std::vector<PatchAtom> atoms;
+    PatchAtom a;
+    a.position = {0.0, 0.0, 5.0};
+    a.vdw_radius = 2.0;
+    atoms.push_back(a);
+
+    PatchAtom b = a;
+    atoms.push_back(b);
+
+    const auto tie = detectRawFirstContactAtNode(0.0, 0.0, atoms);
     assertTrue(tie.valid, "tie case should remain valid");
-    assertTrue(tie.outer_patch_atom_index == 0, "tie should prefer earlier patch atom for outer");
-    assertTrue(tie.inner_patch_atom_index == 0, "tie should prefer earlier patch atom for inner");
+    assertTrue(tie.outer_patch_atom_index == 0, "outer tie should preserve first-wins behavior");
+    assertTrue(tie.inner_patch_atom_index == 0, "inner tie should preserve first-wins behavior");
+}
 
-    std::vector<PatchAtom> disjoint;
-    PatchAtom d0;
-    d0.position = {0.0, 0.0, 91.0}; // [90,92]
-    d0.vdw_radius = 1.0;
-    disjoint.push_back(d0);
-    PatchAtom d1;
-    d1.position = {0.0, 0.0, 101.0}; // [100,102]
-    d1.vdw_radius = 1.0;
-    disjoint.push_back(d1);
-    const auto disjoint_case = detectRawFirstContactAtNode(0.0, 0.0, disjoint);
-    assertTrue(disjoint_case.valid, "non-overlapping intervals should remain valid with max/min envelope rule");
-    assertTrue(near(disjoint_case.z_outer_raw, 101.0), "disjoint outer should be max atom z");
-    assertTrue(near(disjoint_case.z_inner_raw, 91.0), "disjoint inner should be min atom z");
+void testStage4PipelineUsesEnvelopeContactsAndProvenance() {
+    Capsid capsid = makeSimpleCapsid();
+    FoldPatchAnalysisConfig config;
+    config.enabled = true;
+    config.fold_type = 2;
+    config.fold_index = 0;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    config.min_atoms_in_patch = 2;
+    config.output_prefix = "stage4_envelope_regression";
+
+    const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
+    assertTrue(result.success, "Stage 1-7 pipeline should succeed for Stage 4 envelope regression fixture");
+    assertTrue(result.stage4_raw.valid_node_count > 0, "Stage 4 should produce valid nodes");
+
+    const auto& stage3_atoms = result.stage3_patch.analytical_patch.atoms;
+    const auto& stage4 = result.stage4_raw;
+    bool checked_node = false;
+    for (std::size_t j = 0; j < stage4.grid.ny && !checked_node; ++j) {
+        for (std::size_t i = 0; i < stage4.grid.nx && !checked_node; ++i) {
+            const std::size_t idx = nodeIndex(i, j, stage4.grid.nx);
+            if (stage4.valid_mask[idx] == 0) {
+                continue;
+            }
+            const double x = stage4.grid.x_values[i];
+            const double y = stage4.grid.y_values[j];
+            double best_high = -std::numeric_limits<double>::infinity();
+            double best_low = std::numeric_limits<double>::infinity();
+            std::size_t best_high_idx = 0;
+            std::size_t best_low_idx = 0;
+            std::size_t hits = 0;
+            for (std::size_t aidx = 0; aidx < stage3_atoms.size(); ++aidx) {
+                const auto intersection = intersectVerticalLineWithSphere(x, y, stage3_atoms[aidx]);
+                if (!intersection.intersects) {
+                    continue;
+                }
+                ++hits;
+                if (intersection.z_high > best_high + 1e-12) {
+                    best_high = intersection.z_high;
+                    best_high_idx = aidx;
+                }
+                if (intersection.z_low < best_low - 1e-12) {
+                    best_low = intersection.z_low;
+                    best_low_idx = aidx;
+                }
+            }
+            assertTrue(hits == stage4.candidate_patch_atom_counts[idx],
+                       "candidate_patch_atom_count should match intersected analytical patch atoms");
+            assertTrue(near(stage4.z_outer_raw[idx], best_high),
+                       "Stage 4 outer raw value should equal winning ray-sphere z_high envelope contact");
+            assertTrue(near(stage4.z_inner_raw[idx], best_low),
+                       "Stage 4 inner raw value should equal winning ray-sphere z_low envelope contact");
+            assertTrue(stage4.outer_contact_patch_atom_indices[idx] == static_cast<int>(best_high_idx),
+                       "outer Stage 4 provenance should point to the winning z_high atom index");
+            assertTrue(stage4.inner_contact_patch_atom_indices[idx] == static_cast<int>(best_low_idx),
+                       "inner Stage 4 provenance should point to the winning z_low atom index");
+            assertTrue(stage4.inner_contact_serial_numbers[idx] ==
+                           stage3_atoms[best_low_idx].original_atom->serial() &&
+                           stage4.outer_contact_serial_numbers[idx] ==
+                           stage3_atoms[best_high_idx].original_atom->serial(),
+                       "serial provenance should follow winning z_low/z_high envelope atoms");
+            checked_node = true;
+        }
+    }
+    assertTrue(checked_node, "regression fixture must include at least one valid Stage 4 node");
+
+    removeIfExists(result.stage2_patch.export_path);
+    removeIfExists(result.stage4_raw.outer_csv_path);
+    removeIfExists(result.stage4_raw.inner_csv_path);
+    removeIfExists(result.stage4_raw.valid_mask_csv_path);
+    removeIfExists(result.stage4_raw.outer_only_mask_csv_path);
+    removeIfExists(result.stage4_raw.inner_only_mask_csv_path);
+    removeIfExists(result.stage4_raw.negative_thickness_mask_csv_path);
+    removeIfExists(result.stage4_raw.summary_csv_path);
+    removeIfExists(result.stage4_raw.contact_atoms_pdb_path);
+    removeIfExists(result.stage5_prep.outer_seed_csv_path);
+    removeIfExists(result.stage5_prep.inner_seed_csv_path);
+    removeIfExists(result.stage5_prep.paired_seed_mask_csv_path);
+    removeIfExists(result.stage5_prep.boundary_exclusion_mask_csv_path);
+    removeIfExists(result.stage5_prep.interp_allowed_mask_csv_path);
+    removeIfExists(result.stage5_prep.hard_invalid_mask_csv_path);
+    removeIfExists(result.stage5_prep.reliable_core_mask_csv_path);
+    removeIfExists(result.stage5_prep.summary_csv_path);
+    removeIfExists(result.stage6_surfaces.outer_reconstructed_csv_path);
+    removeIfExists(result.stage6_surfaces.inner_reconstructed_csv_path);
+    removeIfExists(result.stage6_surfaces.reconstructed_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.final_valid_analysis_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.non_crossing_adjustment_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.summary_csv_path);
+    removeIfExists(result.stage6_surfaces.outer_obj_path);
+    removeIfExists(result.stage6_surfaces.inner_obj_path);
+    removeIfExists(result.stage7_smooth.outer_smooth_csv_path);
+    removeIfExists(result.stage7_smooth.inner_smooth_csv_path);
+    removeIfExists(result.stage7_smooth.smooth_valid_mask_csv_path);
+    removeIfExists(result.stage7_smooth.metric_domain_mask_csv_path);
+    removeIfExists(result.stage7_smooth.smooth_non_crossing_adjustment_mask_csv_path);
+    removeIfExists(result.stage7_smooth.summary_csv_path);
+    removeIfExists(result.stage7_smooth.outer_mesh_path);
+    removeIfExists(result.stage7_smooth.inner_mesh_path);
 }
 
 void testGridConstruction() {
@@ -525,14 +657,14 @@ void testStage4RoleClassificationAndCsvAndPdb() {
     assertTrue(stage4.unique_outer_contact_atom_count > 0, "Stage 4 should classify outer contacts");
     assertTrue(stage4.unique_inner_contact_atom_count > 0, "Stage 4 should classify inner contacts");
 
-    bool seen_both = false;
+    bool seen_any_contact_role = false;
     for (PatchAtomContactRole role : stage4.atom_roles) {
-        if (role == PatchAtomContactRole::both) {
-            seen_both = true;
+        if (role != PatchAtomContactRole::none) {
+            seen_any_contact_role = true;
             break;
         }
     }
-    assertTrue(seen_both, "at least one contact atom should be classified as both");
+    assertTrue(seen_any_contact_role, "at least one patch atom should be classified as an outer/inner contact");
 
     assertTrue(std::filesystem::exists(stage4.outer_csv_path), "outer csv should exist");
     assertTrue(std::filesystem::exists(stage4.inner_csv_path), "inner csv should exist");
@@ -1219,6 +1351,7 @@ void testStage6DebugCsvArtifactsAndObjExportAndDeterminism() {
     config.debug = true;
     config.output_prefix = "stage6_debug";
     config.stage6_export_obj_meshes = true;
+    config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::obj;
     config.stage6_split_in_out_meshes = true;
     const auto first = runGeometryAnalysisStage6SurfaceReconstruction(stage5, config, nullptr);
     assertTrue(std::filesystem::exists(first.outer_reconstructed_csv_path), "outer reconstructed csv should exist");
@@ -1334,6 +1467,7 @@ void testStage6CombinedExportDefault() {
     FoldPatchAnalysisConfig config;
     config.output_prefix = "stage6_combined";
     config.stage6_export_obj_meshes = true;
+    config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::obj;
 
     const auto stage6 = runGeometryAnalysisStage6SurfaceReconstruction(stage5, config, nullptr);
     assertTrue(stage6.outer_obj_path == stage6.inner_obj_path, "combined export should use one shared mesh path");
@@ -1594,6 +1728,10 @@ int main() {
         testPatchAtomBuilderInfersElementFromNameWhenMissing();
         testLineSphereIntersectionHelper();
         testSingleNodeFirstContact();
+        testStage4FirstContactEnvelopeCompetingWinners();
+        testStage4InnerWinnerCanDisagreeWithLowestCenterZ();
+        testStage4FirstContactTieStability();
+        testStage4PipelineUsesEnvelopeContactsAndProvenance();
         testGridConstruction();
         testStage1IdentityFor2_0();
         testStage1NonIdentityFor3_0();

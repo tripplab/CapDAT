@@ -1269,8 +1269,10 @@ Stage4NodeFirstContact detectRawFirstContactAtNode(double x,
                                                     double tie_tolerance) {
     Stage4NodeFirstContact result;
     bool any_intersection = false;
-    double best_outer = -std::numeric_limits<double>::infinity();
-    double best_inner = std::numeric_limits<double>::infinity();
+    double best_outer_contact_height = -std::numeric_limits<double>::infinity();
+    double best_inner_contact_height = std::numeric_limits<double>::infinity();
+    std::size_t best_outer_patch_atom_index = 0;
+    std::size_t best_inner_patch_atom_index = 0;
 
     for (std::size_t idx = 0; idx < patch_atoms.size(); ++idx) {
         const LineSphereIntersection intersection =
@@ -1280,14 +1282,14 @@ Stage4NodeFirstContact detectRawFirstContactAtNode(double x,
         }
         ++result.candidate_patch_atom_count;
 
-        if (!any_intersection || (patch_atoms[idx].position.z > best_outer + tie_tolerance)) {
-            best_outer = patch_atoms[idx].position.z;
-            result.outer_patch_atom_index = idx;
+        if (!any_intersection || (intersection.z_high > best_outer_contact_height + tie_tolerance)) {
+            best_outer_contact_height = intersection.z_high;
+            best_outer_patch_atom_index = idx;
         }
 
-        if (!any_intersection || (patch_atoms[idx].position.z < best_inner - tie_tolerance)) {
-            best_inner = patch_atoms[idx].position.z;
-            result.inner_patch_atom_index = idx;
+        if (!any_intersection || (intersection.z_low < best_inner_contact_height - tie_tolerance)) {
+            best_inner_contact_height = intersection.z_low;
+            best_inner_patch_atom_index = idx;
         }
 
         any_intersection = true;
@@ -1297,8 +1299,10 @@ Stage4NodeFirstContact detectRawFirstContactAtNode(double x,
         return result;
     }
 
-    result.z_outer_raw = best_outer;
-    result.z_inner_raw = best_inner;
+    result.z_outer_raw = best_outer_contact_height;
+    result.z_inner_raw = best_inner_contact_height;
+    result.outer_patch_atom_index = best_outer_patch_atom_index;
+    result.inner_patch_atom_index = best_inner_patch_atom_index;
     result.valid = std::isfinite(result.z_outer_raw) && std::isfinite(result.z_inner_raw) &&
                    (result.z_inner_raw <= result.z_outer_raw + tie_tolerance);
     return result;
@@ -1616,7 +1620,8 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     validateStage4Config(config);
 
     result.messages.push_back("Geometry Stage 4");
-    result.messages.push_back("Geometry analysis: starting Stage 4 raw outer/inner sheet detection.");
+    result.messages.push_back(
+        "Geometry analysis: starting Stage 4 raw outer/inner ray-sphere first-contact envelope detection.");
     result.messages.push_back("Geometry Stage 4 grid spacing: " + std::to_string(config.grid_spacing));
     result.messages.push_back("Geometry Stage 4 cylinder radius: " + std::to_string(config.cylinder_radius));
     if (config.debug) {
