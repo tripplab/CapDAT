@@ -3226,6 +3226,45 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
                                              : 0.0;
     }
 
+    if (config.stage7_export_s7s6_deltas) {
+        result.outer_delta_csv_path = config.output_prefix + "_s7s6_outer_delta.csv";
+        result.inner_delta_csv_path = config.output_prefix + "_s7s6_inner_delta.csv";
+        result.thickness_delta_csv_path = config.output_prefix + "_s7s6_thickness_delta.csv";
+        if (!writeStage7DeltaCsv(result.grid,
+                                 stage5_result.inside_disk_mask,
+                                 stage5_result,
+                                 stage6_result,
+                                 result,
+                                 Stage7DeltaCsvKind::outer,
+                                 result.outer_delta_csv_path,
+                                 result.max_abs_outer_delta,
+                                 result.mean_abs_outer_delta)) {
+            throw std::runtime_error("Failed to write Stage 7-vs-Stage 6 outer delta CSV");
+        }
+        if (!writeStage7DeltaCsv(result.grid,
+                                 stage5_result.inside_disk_mask,
+                                 stage5_result,
+                                 stage6_result,
+                                 result,
+                                 Stage7DeltaCsvKind::inner,
+                                 result.inner_delta_csv_path,
+                                 result.max_abs_inner_delta,
+                                 result.mean_abs_inner_delta)) {
+            throw std::runtime_error("Failed to write Stage 7-vs-Stage 6 inner delta CSV");
+        }
+        if (!writeStage7DeltaCsv(result.grid,
+                                 stage5_result.inside_disk_mask,
+                                 stage5_result,
+                                 stage6_result,
+                                 result,
+                                 Stage7DeltaCsvKind::thickness,
+                                 result.thickness_delta_csv_path,
+                                 result.max_abs_thickness_delta,
+                                 result.mean_abs_thickness_delta)) {
+            throw std::runtime_error("Failed to write Stage 7-vs-Stage 6 thickness delta CSV");
+        }
+    }
+
     if (config.debug) {
         result.outer_smooth_csv_path = config.output_prefix + "_outer_smooth.csv";
         result.inner_smooth_csv_path = config.output_prefix + "_inner_smooth.csv";
@@ -3233,11 +3272,6 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
         result.metric_domain_mask_csv_path = config.output_prefix + "_smooth_metric_domain_mask.csv";
         result.smooth_non_crossing_adjustment_mask_csv_path =
             config.output_prefix + "_smooth_non_crossing_adjustment_mask.csv";
-        if (config.stage7_export_s7s6_deltas) {
-            result.outer_delta_csv_path = config.output_prefix + "_s7s6_outer_delta.csv";
-            result.inner_delta_csv_path = config.output_prefix + "_s7s6_inner_delta.csv";
-            result.thickness_delta_csv_path = config.output_prefix + "_s7s6_thickness_delta.csv";
-        }
         result.summary_csv_path = config.output_prefix + "_stage7_summary.csv";
         if (!writeStage7FieldCsv(result, result.outer_smooth_csv_path, "z_outer_smooth", result.z_outer_smooth)) {
             throw std::runtime_error("Failed to write Stage 7 outer smooth CSV");
@@ -3257,41 +3291,6 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
                                 "smooth_non_crossing_adjusted",
                                 result.smooth_non_crossing_adjustment_mask)) {
             throw std::runtime_error("Failed to write Stage 7 non-crossing-adjustment mask CSV");
-        }
-        if (config.stage7_export_s7s6_deltas) {
-            if (!writeStage7DeltaCsv(result.grid,
-                                     stage5_result.inside_disk_mask,
-                                     stage5_result,
-                                     stage6_result,
-                                     result,
-                                     Stage7DeltaCsvKind::outer,
-                                     result.outer_delta_csv_path,
-                                     result.max_abs_outer_delta,
-                                     result.mean_abs_outer_delta)) {
-                throw std::runtime_error("Failed to write Stage 7-vs-Stage 6 outer delta CSV");
-            }
-            if (!writeStage7DeltaCsv(result.grid,
-                                     stage5_result.inside_disk_mask,
-                                     stage5_result,
-                                     stage6_result,
-                                     result,
-                                     Stage7DeltaCsvKind::inner,
-                                     result.inner_delta_csv_path,
-                                     result.max_abs_inner_delta,
-                                     result.mean_abs_inner_delta)) {
-                throw std::runtime_error("Failed to write Stage 7-vs-Stage 6 inner delta CSV");
-            }
-            if (!writeStage7DeltaCsv(result.grid,
-                                     stage5_result.inside_disk_mask,
-                                     stage5_result,
-                                     stage6_result,
-                                     result,
-                                     Stage7DeltaCsvKind::thickness,
-                                     result.thickness_delta_csv_path,
-                                     result.max_abs_thickness_delta,
-                                     result.mean_abs_thickness_delta)) {
-                throw std::runtime_error("Failed to write Stage 7-vs-Stage 6 thickness delta CSV");
-            }
         }
         if (!writeStage7SummaryCsv(result, config)) {
             throw std::runtime_error("Failed to write Stage 7 summary CSV");
@@ -3404,6 +3403,9 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
         result.messages.push_back("Geometry Stage 7 max abs inner delta: " + formatScientific(result.max_abs_inner_delta));
         result.messages.push_back("Geometry Stage 7 max abs thickness delta: " +
                                   formatScientific(result.max_abs_thickness_delta));
+        result.messages.push_back("Geometry Stage 7-vs-Stage 6 outer delta CSV: " + result.outer_delta_csv_path);
+        result.messages.push_back("Geometry Stage 7-vs-Stage 6 inner delta CSV: " + result.inner_delta_csv_path);
+        result.messages.push_back("Geometry Stage 7-vs-Stage 6 thickness delta CSV: " + result.thickness_delta_csv_path);
     }
     if (config.debug) {
         result.messages.push_back("Geometry Stage 7 outer smooth CSV: " + result.outer_smooth_csv_path);
@@ -3412,12 +3414,6 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
         result.messages.push_back("Geometry Stage 7 metric-domain mask CSV: " + result.metric_domain_mask_csv_path);
         result.messages.push_back("Geometry Stage 7 non-crossing-adjustment mask CSV: " +
                                   result.smooth_non_crossing_adjustment_mask_csv_path);
-        if (config.stage7_export_s7s6_deltas) {
-            result.messages.push_back("Geometry Stage 7-vs-Stage 6 outer delta CSV: " + result.outer_delta_csv_path);
-            result.messages.push_back("Geometry Stage 7-vs-Stage 6 inner delta CSV: " + result.inner_delta_csv_path);
-            result.messages.push_back("Geometry Stage 7-vs-Stage 6 thickness delta CSV: " +
-                                      result.thickness_delta_csv_path);
-        }
         result.messages.push_back("Geometry Stage 7 summary CSV: " + result.summary_csv_path);
     }
     if (config.stage7_export_meshes) {
