@@ -3177,7 +3177,10 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
 
     result.messages.push_back("Geometry Stage 7 method: " + result.stage7_method_label);
     result.messages.push_back("Geometry Stage 7 smoothing weight: " + std::to_string(config.stage7_smoothing_weight));
-    result.messages.push_back("Geometry Stage 7 max iterations: " + std::to_string(config.stage7_max_iterations));
+    result.messages.push_back("Geometry Stage 7 smoothing max iterations: " +
+                              std::to_string(config.stage7_max_iterations));
+    result.messages.push_back("Geometry Stage 7 thin-plate solver max iterations: " +
+                              std::to_string(config.stage7_solver_max_iterations));
     result.messages.push_back("Geometry Stage 7 convergence tolerance: " +
                               std::to_string(config.stage7_convergence_tolerance));
     result.messages.push_back("Geometry Stage 7 preserve seed values: " +
@@ -3194,10 +3197,15 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     result.messages.push_back("Geometry Stage 7 enforce non-crossing: " +
                               std::to_string(config.stage7_enforce_non_crossing ? 1 : 0));
     result.messages.push_back("Geometry Stage 7 minimum separation: " + std::to_string(config.stage7_min_separation));
-    result.messages.push_back("Geometry Stage 7 outer iterations used: " + std::to_string(result.outer_iterations_used));
-    result.messages.push_back("Geometry Stage 7 inner iterations used: " + std::to_string(result.inner_iterations_used));
-    result.messages.push_back("Geometry Stage 7 outer final update: " + std::to_string(result.outer_final_max_update));
-    result.messages.push_back("Geometry Stage 7 inner final update: " + std::to_string(result.inner_final_max_update));
+    const std::string stage7_iteration_counter_label =
+        config.stage7_method == FoldPatchAnalysisConfig::Stage7Method::smooth ? "smoothing iterations used"
+                                                                               : "solver iterations used";
+    result.messages.push_back("Geometry Stage 7 outer " + stage7_iteration_counter_label + ": " +
+                              std::to_string(result.outer_iterations_used));
+    result.messages.push_back("Geometry Stage 7 inner " + stage7_iteration_counter_label + ": " +
+                              std::to_string(result.inner_iterations_used));
+    result.messages.push_back("Geometry Stage 7 outer final update: " + formatScientific(result.outer_final_max_update));
+    result.messages.push_back("Geometry Stage 7 inner final update: " + formatScientific(result.inner_final_max_update));
     result.messages.push_back("Geometry Stage 7 outer fit residual: " + formatScientific(result.outer_fit_final_residual));
     result.messages.push_back("Geometry Stage 7 inner fit residual: " + formatScientific(result.inner_fit_final_residual));
     result.messages.push_back("Geometry Stage 7 smooth valid node count: " + std::to_string(result.smooth_valid_node_count));
