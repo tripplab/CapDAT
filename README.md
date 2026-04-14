@@ -5,83 +5,270 @@ by trippm@tripplab.com [04/2026]
 
 geometry branch
 
-**CapDAT (Capsid Data Analysis Toolkit)** is a C++ command-line software project for the structural analysis of viral capsids from atomic coordinate files in PDB-like format. The current **v01 foundation release** focuses on building a reliable and extensible structural core rather than advanced scientific analysis. Its main purpose is to read an input structure file, parse atomic coordinate records, filter the content so that only capsid protein atoms are retained internally, reconstruct the molecular hierarchy, and report summary statistics about the parsed assembly.
+**CapDAT (Capsid Data Analysis Toolkit)** is a C++17 command-line project for parsing, filtering, organizing, reorienting, exporting, and geometrically analyzing large icosahedral capsid structures from fixed-column PDB-like coordinate files, including VIPERdb-style `.vdb` inputs. The current `geometry` branch includes the structural core, a centralized icosahedral symmetry module, an in-place reorientation workflow, canonical final export, and a staged fold-centered geometry-analysis pipeline under active development.
 
-At this stage, CapDAT implements a lightweight object-oriented architecture centered on the classes **Atom**, **Residue**, **Chain**, **Capsid**, **PdbParser**, **Logger**, and **Timer**. The internal hierarchy is reconstructed as **atoms grouped into residues, residues grouped into internally reconstructed subunits, and subunits grouped into the full capsid object**. A key design decision is that the original one-letter PDB chain label is preserved only as metadata and is **not** treated as a globally unique identifier, since large capsid structures may reuse chain labels across many independent proteins. This makes the software more suitable as a long-term base for capsid-specific structural analysis.
+CapDAT is designed around capsid-specific realities that standard PDB tooling handles poorly. In particular, large capsids may contain hundreds of protein subunits, which means the original one-letter chain identifier cannot be treated as a globally unique molecular key. CapDAT therefore preserves the raw chain label only as metadata while reconstructing its own internal hierarchy as **Atom -> Residue -> internal subunit (`Chain`) -> Capsid**. This makes the internal model suitable for large quaternary assemblies and for downstream geometry workflows that must remain deterministic and traceable.
 
-CapDAT now also includes a post-parse geometry/symmetry foundation module (`geometry_symmetry`) that centralizes canonical icosahedral fold definitions, reusable angle and distance utilities, deterministic direction-alignment rotation math, and canonical IAU boundary helpers. This module is intentionally separate from `PdbParser` and the domain data holders so parsing remains focused on reconstruction while geometric analysis logic stays reusable and explicit.
+At parse time, CapDAT reads coordinate records, extracts relevant structural fields, and filters the input so that only the atoms belonging to the capsid protein are retained internally by default. Non-protein entities such as nucleic acids, waters, ions, ligands, and other unrelated components are excluded from the analysis basis unless explicitly allowed by parser/CLI policy. The program also tracks malformed records, skipped records, alternate locations, accepted hetero atoms, and reconstructed subunits, and reports an extended structural summary after parsing.
 
-The program currently provides a command-line interface with support for input-file selection, optional log-file output, verbosity control, optional inclusion of `HETATM` records, optional final export via `--export-final <file>`, and optional post-parse in-place reorientation workflows via `--reorient` plus either `--align-fold` or `--align-vector`. Reorientation may target axis `x`, `y`, or `z` through `--align-axis`, with `z` as the default when omitted. During execution, it produces informative runtime messages and a final terminal summary that includes the input file name, total lines read, coordinate records detected, accepted atoms, accepted residues, internally reconstructed subunits, alternate-location counts, skipped or malformed records, and total runtime. Logging and timing are already integrated from the first version so runs remain traceable and easy to debug.
+The `geometry` branch also includes a dedicated `geometry_symmetry` module that centralizes canonical icosahedral fold definitions, deterministic fold lookup, reusable angle/distance utilities, and direction-alignment rotation math. On top of that, CapDAT provides an opt-in post-parse in-place reorientation workflow and a fold-centered geometry-analysis workflow driven from the CLI. The geometry-analysis path currently exposes a multi-stage pipeline with configuration for fold selection, cylindrical patch extraction, vdW-radius normalization, grid generation, surface reconstruction support, boundary handling, mesh export, and smoothing / thin-plate-style fitting controls.
 
-## Reorientation and final export semantics (v01)
+The executable currently supports:
+- input-file selection and standard help/version output,
+- optional log-file output and verbosity control,
+- optional inclusion of `HETATM` records,
+- optional final export of the current accepted coordinates through `--export-final`,
+- optional post-parse reorientation through `--reorient`,
+- optional geometry-analysis execution through `--geometry-analysis`,
+- geometry-stage tuning parameters for patch selection, surface reconstruction, and smoothing.
 
-- Reorientation is opt-in and requires `--reorient` with exactly one source:
-  - `--align-fold <name>` for canonical folds (`2_0`, `2_1`, `3_0`, `3_1`, `5_0`), or
-  - `--align-vector <x,y,z>` for a custom origin-based direction vector.
-- Target axis selection accepts only `--align-axis x|y|z` and defaults to `z`.
-- Reorientation performs a pure rotation (no translation) and modifies current in-memory `Capsid` atom coordinates in place.
-- After reorientation, the `Capsid` orientation/frame state marks the structure as being in a derived frame rather than the original parsed input frame.
-- `export_capsid` writes the current accepted in-memory coordinates. If reorientation occurred, the export contains transformed coordinates and remarks documenting the applied alignment source and target axis.
+The current code base on this branch builds:
+- the main executable `capsid_analyzer`,
+- structural summary tests,
+- geometry/symmetry tests,
+- reorientation workflow tests,
+- geometry-analysis tests,
+- export tests,
+- CLI integration tests registered through CTest.
 
-The main engineering goal of CapDAT v01 is to establish a trustworthy, maintainable, and performance-aware parsing foundation that can support future analytical modules. Planned later extensions may include geometric descriptors, inter-subunit distance analysis, symmetry-related grouping, shell thickness and radius distributions, local curvature and anisotropy metrics, batch processing, and OpenMP-enabled acceleration. In that sense, the present release is intentionally conservative: it prioritizes **correct parsing, clear hierarchy reconstruction, modular software organization, and future extensibility** over premature scientific complexity.
+## Tech Requirements
 
-# Requirements Description
+CapDAT currently requires the following development stack:
 
-CapDAT v01 is intended as the foundation release of a C++ command-line software project for the structural analysis of viral capsids from atomic coordinate files in standard fixed-column PDB-like format. The software must be able to read a single input structure file from the command line, identify supported coordinate records, and parse the atomic information needed to reconstruct the molecular hierarchy of the assembly. At minimum, the program must support `ATOM` records and may optionally support `HETATM` records under explicit configuration. It must extract core structural fields such as atom identifiers, residue identifiers, original chain labels, Cartesian coordinates, occupancy, temperature factor, element, and charge when available.
+- **C++ standard:** C++17
+- **Build system:** CMake (minimum 3.16)
+- **Recommended generator:** Ninja
+- **Test framework:** CTest through CMake test registration
+- **Supported toolchain:** a modern C++ compiler compatible with C++17
+- **Optional environment management:** micromamba
 
-A central functional requirement is that the software must internally reconstruct the hierarchy as **Atom -> Residue -> internal subunit (`Chain`) -> Capsid**. This hierarchy is essential because the original one-letter PDB chain identifier cannot be assumed to be globally unique in large capsid assemblies. The program must therefore preserve the raw chain label as metadata while assigning its own internal subunit identifiers for grouping and reporting. Residues must be grouped consistently within each reconstructed subunit, and the complete assembly must be represented through a top-level capsid object that owns the full parsed structure.
+Current build options exposed by the project include:
 
-The parser must be robust enough to process large structures while handling malformed or unsupported content safely. It must distinguish fatal errors from recoverable warnings, fail clearly when the input file is missing, unreadable, empty, or contains no valid coordinate records, and avoid silent failure. The software must also support the internal filtering of non-capsid components, so that atoms belonging to molecules such as DNA, RNA, water, ions, ligands, or other non-protein entities can be ignored during v01 parsing under parser or CLI policy. Basic support for alternate locations and blank chain identifiers must also be present without causing crashes.
+- `CAPDAT_BUILD_TESTS=ON|OFF` to enable or disable test targets
+- `CAPDAT_ENABLE_WARNINGS=ON|OFF` to enable compiler warnings
+- `CMAKE_BUILD_TYPE=Debug|Release|...` for standard CMake build-type selection
 
-CapDAT must provide a usable and predictable command-line interface from the first version. At minimum, the executable must accept an input file path, provide help and version messages, and optionally support a log-file path, increased terminal verbosity, quiet mode, and inclusion of `HETATM` records. Runtime messaging is a required feature: the program must report key execution stages such as startup, input-file opening, parsing progress, warning conditions, completion, and total runtime. Logging support must be available so that runs can be traced later, with message levels such as INFO, WARNING, ERROR, and DEBUG.
+The current project configuration explicitly sets:
+- `CMAKE_CXX_STANDARD 17`
+- `CMAKE_CXX_STANDARD_REQUIRED ON`
+- `CMAKE_CXX_EXTENSIONS OFF`
 
-The output requirements for v01 are intentionally modest but precise. The program must print a final terminal summary that includes, at minimum, the input file name, total lines read, total coordinate records detected, accepted atoms, accepted residues, internally reconstructed subunits, accepted hetero atoms when enabled, alternate-location counts when relevant, skipped or malformed records, and total runtime. These outputs are required both for user transparency and for basic validation of parser correctness. Internally, the software must remain modular, lightweight, and extensible so that later analytical features such as geometric measurements, symmetry analysis, anisotropy metrics, and high-throughput processing can be added without redesigning the structural core.
+## How to Clone CapDAT from GitHub
 
-# How to Clone CapDAT from GitHub
+To clone the **`geometry` branch specifically**, use one of the following commands.
 
-To obtain the CapDAT source code from GitHub, open a terminal and move to the directory where you want the project folder to be created. Then run `git clone git@github.com:tripplab/CapDAT.git` if you use SSH authentication with GitHub, or `git clone https://github.com/tripplab/CapDAT.git` if you prefer HTTPS. This command will create a local directory named `CapDAT` containing the full repository history and all project files. After the clone finishes, enter the project directory with `cd CapDAT`. You can verify that the repository was cloned correctly by running `git status`, which should report that you are on branch `main` with a clean working tree. If you want to confirm the configured remote, run `git remote -v`, which should show the GitHub repository URL for both fetch and push operations.
+For **SSH**:
 
-# How to Define an Environment for CapDAT
+`git clone --branch geometry --single-branch git@github.com:tripplab/CapDAT.git`
 
-To define a reproducible environment for CapDAT, create a dedicated **micromamba** environment containing the minimal tools needed to configure, compile, and test the software. A practical choice is to create an environment named `capdat` with CMake, a C++ compiler toolchain, `make`, and `ninja`. This can be done with the command `micromamba create -n capdat -c conda-forge python=3.11 cmake cxx-compiler make ninja -y`. After creation, activate the environment with `micromamba activate capdat`. If shell activation is not yet configured, first initialize the shell hook with `eval "$(micromamba shell hook --shell bash)"` and then activate the environment. Once activated, verify that the required tools are available by checking `cmake --version`, `c++ --version`, `make --version`, and `ninja --version`. Using a dedicated environment is recommended because it isolates the CapDAT toolchain from system-level software, improves reproducibility across nodes and machines, and ensures that the same build tools are used consistently during development and testing.
+For **HTTPS**:
 
-# How to Build CapDAT
+`git clone --branch geometry --single-branch https://github.com/tripplab/CapDAT.git`
 
-To build CapDAT, first make sure your environment is active or that the required build tools are available, especially `cmake` and a C++ compiler. From the root directory of the cloned repository, configure the project with CMake by running `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug` if you want to use the Ninja backend, or `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug` if you prefer the default Makefile-based generator. This step creates the `build/` directory and generates all necessary build files. Once configuration completes successfully, compile the program with `cmake --build build`. If the build succeeds, the executable `capsid_analyzer` will be created inside the `build/` directory. You can confirm that the build worked by running `./build/capsid_analyzer --help`, which should display the command-line usage message for the program.
+Then enter the repository:
 
-# How to Test the CapDAT Build
+`cd CapDAT`
 
-To test that the CapDAT build completed successfully, first confirm that the executable exists in the `build/` directory after compilation. A simple functional check is to run `./build/capsid_analyzer --help`, which should print the program help message, and `./build/capsid_analyzer --version`, which should report the current software version. After these interface checks, run the program on a sample structure file included in the repository with `./build/capsid_analyzer -i data/1cwp_full.vdb --verbose --log run.log`. A successful test should produce runtime log messages, generate a final summary in the terminal, and optionally write a log file if requested. The summary should include parsed atom, residue, and internal subunit counts, together with skipped-record statistics and total runtime. If these steps complete without errors, the build can be considered functionally validated at the v01 foundation level.
+Verify that you are really on the correct branch:
 
-# Example Output from the CapDAT Build Test
+`git branch --show-current`
 
-When the build was tested with the command `./build/capsid_analyzer -i data/1cwp_full.vdb --verbose --log run.log`, the program produced the following output:
+The command should print:
 
-`[2026-04-07 22:04:20] [INFO] Starting CapDAT`  
-`[2026-04-07 22:04:20] [INFO] Input file: data/1cwp_full.vdb`  
-`[2026-04-07 22:04:20] [INFO] Log file: run.log`  
-`[2026-04-07 22:04:20] [INFO] Include HETATM: false`  
-`[2026-04-07 22:04:20] [INFO] Protein only: true`  
-`[2026-04-07 22:04:20] [INFO] Opening input file: data/1cwp_full.vdb`  
-`[2026-04-07 22:04:21] [INFO] Parsing completed successfully`  
-`[2026-04-07 22:04:21] [INFO] Accepted atoms: 214440`  
-`[2026-04-07 22:04:21] [INFO] Accepted residues: 28620`  
-`[2026-04-07 22:04:21] [INFO] Internal subunits: 180`  
+`geometry`
 
-`=== CapDAT Summary ===`  
-`Input file:              data/1cwp_full.vdb`  
-`Total lines read:        227592`  
-`Coordinate records seen: 227040`  
-`Accepted atoms:          214440`  
-`Accepted residues:       28620`  
-`Internal subunits:       180`  
-`Accepted HETATM:         0`  
-`Alternate locations:     0`  
-`Malformed records:       0`  
-`Skipped records:         12600`  
-`Runtime (s):             0.384428`  
-`[2026-04-07 22:04:21] [INFO] Run completed successfully`
+If you already cloned the repository previously and only need to switch to the branch, use:
 
-This output indicates that the CapDAT v01 build completed and executed correctly on the sample input file, successfully parsing the structure, reconstructing the internal hierarchy, producing summary statistics, and completing the run without fatal errors.
+`git fetch origin`
+`git switch geometry`
 
+or, if the branch does not yet exist locally:
+
+`git fetch origin geometry`
+`git switch --track origin/geometry`
+
+## How to Define an Environment for CapDAT
+
+If your machine already has a working C++17 compiler, CMake, and Ninja, you do **not** need a dedicated environment. If you want a clean and reproducible toolchain, define one explicitly.
+
+A practical micromamba environment is:
+
+`micromamba create -n capdat -c conda-forge python=3.11 cmake ninja cxx-compiler -y`
+
+Activate it with:
+
+`micromamba activate capdat`
+
+If micromamba shell integration is not initialized yet, run:
+
+`eval "$(micromamba shell hook --shell bash)"`
+`micromamba activate capdat`
+
+Then verify the toolchain:
+
+`cmake --version`
+`ninja --version`
+`c++ --version`
+
+The environment is sufficient for configuring, building, and testing the current `geometry` branch.
+
+## How to Build CapDAT
+
+From the repository root, configure the project in **Debug** mode and explicitly build the test targets:
+
+`cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCAPDAT_BUILD_TESTS=ON`
+
+Then compile:
+
+`cmake --build build`
+
+This should generate the main executable:
+
+`build/capsid_analyzer`
+
+It should also build the current test executables registered by the project, including the structural-summary, geometry-symmetry, reorientation-workflow, geometry-analysis, and export test binaries.
+
+If you want to confirm the configured project summary immediately after configuration, look for output of the form:
+
+- `Configuring CapDAT v0.1.0`
+- `Build type: Debug`
+- `C++ standard: 17`
+- `Build tests: ON`
+- `Warnings enabled: ON`
+
+To confirm that the executable was built correctly, run:
+
+`./build/capsid_analyzer --help`
+
+## How to Test the CapDAT Build
+
+Once the build completes, run the full registered test suite with CTest:
+
+`ctest --test-dir build --output-on-failure`
+
+This is the correct test entry point for the current branch because the project registers both unit-style test binaries and CLI integration tests directly in CMake.
+
+A successful test pass should include coverage for:
+- `capdat_structural_summary_tests`
+- `capdat_geometry_symmetry_tests`
+- `capdat_reorientation_workflow_tests`
+- `capdat_geometry_analysis_tests`
+- `capdat_export_capsid_tests`
+- CLI export/reorientation checks such as:
+  - `capdat_cli_export_only`
+  - `capdat_cli_fold_to_z_export`
+  - `capdat_cli_fold_to_x_export`
+  - `capdat_cli_vector_to_y_export`
+  - `capdat_cli_invalid_combo`
+
+You should also do a direct executable sanity check:
+
+`./build/capsid_analyzer --version`
+`./build/capsid_analyzer --help`
+
+And a real sample-data run, for example:
+
+`./build/capsid_analyzer --input data/1cwp_full.vdb --verbose --log run.log`
+
+For a geometry workflow sanity check, for example:
+
+`./build/capsid_analyzer --input data/1cwp_full.vdb --geometry-analysis --debug --geometry_out_prefix geometry`
+
+These commands validate different parts of the current development branch:
+- basic CLI wiring,
+- parser execution,
+- structural summary reporting,
+- optional logging,
+- geometry pipeline entry,
+- debug-artifact generation path.
+
+## Example Output from the CapDAT Build Test
+
+A **successful configuration** should produce output similar to:
+
+`-- Configuring CapDAT v0.1.0`
+`-- Build type: Debug`
+`-- C++ standard: 17`
+`-- Build tests: ON`
+`-- Warnings enabled: ON`
+`-- Configuring done`
+`-- Generating done`
+`-- Build files have been written to: /path/to/CapDAT/build`
+
+A **successful build** should end with output similar to:
+
+`[... ] Linking CXX executable capsid_analyzer`
+`[... ] Linking CXX executable capdat_structural_summary_tests`
+`[... ] Linking CXX executable capdat_geometry_symmetry_tests`
+`[... ] Linking CXX executable capdat_reorientation_workflow_tests`
+`[... ] Linking CXX executable capdat_geometry_analysis_tests`
+`[... ] Linking CXX executable capdat_export_capsid_tests`
+
+A **successful CTest run** should look similar to:
+
+`Internal ctest changing into directory: /path/to/CapDAT/build`
+`Test project /path/to/CapDAT/build`
+`    Start 1: capdat_structural_summary_tests`
+`1/10 Test #1: capdat_structural_summary_tests ...........   Passed`
+`    Start 2: capdat_geometry_symmetry_tests`
+`2/10 Test #2: capdat_geometry_symmetry_tests ............   Passed`
+`    Start 3: capdat_reorientation_workflow_tests`
+`3/10 Test #3: capdat_reorientation_workflow_tests .......   Passed`
+`    Start 4: capdat_geometry_analysis_tests`
+`4/10 Test #4: capdat_geometry_analysis_tests ............   Passed`
+`    Start 5: capdat_export_capsid_tests`
+`5/10 Test #5: capdat_export_capsid_tests ................   Passed`
+`    Start 6: capdat_cli_export_only`
+`6/10 Test #6: capdat_cli_export_only ....................   Passed`
+`    Start 7: capdat_cli_fold_to_z_export`
+`7/10 Test #7: capdat_cli_fold_to_z_export ...............   Passed`
+`    Start 8: capdat_cli_fold_to_x_export`
+`8/10 Test #8: capdat_cli_fold_to_x_export ...............   Passed`
+`    Start 9: capdat_cli_vector_to_y_export`
+`9/10 Test #9: capdat_cli_vector_to_y_export .............   Passed`
+`    Start 10: capdat_cli_invalid_combo`
+`10/10 Test #10: capdat_cli_invalid_combo ................ Passed`
+`100% tests passed, 0 tests failed out of 10`
+
+A **successful sample parser run** should look similar to:
+
+`[YYYY-MM-DD HH:MM:SS] [INFO] Starting CapDAT`
+`[YYYY-MM-DD HH:MM:SS] [INFO] Opening input file: data/1cwp_full.vdb`
+`[YYYY-MM-DD HH:MM:SS] [INFO] Parsing completed successfully`
+`[YYYY-MM-DD HH:MM:SS] [INFO] Starting extended structural summary geometry`
+`Input file:              data/1cwp_full.vdb`
+`Total lines read:        ...`
+`Coordinate records seen: ...`
+`Accepted atoms:          ...`
+`Accepted residues:       ...`
+`Internal subunits:       ...`
+`Accepted HETATM:         ...`
+`Alternate locations:     ...`
+`Malformed records:       ...`
+`Skipped records:         ...`
+`Geometric center (accepted atoms): (...)`
+`Coordinate bounds:`
+`  x: [...]`
+`  y: [...]`
+`  z: [...]`
+`Axis spans: x=... y=... z=...`
+`Runtime (s):             ...`
+`[YYYY-MM-DD HH:MM:SS] [INFO] Run completed successfully`
+
+## Notes for This Branch
+
+This README intentionally reflects the **current development state of the `geometry` branch**, not a minimal parser-only foundation. That means:
+- geometry-analysis options are part of the documented CLI surface,
+- CTest is part of the expected development workflow,
+- the build instructions explicitly enable tests and Debug mode,
+- branch-specific cloning instructions point directly to `geometry`,
+- the old dedicated section `Reorientation and final export semantics (v01)` is intentionally removed.
+
+The authoritative references for future README updates on this branch should be:
+- `CMakeLists.txt` for build/test targets and options,
+- `src/main.cpp` for the real CLI surface,
+- the geometry-analysis implementation and tests for stage-level behavior as the pipeline evolves.
+
+
+For more details look into the `docs` directory.
 
