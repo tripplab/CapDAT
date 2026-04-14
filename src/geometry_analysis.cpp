@@ -80,6 +80,28 @@ std::string meshFormatLabel(FoldPatchAnalysisConfig::MeshExportFormat format) {
     return format == FoldPatchAnalysisConfig::MeshExportFormat::stl ? "stl" : "obj";
 }
 
+const char* stage7MethodLabel(FoldPatchAnalysisConfig::Stage7Method method) {
+    switch (method) {
+    case FoldPatchAnalysisConfig::Stage7Method::smooth:
+        return "smooth";
+    case FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit:
+        return "thin_plate_grid_fit";
+    }
+    return "unknown";
+}
+
+const char* stage7BoundaryConditionModeLabel(FoldPatchAnalysisConfig::Stage7BoundaryConditionMode mode) {
+    switch (mode) {
+    case FoldPatchAnalysisConfig::Stage7BoundaryConditionMode::free:
+        return "free";
+    case FoldPatchAnalysisConfig::Stage7BoundaryConditionMode::fixed_to_stage6:
+        return "fixed_to_stage6";
+    case FoldPatchAnalysisConfig::Stage7BoundaryConditionMode::soft_to_stage6:
+        return "soft_to_stage6";
+    }
+    return "unknown";
+}
+
 bool writeGeometryRunSummaryJson(const FoldPatchAnalysisConfig& config,
                                  const ParserConfig& parser_config,
                                  const std::string& path) {
@@ -117,10 +139,20 @@ bool writeGeometryRunSummaryJson(const FoldPatchAnalysisConfig& config,
     out << "  },\n";
     out << "  \"stage7\": {\n";
     out << "    \"enabled\": " << (config.stage7_enabled ? "true" : "false") << ",\n";
+    out << "    \"method\": \"" << stage7MethodLabel(config.stage7_method) << "\",\n";
     out << "    \"smoothing_weight\": " << config.stage7_smoothing_weight << ",\n";
     out << "    \"max_iterations\": " << config.stage7_max_iterations << ",\n";
     out << "    \"convergence_tolerance\": " << config.stage7_convergence_tolerance << ",\n";
     out << "    \"preserve_seed_values\": " << (config.stage7_preserve_seed_values ? "true" : "false") << ",\n";
+    out << "    \"lambda\": " << config.stage7_lambda << ",\n";
+    out << "    \"data_weight_seed\": " << config.stage7_data_weight_seed << ",\n";
+    out << "    \"data_weight_interp\": " << config.stage7_data_weight_interp << ",\n";
+    out << "    \"use_reliable_core_only_for_fit\": "
+        << (config.stage7_use_reliable_core_only_for_fit ? "true" : "false") << ",\n";
+    out << "    \"boundary_condition_mode\": \"" << stage7BoundaryConditionModeLabel(config.stage7_boundary_condition_mode)
+        << "\",\n";
+    out << "    \"solver_max_iterations\": " << config.stage7_solver_max_iterations << ",\n";
+    out << "    \"solver_tolerance\": " << config.stage7_solver_tolerance << ",\n";
     out << "    \"enforce_non_crossing\": " << (config.stage7_enforce_non_crossing ? "true" : "false") << ",\n";
     out << "    \"min_separation\": " << config.stage7_min_separation << ",\n";
     out << "    \"export_meshes\": " << (config.stage7_export_meshes ? "true" : "false") << "\n";
@@ -415,6 +447,16 @@ struct Stage7FieldSmoothResult {
     double final_max_update = 0.0;
 };
 
+struct Stage7FieldFitResult {
+    std::vector<double> values;
+    std::size_t iterations_used = 0;
+    double final_update = 0.0;
+    double final_residual = 0.0;
+    double max_abs_residual = 0.0;
+    double bending_energy = 0.0;
+    std::size_t active_node_count = 0;
+};
+
 std::vector<std::size_t> stage6FourNeighborIndices(std::size_t i, std::size_t j, std::size_t nx, std::size_t ny) {
     std::vector<std::size_t> neighbors;
     neighbors.reserve(4);
@@ -615,11 +657,11 @@ bool writeStage6SummaryCsv(const GeometryStage6SurfaceReconstructionResult& resu
     return out.good();
 }
 
-Stage7FieldSmoothResult runStage7FieldSmoothing(const Stage4GridDescriptor& grid,
-                                                const std::vector<double>& reconstructed_values,
-                                                const std::vector<uint8_t>& reconstructed_mask,
-                                                const std::vector<uint8_t>& paired_seed_mask,
-                                                const FoldPatchAnalysisConfig& config) {
+Stage7FieldSmoothResult runStage7FieldSmoothingLegacy(const Stage4GridDescriptor& grid,
+                                                      const std::vector<double>& reconstructed_values,
+                                                      const std::vector<uint8_t>& reconstructed_mask,
+                                                      const std::vector<uint8_t>& paired_seed_mask,
+                                                      const FoldPatchAnalysisConfig& config) {
     Stage7FieldSmoothResult smooth_result;
     smooth_result.values = reconstructed_values;
     const double alpha = config.stage7_smoothing_weight / (1.0 + config.stage7_smoothing_weight);
@@ -680,6 +722,275 @@ Stage7FieldSmoothResult runStage7FieldSmoothing(const Stage4GridDescriptor& grid
     return smooth_result;
 }
 
+std::vector<uint8_t> buildStage7FitDomainMask(const GeometryStage6SurfaceReconstructionResult& stage6_result,
+                                              const GeometryStage5SurfacePrepResult& stage5_result,
+                                              const FoldPatchAnalysisConfig& config) {
+    std::vector<uint8_t> fit_domain_mask(stage6_result.node_count, 0);
+    for (std::size_t idx = 0; idx < stage6_result.node_count; ++idx) {
+        if (stage6_result.reconstructed_mask[idx] == 0 || !std::isfinite(stage6_result.z_outer_reconstructed[idx]) ||
+            !std::isfinite(stage6_result.z_inner_reconstructed[idx])) {
+            continue;
+        }
+        if (config.stage7_use_reliable_core_only_for_fit && stage5_result.reliable_core_mask[idx] == 0) {
+            continue;
+        }
+        fit_domain_mask[idx] = 1;
+    }
+    return fit_domain_mask;
+}
+
+std::vector<double> buildStage7FidelityWeights(const std::vector<uint8_t>& fit_domain_mask,
+                                               const std::vector<uint8_t>& paired_seed_mask,
+                                               const FoldPatchAnalysisConfig& config,
+                                               std::size_t& seed_like_count,
+                                               std::size_t& interp_like_count) {
+    std::vector<double> weights(fit_domain_mask.size(), 0.0);
+    seed_like_count = 0;
+    interp_like_count = 0;
+    for (std::size_t idx = 0; idx < fit_domain_mask.size(); ++idx) {
+        if (fit_domain_mask[idx] == 0) {
+            continue;
+        }
+        if (paired_seed_mask[idx] != 0) {
+            weights[idx] = config.stage7_data_weight_seed;
+            ++seed_like_count;
+        } else {
+            weights[idx] = config.stage7_data_weight_interp;
+            ++interp_like_count;
+        }
+    }
+    return weights;
+}
+
+std::vector<uint8_t> buildStage7BoundaryMask(const Stage4GridDescriptor& grid, const std::vector<uint8_t>& fit_domain_mask) {
+    std::vector<uint8_t> boundary_mask(grid.nx * grid.ny, 0);
+    for (std::size_t j = 0; j < grid.ny; ++j) {
+        for (std::size_t i = 0; i < grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, grid.nx);
+            if (fit_domain_mask[idx] == 0) {
+                continue;
+            }
+            bool is_boundary = false;
+            const auto neighbors = stage6FourNeighborIndices(i, j, grid.nx, grid.ny);
+            for (const std::size_t nidx : neighbors) {
+                if (fit_domain_mask[nidx] == 0) {
+                    is_boundary = true;
+                    break;
+                }
+            }
+            if (i == 0 || j == 0 || i + 1 == grid.nx || j + 1 == grid.ny) {
+                is_boundary = true;
+            }
+            boundary_mask[idx] = is_boundary ? 1 : 0;
+        }
+    }
+    return boundary_mask;
+}
+
+void applyStage7Laplacian(const Stage4GridDescriptor& grid,
+                          const std::vector<uint8_t>& fit_domain_mask,
+                          const std::vector<double>& values,
+                          std::vector<double>& out) {
+    out.assign(grid.nx * grid.ny, 0.0);
+    for (std::size_t j = 0; j < grid.ny; ++j) {
+        for (std::size_t i = 0; i < grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, grid.nx);
+            if (fit_domain_mask[idx] == 0) {
+                continue;
+            }
+            const auto neighbors = stage6FourNeighborIndices(i, j, grid.nx, grid.ny);
+            double sum_neighbors = 0.0;
+            std::size_t count = 0;
+            for (const std::size_t nidx : neighbors) {
+                if (fit_domain_mask[nidx] == 0) {
+                    continue;
+                }
+                sum_neighbors += values[nidx];
+                ++count;
+            }
+            out[idx] = (static_cast<double>(count) * values[idx]) - sum_neighbors;
+        }
+    }
+}
+
+double computeDiscreteStage7BendingEnergy(const Stage4GridDescriptor& grid,
+                                          const std::vector<uint8_t>& fit_domain_mask,
+                                          const std::vector<double>& values) {
+    std::vector<double> laplacian;
+    applyStage7Laplacian(grid, fit_domain_mask, values, laplacian);
+    double energy = 0.0;
+    for (std::size_t idx = 0; idx < laplacian.size(); ++idx) {
+        if (fit_domain_mask[idx] == 0) {
+            continue;
+        }
+        energy += laplacian[idx] * laplacian[idx];
+    }
+    return energy;
+}
+
+void applyStage7System(const Stage4GridDescriptor& grid,
+                       const std::vector<uint8_t>& fit_domain_mask,
+                       const std::vector<double>& fidelity_weights,
+                       double lambda,
+                       const std::vector<double>& x,
+                       std::vector<double>& out) {
+    std::vector<double> lx;
+    std::vector<double> ltlx;
+    applyStage7Laplacian(grid, fit_domain_mask, x, lx);
+    applyStage7Laplacian(grid, fit_domain_mask, lx, ltlx);
+    out.assign(grid.nx * grid.ny, 0.0);
+    for (std::size_t idx = 0; idx < out.size(); ++idx) {
+        if (fit_domain_mask[idx] == 0) {
+            continue;
+        }
+        out[idx] = (fidelity_weights[idx] * x[idx]) + (lambda * ltlx[idx]);
+    }
+}
+
+Stage7FieldFitResult runStage7FieldThinPlateGridFit(const Stage4GridDescriptor& grid,
+                                                     const std::vector<double>& reconstructed_values,
+                                                     const std::vector<uint8_t>& fit_domain_mask,
+                                                     const std::vector<uint8_t>& boundary_mask,
+                                                     const std::vector<double>& fidelity_weights,
+                                                     const FoldPatchAnalysisConfig& config) {
+    const std::size_t node_count = grid.nx * grid.ny;
+    Stage7FieldFitResult fit_result;
+    fit_result.values = reconstructed_values;
+    for (std::size_t idx = 0; idx < node_count; ++idx) {
+        if (fit_domain_mask[idx] != 0) {
+            ++fit_result.active_node_count;
+        }
+    }
+    const double soft_boundary_factor = 5.0;
+    std::vector<double> effective_weights = fidelity_weights;
+    std::vector<uint8_t> fixed_mask(node_count, 0);
+    for (std::size_t idx = 0; idx < node_count; ++idx) {
+        if (fit_domain_mask[idx] == 0) {
+            continue;
+        }
+        if (config.stage7_boundary_condition_mode == FoldPatchAnalysisConfig::Stage7BoundaryConditionMode::fixed_to_stage6 &&
+            boundary_mask[idx] != 0) {
+            fixed_mask[idx] = 1;
+            effective_weights[idx] = std::max(effective_weights[idx], 1.0);
+        } else if (config.stage7_boundary_condition_mode ==
+                       FoldPatchAnalysisConfig::Stage7BoundaryConditionMode::soft_to_stage6 &&
+                   boundary_mask[idx] != 0) {
+            effective_weights[idx] *= soft_boundary_factor;
+        }
+    }
+
+    std::vector<double> b(node_count, 0.0);
+    std::vector<double> x = fit_result.values;
+    for (std::size_t idx = 0; idx < node_count; ++idx) {
+        if (fit_domain_mask[idx] == 0) {
+            x[idx] = std::numeric_limits<double>::quiet_NaN();
+            continue;
+        }
+        if (!std::isfinite(x[idx])) {
+            x[idx] = reconstructed_values[idx];
+        }
+        if (fixed_mask[idx] == 0) {
+            b[idx] = effective_weights[idx] * reconstructed_values[idx];
+        }
+    }
+
+    std::vector<double> ax(node_count, 0.0);
+    applyStage7System(grid, fit_domain_mask, effective_weights, config.stage7_lambda, x, ax);
+    std::vector<double> r(node_count, 0.0);
+    std::vector<double> p(node_count, 0.0);
+    for (std::size_t idx = 0; idx < node_count; ++idx) {
+        if (fit_domain_mask[idx] == 0 || fixed_mask[idx] != 0) {
+            continue;
+        }
+        r[idx] = b[idx] - ax[idx];
+        p[idx] = r[idx];
+    }
+
+    auto maskedDot = [&](const std::vector<double>& a, const std::vector<double>& bvec) {
+        double dot = 0.0;
+        for (std::size_t idx = 0; idx < node_count; ++idx) {
+            if (fit_domain_mask[idx] == 0 || fixed_mask[idx] != 0) {
+                continue;
+            }
+            dot += a[idx] * bvec[idx];
+        }
+        return dot;
+    };
+
+    double rr = maskedDot(r, r);
+    std::size_t iterations = 0;
+    double final_update = 0.0;
+    for (; iterations < config.stage7_solver_max_iterations; ++iterations) {
+        if (rr <= (config.stage7_solver_tolerance * config.stage7_solver_tolerance)) {
+            ++iterations;
+            break;
+        }
+        std::vector<double> ap(node_count, 0.0);
+        applyStage7System(grid, fit_domain_mask, effective_weights, config.stage7_lambda, p, ap);
+        const double pap = maskedDot(p, ap);
+        if (pap <= 0.0) {
+            break;
+        }
+        const double alpha = rr / pap;
+        double iteration_max_update = 0.0;
+        for (std::size_t idx = 0; idx < node_count; ++idx) {
+            if (fit_domain_mask[idx] == 0 || fixed_mask[idx] != 0) {
+                continue;
+            }
+            const double delta = alpha * p[idx];
+            x[idx] += delta;
+            r[idx] -= alpha * ap[idx];
+            iteration_max_update = std::max(iteration_max_update, std::fabs(delta));
+        }
+        final_update = iteration_max_update;
+        const double rr_new = maskedDot(r, r);
+        if (rr_new <= (config.stage7_solver_tolerance * config.stage7_solver_tolerance)) {
+            rr = rr_new;
+            ++iterations;
+            break;
+        }
+        const double beta = rr_new / rr;
+        rr = rr_new;
+        for (std::size_t idx = 0; idx < node_count; ++idx) {
+            if (fit_domain_mask[idx] == 0 || fixed_mask[idx] != 0) {
+                continue;
+            }
+            p[idx] = r[idx] + (beta * p[idx]);
+        }
+    }
+
+    for (std::size_t idx = 0; idx < node_count; ++idx) {
+        if (fit_domain_mask[idx] == 0) {
+            x[idx] = std::numeric_limits<double>::quiet_NaN();
+        } else if (fixed_mask[idx] != 0) {
+            x[idx] = reconstructed_values[idx];
+        }
+    }
+    std::vector<double> residual_system(node_count, 0.0);
+    applyStage7System(grid, fit_domain_mask, effective_weights, config.stage7_lambda, x, residual_system);
+    double residual_sq_sum = 0.0;
+    double max_abs_residual = 0.0;
+    std::size_t residual_count = 0;
+    for (std::size_t idx = 0; idx < node_count; ++idx) {
+        if (fit_domain_mask[idx] == 0) {
+            continue;
+        }
+        const double rhs = fixed_mask[idx] != 0 ? reconstructed_values[idx] : b[idx];
+        const double residual = residual_system[idx] - rhs;
+        residual_sq_sum += residual * residual;
+        max_abs_residual = std::max(max_abs_residual, std::fabs(residual));
+        ++residual_count;
+    }
+    fit_result.values = std::move(x);
+    fit_result.iterations_used = iterations;
+    fit_result.final_update = final_update;
+    fit_result.final_residual =
+        residual_count > 0 ? std::sqrt(residual_sq_sum / static_cast<double>(residual_count)) : 0.0;
+    fit_result.max_abs_residual = max_abs_residual;
+    fit_result.bending_energy = computeDiscreteStage7BendingEnergy(grid, fit_domain_mask, fit_result.values);
+    return fit_result;
+}
+
 bool writeStage7FieldCsv(const GeometryStage7SmoothedSurfaceResult& result,
                          const std::string& path,
                          const char* value_header_name,
@@ -731,20 +1042,37 @@ bool writeStage7SummaryCsv(const GeometryStage7SmoothedSurfaceResult& result, co
     if (!out) {
         return false;
     }
-    out << "stage7_enabled,smoothing_weight,max_iterations,convergence_tolerance,preserve_seed_values,"
-           "enforce_non_crossing,min_separation,node_count,smooth_valid_nodes,metric_domain_nodes,"
+    out << "stage7_enabled,stage7_method,smoothing_weight,max_iterations,convergence_tolerance,preserve_seed_values,"
+           "stage7_lambda,stage7_data_weight_seed,stage7_data_weight_interp,stage7_data_weight_policy,"
+           "stage7_use_reliable_core_only_for_fit,stage7_boundary_condition_mode,stage7_fit_active_node_count,"
+           "stage7_fit_seed_like_node_count,stage7_fit_interp_like_node_count,stage7_solver_max_iterations,"
+           "stage7_solver_tolerance,enforce_non_crossing,min_separation,node_count,smooth_valid_nodes,metric_domain_nodes,"
            "non_crossing_adjusted_nodes,outer_iterations_used,inner_iterations_used,outer_final_max_update,"
-           "inner_final_max_update,min_smooth_separation,max_smooth_separation,mean_smooth_separation,"
+           "inner_final_max_update,outer_fit_final_residual,inner_fit_final_residual,outer_fit_max_abs_residual,"
+           "inner_fit_max_abs_residual,outer_fit_bending_energy,inner_fit_bending_energy,outer_solver_iterations_used,"
+           "inner_solver_iterations_used,outer_solver_final_update,inner_solver_final_update,min_smooth_separation,max_smooth_separation,mean_smooth_separation,"
            "normal_orientation_outer,normal_orientation_inner,local_thickness_definition,metric_surface_definition,"
            "outer_mesh_vertex_count,outer_mesh_face_count,inner_mesh_vertex_count,inner_mesh_face_count,"
            "outer_mesh_unused_scalar_nodes,inner_mesh_unused_scalar_nodes\n";
-    out << (config.stage7_enabled ? 1 : 0) << ',' << config.stage7_smoothing_weight << ','
+    out << (config.stage7_enabled ? 1 : 0) << ',' << result.stage7_method_label << ',' << config.stage7_smoothing_weight
+        << ','
         << config.stage7_max_iterations << ',' << config.stage7_convergence_tolerance << ','
-        << (config.stage7_preserve_seed_values ? 1 : 0) << ',' << (config.stage7_enforce_non_crossing ? 1 : 0) << ','
+        << (config.stage7_preserve_seed_values ? 1 : 0) << ',' << result.stage7_lambda << ','
+        << result.stage7_data_weight_seed << ',' << result.stage7_data_weight_interp << ','
+        << result.stage7_data_weight_policy << ',' << (result.stage7_use_reliable_core_only_for_fit ? 1 : 0) << ','
+        << result.stage7_boundary_condition_mode_label << ',' << result.stage7_fit_active_node_count << ','
+        << result.stage7_fit_seed_like_node_count << ',' << result.stage7_fit_interp_like_node_count << ','
+        << config.stage7_solver_max_iterations << ',' << config.stage7_solver_tolerance << ','
+        << (config.stage7_enforce_non_crossing ? 1 : 0) << ','
         << config.stage7_min_separation << ',' << result.node_count << ',' << result.smooth_valid_node_count << ','
         << result.metric_domain_node_count << ',' << result.smooth_non_crossing_adjusted_node_count << ','
         << result.outer_iterations_used << ',' << result.inner_iterations_used << ',' << result.outer_final_max_update
-        << ',' << result.inner_final_max_update << ',' << result.min_smooth_separation << ','
+        << ',' << result.inner_final_max_update << ',' << result.outer_fit_final_residual << ','
+        << result.inner_fit_final_residual << ',' << result.outer_fit_max_abs_residual << ','
+        << result.inner_fit_max_abs_residual << ',' << result.outer_fit_bending_energy << ','
+        << result.inner_fit_bending_energy << ',' << result.outer_solver_iterations_used << ','
+        << result.inner_solver_iterations_used << ',' << result.outer_solver_final_update << ','
+        << result.inner_solver_final_update << ',' << result.min_smooth_separation << ','
         << result.max_smooth_separation << ',' << result.mean_smooth_separation << ',' << result.normal_orientation_outer
         << ',' << result.normal_orientation_inner << ',' << result.local_thickness_definition << ','
         << result.metric_surface_definition << ',' << result.outer_mesh_vertex_count << ','
@@ -2600,6 +2928,21 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     if (config.stage7_smoothing_weight <= 0.0) {
         throw std::runtime_error("Stage 7 requires stage7_smoothing_weight > 0");
     }
+    if (config.stage7_lambda <= 0.0) {
+        throw std::runtime_error("Stage 7 requires stage7_lambda > 0");
+    }
+    if (config.stage7_data_weight_seed < 0.0 || config.stage7_data_weight_interp < 0.0) {
+        throw std::runtime_error("Stage 7 requires non-negative fidelity weights");
+    }
+    if (config.stage7_data_weight_seed <= 0.0 && config.stage7_data_weight_interp <= 0.0) {
+        throw std::runtime_error("Stage 7 requires at least one positive fidelity weight");
+    }
+    if (config.stage7_solver_max_iterations == 0) {
+        throw std::runtime_error("Stage 7 requires stage7_solver_max_iterations > 0");
+    }
+    if (config.stage7_solver_tolerance <= 0.0) {
+        throw std::runtime_error("Stage 7 requires stage7_solver_tolerance > 0");
+    }
 
     result.messages.push_back("Geometry Stage 7");
     result.messages.push_back("Geometry analysis: starting Stage 7 surface smoothing / regularization.");
@@ -2610,23 +2953,77 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     result.smooth_valid_mask.assign(result.node_count, 0);
     result.metric_domain_mask.assign(result.node_count, 0);
     result.smooth_non_crossing_adjustment_mask.assign(result.node_count, 0);
+    result.stage7_method_label = stage7MethodLabel(config.stage7_method);
+    result.stage7_lambda = config.stage7_lambda;
+    result.stage7_data_weight_seed = config.stage7_data_weight_seed;
+    result.stage7_data_weight_interp = config.stage7_data_weight_interp;
+    result.stage7_data_weight_policy =
+        "paired_seed -> stage7_data_weight_seed ; reconstructed_nonseed -> stage7_data_weight_interp";
+    result.stage7_use_reliable_core_only_for_fit = config.stage7_use_reliable_core_only_for_fit;
+    result.stage7_boundary_condition_mode_label = stage7BoundaryConditionModeLabel(config.stage7_boundary_condition_mode);
 
-    const Stage7FieldSmoothResult outer = runStage7FieldSmoothing(result.grid,
-                                                                   stage6_result.z_outer_reconstructed,
-                                                                   stage6_result.reconstructed_mask,
-                                                                   stage5_result.paired_seed_mask,
-                                                                   config);
-    const Stage7FieldSmoothResult inner = runStage7FieldSmoothing(result.grid,
-                                                                   stage6_result.z_inner_reconstructed,
-                                                                   stage6_result.reconstructed_mask,
-                                                                   stage5_result.paired_seed_mask,
-                                                                   config);
-    result.z_outer_smooth = outer.values;
-    result.z_inner_smooth = inner.values;
-    result.outer_iterations_used = outer.iterations_used;
-    result.inner_iterations_used = inner.iterations_used;
-    result.outer_final_max_update = outer.final_max_update;
-    result.inner_final_max_update = inner.final_max_update;
+    if (config.stage7_method == FoldPatchAnalysisConfig::Stage7Method::smooth) {
+        const Stage7FieldSmoothResult outer = runStage7FieldSmoothingLegacy(result.grid,
+                                                                             stage6_result.z_outer_reconstructed,
+                                                                             stage6_result.reconstructed_mask,
+                                                                             stage5_result.paired_seed_mask,
+                                                                             config);
+        const Stage7FieldSmoothResult inner = runStage7FieldSmoothingLegacy(result.grid,
+                                                                             stage6_result.z_inner_reconstructed,
+                                                                             stage6_result.reconstructed_mask,
+                                                                             stage5_result.paired_seed_mask,
+                                                                             config);
+        result.z_outer_smooth = outer.values;
+        result.z_inner_smooth = inner.values;
+        result.outer_iterations_used = outer.iterations_used;
+        result.inner_iterations_used = inner.iterations_used;
+        result.outer_final_max_update = outer.final_max_update;
+        result.inner_final_max_update = inner.final_max_update;
+    } else {
+        const std::vector<uint8_t> fit_domain_mask = buildStage7FitDomainMask(stage6_result, stage5_result, config);
+        result.stage7_fit_active_node_count = 0;
+        for (const uint8_t v : fit_domain_mask) {
+            if (v != 0) {
+                ++result.stage7_fit_active_node_count;
+            }
+        }
+        if (result.stage7_fit_active_node_count == 0) {
+            throw std::runtime_error("Stage 7 thin-plate fit has zero active fit-domain nodes");
+        }
+        const std::vector<uint8_t> boundary_mask = buildStage7BoundaryMask(result.grid, fit_domain_mask);
+        const std::vector<double> fidelity_weights = buildStage7FidelityWeights(
+            fit_domain_mask, stage5_result.paired_seed_mask, config, result.stage7_fit_seed_like_node_count,
+            result.stage7_fit_interp_like_node_count);
+
+        const Stage7FieldFitResult outer = runStage7FieldThinPlateGridFit(result.grid,
+                                                                           stage6_result.z_outer_reconstructed,
+                                                                           fit_domain_mask,
+                                                                           boundary_mask,
+                                                                           fidelity_weights,
+                                                                           config);
+        const Stage7FieldFitResult inner = runStage7FieldThinPlateGridFit(result.grid,
+                                                                           stage6_result.z_inner_reconstructed,
+                                                                           fit_domain_mask,
+                                                                           boundary_mask,
+                                                                           fidelity_weights,
+                                                                           config);
+        result.z_outer_smooth = outer.values;
+        result.z_inner_smooth = inner.values;
+        result.outer_iterations_used = outer.iterations_used;
+        result.inner_iterations_used = inner.iterations_used;
+        result.outer_final_max_update = outer.final_update;
+        result.inner_final_max_update = inner.final_update;
+        result.outer_fit_final_residual = outer.final_residual;
+        result.inner_fit_final_residual = inner.final_residual;
+        result.outer_fit_max_abs_residual = outer.max_abs_residual;
+        result.inner_fit_max_abs_residual = inner.max_abs_residual;
+        result.outer_fit_bending_energy = outer.bending_energy;
+        result.inner_fit_bending_energy = inner.bending_energy;
+        result.outer_solver_iterations_used = outer.iterations_used;
+        result.inner_solver_iterations_used = inner.iterations_used;
+        result.outer_solver_final_update = outer.final_update;
+        result.inner_solver_final_update = inner.final_update;
+    }
 
     for (std::size_t idx = 0; idx < result.node_count; ++idx) {
         if (stage6_result.reconstructed_mask[idx] == 0 || !std::isfinite(result.z_outer_smooth[idx]) ||
@@ -2714,9 +3111,12 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     if (config.stage7_export_meshes) {
         const bool use_stl = config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl;
         const std::string extension = use_stl ? ".stl" : ".obj";
+        const std::string mesh_prefix = config.stage7_method == FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit
+                                            ? "_thin_plate"
+                                            : "_smooth";
         if (config.stage6_split_in_out_meshes) {
-            result.outer_mesh_path = config.output_prefix + "_smooth_outer_surface" + extension;
-            result.inner_mesh_path = config.output_prefix + "_smooth_inner_surface" + extension;
+            result.outer_mesh_path = config.output_prefix + mesh_prefix + "_outer_surface" + extension;
+            result.inner_mesh_path = config.output_prefix + mesh_prefix + "_inner_surface" + extension;
             if (use_stl) {
                 const Stage6StlExportResult outer_mesh =
                     writeStage6StlMesh(result.grid, result.metric_domain_mask, result.z_outer_smooth, result.outer_mesh_path);
@@ -2737,7 +3137,7 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
                 result.inner_mesh_face_count = inner_mesh.face_count;
             }
         } else {
-            result.outer_mesh_path = config.output_prefix + "_smooth_surface" + extension;
+            result.outer_mesh_path = config.output_prefix + mesh_prefix + "_surface" + extension;
             result.inner_mesh_path = result.outer_mesh_path;
             if (use_stl) {
                 const Stage6DualMeshExportResult combined = writeStage6StlMeshesCombined(
@@ -2769,19 +3169,31 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
             inner_scalar_nodes > inner_used_by_faces ? inner_scalar_nodes - inner_used_by_faces : 0;
     }
 
+    result.messages.push_back("Geometry Stage 7 method: " + result.stage7_method_label);
     result.messages.push_back("Geometry Stage 7 smoothing weight: " + std::to_string(config.stage7_smoothing_weight));
     result.messages.push_back("Geometry Stage 7 max iterations: " + std::to_string(config.stage7_max_iterations));
     result.messages.push_back("Geometry Stage 7 convergence tolerance: " +
                               std::to_string(config.stage7_convergence_tolerance));
     result.messages.push_back("Geometry Stage 7 preserve seed values: " +
                               std::to_string(config.stage7_preserve_seed_values ? 1 : 0));
+    result.messages.push_back("Geometry Stage 7 lambda: " + std::to_string(config.stage7_lambda));
+    result.messages.push_back("Geometry Stage 7 data weight seed: " + std::to_string(config.stage7_data_weight_seed));
+    result.messages.push_back("Geometry Stage 7 data weight interp: " + std::to_string(config.stage7_data_weight_interp));
+    result.messages.push_back("Geometry Stage 7 boundary mode: " + result.stage7_boundary_condition_mode_label);
+    result.messages.push_back("Geometry Stage 7 fit active node count: " + std::to_string(result.stage7_fit_active_node_count));
+    result.messages.push_back("Geometry Stage 7 fit seed-like node count: " +
+                              std::to_string(result.stage7_fit_seed_like_node_count));
+    result.messages.push_back("Geometry Stage 7 fit interp-like node count: " +
+                              std::to_string(result.stage7_fit_interp_like_node_count));
     result.messages.push_back("Geometry Stage 7 enforce non-crossing: " +
                               std::to_string(config.stage7_enforce_non_crossing ? 1 : 0));
     result.messages.push_back("Geometry Stage 7 minimum separation: " + std::to_string(config.stage7_min_separation));
     result.messages.push_back("Geometry Stage 7 outer iterations used: " + std::to_string(result.outer_iterations_used));
     result.messages.push_back("Geometry Stage 7 inner iterations used: " + std::to_string(result.inner_iterations_used));
-    result.messages.push_back("Geometry Stage 7 outer final max update: " + std::to_string(result.outer_final_max_update));
-    result.messages.push_back("Geometry Stage 7 inner final max update: " + std::to_string(result.inner_final_max_update));
+    result.messages.push_back("Geometry Stage 7 outer final update: " + std::to_string(result.outer_final_max_update));
+    result.messages.push_back("Geometry Stage 7 inner final update: " + std::to_string(result.inner_final_max_update));
+    result.messages.push_back("Geometry Stage 7 outer fit residual: " + std::to_string(result.outer_fit_final_residual));
+    result.messages.push_back("Geometry Stage 7 inner fit residual: " + std::to_string(result.inner_fit_final_residual));
     result.messages.push_back("Geometry Stage 7 smooth valid node count: " + std::to_string(result.smooth_valid_node_count));
     result.messages.push_back("Geometry Stage 7 metric domain node count: " + std::to_string(result.metric_domain_node_count));
     result.messages.push_back("Geometry Stage 7 smooth non-crossing adjusted node count: " +

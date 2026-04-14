@@ -66,6 +66,14 @@ void printHelp(const std::string& program_name) {
       --geometry_smooth_enforce_non_crossing <true|false>  Enforce Stage 7 non-crossing constraint (default: true)
       --geometry_smooth_min_separation <A>   Stage 7 minimum outer-inner separation in angstroms (default: 1.0)
       --geometry_smooth_export_meshes <true|false> Export Stage 7 smoothed meshes (default: true)
+      --geometry_s7_method <smooth|thin_plate_grid_fit> Stage 7 method selector (default: smooth)
+      --geometry_s7_lambda <x>                Stage 7 thin-plate bending regularization weight (default: 1.0)
+      --geometry_s7_data_weight_seed <x>      Stage 7 fidelity weight for paired-seed nodes (default: 1.0)
+      --geometry_s7_data_weight_interp <x>    Stage 7 fidelity weight for reconstructed non-seed nodes (default: 0.25)
+      --geometry_s7_use_reliable_core_only_for_fit <true|false> Restrict Stage 7 fit domain to reliable core
+      --geometry_s7_boundary_condition_mode <free|fixed_to_stage6|soft_to_stage6> Stage 7 boundary policy
+      --geometry_s7_solver_max_iterations <n> Stage 7 thin-plate solver max iterations (default: 500)
+      --geometry_s7_solver_tolerance <x>      Stage 7 thin-plate solver tolerance (default: 1e-8)
 
   -h, --help                                 Show this help message
       --version                              Show version information
@@ -139,6 +147,15 @@ int main(int argc, char* argv[]) {
     double geometry_smooth_min_separation = 1.0;
     // Stage 7 mesh export runs by default when Stage 7 smoothing is enabled.
     bool geometry_smooth_export_meshes = true;
+    FoldPatchAnalysisConfig::Stage7Method geometry_s7_method = FoldPatchAnalysisConfig::Stage7Method::smooth;
+    double geometry_s7_lambda = 1.0;
+    double geometry_s7_data_weight_seed = 1.0;
+    double geometry_s7_data_weight_interp = 0.25;
+    bool geometry_s7_use_reliable_core_only_for_fit = false;
+    FoldPatchAnalysisConfig::Stage7BoundaryConditionMode geometry_s7_boundary_condition_mode =
+        FoldPatchAnalysisConfig::Stage7BoundaryConditionMode::soft_to_stage6;
+    std::size_t geometry_s7_solver_max_iterations = 500;
+    double geometry_s7_solver_tolerance = 1e-8;
 
     const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
 
@@ -448,6 +465,101 @@ int main(int argc, char* argv[]) {
             }
             continue;
         }
+        if (arg == "--geometry_s7_method") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s7_method\n";
+                return 1;
+            }
+            const std::string method_arg = argv[++i];
+            if (method_arg == "smooth") {
+                geometry_s7_method = FoldPatchAnalysisConfig::Stage7Method::smooth;
+                continue;
+            }
+            if (method_arg == "thin_plate_grid_fit") {
+                geometry_s7_method = FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit;
+                continue;
+            }
+            std::cerr << "Error: --geometry_s7_method must be one of smooth, thin_plate_grid_fit\n";
+            return 1;
+        }
+        if (arg == "--geometry_s7_lambda") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s7_lambda\n";
+                return 1;
+            }
+            geometry_s7_lambda = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_s7_data_weight_seed") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s7_data_weight_seed\n";
+                return 1;
+            }
+            geometry_s7_data_weight_seed = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_s7_data_weight_interp") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s7_data_weight_interp\n";
+                return 1;
+            }
+            geometry_s7_data_weight_interp = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_s7_use_reliable_core_only_for_fit") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s7_use_reliable_core_only_for_fit\n";
+                return 1;
+            }
+            try {
+                geometry_s7_use_reliable_core_only_for_fit =
+                    parseBoolSwitch(argv[++i], "--geometry_s7_use_reliable_core_only_for_fit");
+            } catch (const std::runtime_error& ex) {
+                std::cerr << ex.what() << '\n';
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "--geometry_s7_boundary_condition_mode") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s7_boundary_condition_mode\n";
+                return 1;
+            }
+            const std::string mode_arg = argv[++i];
+            if (mode_arg == "free") {
+                geometry_s7_boundary_condition_mode = FoldPatchAnalysisConfig::Stage7BoundaryConditionMode::free;
+                continue;
+            }
+            if (mode_arg == "fixed_to_stage6") {
+                geometry_s7_boundary_condition_mode =
+                    FoldPatchAnalysisConfig::Stage7BoundaryConditionMode::fixed_to_stage6;
+                continue;
+            }
+            if (mode_arg == "soft_to_stage6") {
+                geometry_s7_boundary_condition_mode =
+                    FoldPatchAnalysisConfig::Stage7BoundaryConditionMode::soft_to_stage6;
+                continue;
+            }
+            std::cerr
+                << "Error: --geometry_s7_boundary_condition_mode must be one of free, fixed_to_stage6, soft_to_stage6\n";
+            return 1;
+        }
+        if (arg == "--geometry_s7_solver_max_iterations") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s7_solver_max_iterations\n";
+                return 1;
+            }
+            geometry_s7_solver_max_iterations = static_cast<std::size_t>(std::stoul(argv[++i]));
+            continue;
+        }
+        if (arg == "--geometry_s7_solver_tolerance") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s7_solver_tolerance\n";
+                return 1;
+            }
+            geometry_s7_solver_tolerance = std::stod(argv[++i]);
+            continue;
+        }
 
         std::cerr << "Error: unknown argument: " << arg << '\n';
         return 1;
@@ -472,6 +584,30 @@ int main(int argc, char* argv[]) {
     }
     if (geometry_analysis_requested && reorient_requested) {
         std::cerr << "Error: --geometry-analysis cannot be combined with --reorient.\n";
+        return 1;
+    }
+    if (geometry_s7_lambda <= 0.0) {
+        std::cerr << "Error: --geometry_s7_lambda must be > 0\n";
+        return 1;
+    }
+    if (geometry_s7_data_weight_seed < 0.0) {
+        std::cerr << "Error: --geometry_s7_data_weight_seed must be >= 0\n";
+        return 1;
+    }
+    if (geometry_s7_data_weight_interp < 0.0) {
+        std::cerr << "Error: --geometry_s7_data_weight_interp must be >= 0\n";
+        return 1;
+    }
+    if (geometry_s7_data_weight_seed <= 0.0 && geometry_s7_data_weight_interp <= 0.0) {
+        std::cerr << "Error: at least one of --geometry_s7_data_weight_seed or --geometry_s7_data_weight_interp must be > 0\n";
+        return 1;
+    }
+    if (geometry_s7_solver_max_iterations == 0) {
+        std::cerr << "Error: --geometry_s7_solver_max_iterations must be > 0\n";
+        return 1;
+    }
+    if (geometry_s7_solver_tolerance <= 0.0) {
+        std::cerr << "Error: --geometry_s7_solver_tolerance must be > 0\n";
         return 1;
     }
 
@@ -549,10 +685,18 @@ int main(int argc, char* argv[]) {
         geometry_config.stage6_split_in_out_meshes = split_in_out_mesh;
         geometry_config.stage6_min_separation = surface_min_separation;
         geometry_config.stage7_enabled = geometry_smooth_enabled;
+        geometry_config.stage7_method = geometry_s7_method;
         geometry_config.stage7_smoothing_weight = geometry_smooth_weight;
         geometry_config.stage7_max_iterations = geometry_smooth_max_iterations;
         geometry_config.stage7_convergence_tolerance = geometry_smooth_convergence_tolerance;
         geometry_config.stage7_preserve_seed_values = geometry_smooth_pin_seed;
+        geometry_config.stage7_lambda = geometry_s7_lambda;
+        geometry_config.stage7_data_weight_seed = geometry_s7_data_weight_seed;
+        geometry_config.stage7_data_weight_interp = geometry_s7_data_weight_interp;
+        geometry_config.stage7_use_reliable_core_only_for_fit = geometry_s7_use_reliable_core_only_for_fit;
+        geometry_config.stage7_boundary_condition_mode = geometry_s7_boundary_condition_mode;
+        geometry_config.stage7_solver_max_iterations = geometry_s7_solver_max_iterations;
+        geometry_config.stage7_solver_tolerance = geometry_s7_solver_tolerance;
         geometry_config.stage7_enforce_non_crossing = geometry_smooth_enforce_non_crossing;
         geometry_config.stage7_min_separation = geometry_smooth_min_separation;
         geometry_config.stage7_export_meshes = geometry_smooth_export_meshes;

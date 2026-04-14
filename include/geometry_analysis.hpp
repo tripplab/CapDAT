@@ -36,6 +36,10 @@ struct PatchAtom {
 };
 
 struct FoldPatchAnalysisConfig {
+    enum class Stage7Method : uint8_t { smooth = 0, thin_plate_grid_fit = 1 };
+    enum class Stage7BoundaryConditionMode : uint8_t { free = 0, fixed_to_stage6 = 1, soft_to_stage6 = 2 };
+    enum class MeshExportFormat : uint8_t { obj = 0, stl = 1 };
+
     bool enabled = false;
     bool debug = false;
     int fold_type = 2;
@@ -55,14 +59,21 @@ struct FoldPatchAnalysisConfig {
     double stage6_min_separation = 0.0;
     bool stage6_export_obj_meshes = true;
     bool stage7_enabled = true;
+    Stage7Method stage7_method = Stage7Method::smooth;
     double stage7_smoothing_weight = 0.01;
     std::size_t stage7_max_iterations = 250;
     double stage7_convergence_tolerance = 1e-6;
     bool stage7_preserve_seed_values = false;
+    double stage7_lambda = 1.0;
+    double stage7_data_weight_seed = 1.0;
+    double stage7_data_weight_interp = 0.25;
+    bool stage7_use_reliable_core_only_for_fit = false;
+    Stage7BoundaryConditionMode stage7_boundary_condition_mode = Stage7BoundaryConditionMode::soft_to_stage6;
+    std::size_t stage7_solver_max_iterations = 500;
+    double stage7_solver_tolerance = 1e-8;
     bool stage7_enforce_non_crossing = true;
     double stage7_min_separation = 1.0;
     bool stage7_export_meshes = true;
-    enum class MeshExportFormat : uint8_t { obj = 0, stl = 1 };
     MeshExportFormat stage6_mesh_export_format = MeshExportFormat::stl;
     bool stage6_split_in_out_meshes = false;
     bool export_rotated_capsid = false;
@@ -308,7 +319,6 @@ struct GeometryStage6SurfaceReconstructionResult {
     std::size_t inner_iterations_used = 0;
     double outer_final_max_update = 0.0;
     double inner_final_max_update = 0.0;
-
     double min_reconstructed_separation = 0.0;
     double max_reconstructed_separation = 0.0;
     double mean_reconstructed_separation = 0.0;
@@ -357,6 +367,26 @@ struct GeometryStage7SmoothedSurfaceResult {
     std::size_t inner_iterations_used = 0;
     double outer_final_max_update = 0.0;
     double inner_final_max_update = 0.0;
+    std::string stage7_method_label = "smooth";
+    double stage7_lambda = 0.0;
+    double stage7_data_weight_seed = 0.0;
+    double stage7_data_weight_interp = 0.0;
+    std::string stage7_data_weight_policy;
+    bool stage7_use_reliable_core_only_for_fit = false;
+    std::string stage7_boundary_condition_mode_label;
+    std::size_t stage7_fit_active_node_count = 0;
+    std::size_t stage7_fit_seed_like_node_count = 0;
+    std::size_t stage7_fit_interp_like_node_count = 0;
+    double outer_fit_final_residual = 0.0;
+    double inner_fit_final_residual = 0.0;
+    double outer_fit_max_abs_residual = 0.0;
+    double inner_fit_max_abs_residual = 0.0;
+    double outer_fit_bending_energy = 0.0;
+    double inner_fit_bending_energy = 0.0;
+    std::size_t outer_solver_iterations_used = 0;
+    std::size_t inner_solver_iterations_used = 0;
+    double outer_solver_final_update = 0.0;
+    double inner_solver_final_update = 0.0;
 
     double min_smooth_separation = 0.0;
     double max_smooth_separation = 0.0;
