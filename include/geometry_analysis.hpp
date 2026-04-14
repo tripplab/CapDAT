@@ -45,7 +45,7 @@ struct FoldPatchAnalysisConfig {
     int fold_type = 2;
     int fold_index = 0;
     double cylinder_radius = 12.0;
-    double delta_vdw = 3.0;
+    double delta_vdw = 0.0;
     double grid_spacing = 2.0;
     std::size_t min_atoms_in_patch = 20;
     double stage5_boundary_margin = 0.0;
@@ -71,6 +71,7 @@ struct FoldPatchAnalysisConfig {
     Stage7BoundaryConditionMode stage7_boundary_condition_mode = Stage7BoundaryConditionMode::soft_to_stage6;
     std::size_t stage7_solver_max_iterations = 500;
     double stage7_solver_tolerance = 1e-8;
+    bool stage7_export_s7s6_deltas = false;
     bool stage7_enforce_non_crossing = true;
     double stage7_min_separation = 1.0;
     bool stage7_export_meshes = true;
@@ -391,6 +392,12 @@ struct GeometryStage7SmoothedSurfaceResult {
     double min_smooth_separation = 0.0;
     double max_smooth_separation = 0.0;
     double mean_smooth_separation = 0.0;
+    double max_abs_outer_delta = 0.0;
+    double max_abs_inner_delta = 0.0;
+    double max_abs_thickness_delta = 0.0;
+    double mean_abs_outer_delta = 0.0;
+    double mean_abs_inner_delta = 0.0;
+    double mean_abs_thickness_delta = 0.0;
 
     std::string normal_orientation_outer = "toward_positive_z";
     std::string normal_orientation_inner = "toward_negative_z";
@@ -402,6 +409,9 @@ struct GeometryStage7SmoothedSurfaceResult {
     std::string smooth_valid_mask_csv_path;
     std::string metric_domain_mask_csv_path;
     std::string smooth_non_crossing_adjustment_mask_csv_path;
+    std::string outer_delta_csv_path;
+    std::string inner_delta_csv_path;
+    std::string thickness_delta_csv_path;
     std::string summary_csv_path;
 
     std::string outer_mesh_path;
