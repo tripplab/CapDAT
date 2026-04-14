@@ -1611,6 +1611,153 @@ void testStage7MeshExportAndDeterminism() {
     removeIfExists(first.inner_mesh_path);
 }
 
+double computeRoughnessLaplacianEnergy(const Stage4GridDescriptor& grid,
+                                       const std::vector<uint8_t>& mask,
+                                       const std::vector<double>& values) {
+    double energy = 0.0;
+    for (std::size_t j = 0; j < grid.ny; ++j) {
+        for (std::size_t i = 0; i < grid.nx; ++i) {
+            const std::size_t idx = nodeIndex(i, j, grid.nx);
+            if (mask[idx] == 0 || !std::isfinite(values[idx])) {
+                continue;
+            }
+            double sum_neighbors = 0.0;
+            std::size_t count = 0;
+            if (i > 0) {
+                const std::size_t nidx = nodeIndex(i - 1, j, grid.nx);
+                if (mask[nidx] != 0 && std::isfinite(values[nidx])) {
+                    sum_neighbors += values[nidx];
+                    ++count;
+                }
+            }
+            if (i + 1 < grid.nx) {
+                const std::size_t nidx = nodeIndex(i + 1, j, grid.nx);
+                if (mask[nidx] != 0 && std::isfinite(values[nidx])) {
+                    sum_neighbors += values[nidx];
+                    ++count;
+                }
+            }
+            if (j > 0) {
+                const std::size_t nidx = nodeIndex(i, j - 1, grid.nx);
+                if (mask[nidx] != 0 && std::isfinite(values[nidx])) {
+                    sum_neighbors += values[nidx];
+                    ++count;
+                }
+            }
+            if (j + 1 < grid.ny) {
+                const std::size_t nidx = nodeIndex(i, j + 1, grid.nx);
+                if (mask[nidx] != 0 && std::isfinite(values[nidx])) {
+                    sum_neighbors += values[nidx];
+                    ++count;
+                }
+            }
+            const double lap = (static_cast<double>(count) * values[idx]) - sum_neighbors;
+            energy += lap * lap;
+        }
+    }
+    return energy;
+}
+
+void testStage7MethodDispatchAndMetadata() {
+    SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
+    FoldPatchAnalysisConfig config;
+    config.stage7_export_meshes = false;
+    const auto legacy = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    assertTrue(legacy.stage7_method_label == "smooth", "default Stage 7 method must remain smooth");
+
+    config.stage7_method = FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit;
+    const auto fit = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    assertTrue(fit.stage7_method_label == "thin_plate_grid_fit", "explicit Stage 7 fit mode label should be set");
+}
+
+void testStage7FitDomainWeightingMetadata() {
+    SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
+    FoldPatchAnalysisConfig config;
+    config.stage7_export_meshes = false;
+    config.stage7_method = FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit;
+    const auto stage7 = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    assertTrue(stage7.stage7_fit_active_node_count > 0, "fit domain should include reconstructed nodes");
+    assertTrue(stage7.stage7_fit_seed_like_node_count > 0, "fit metadata should count paired-seed nodes");
+    assertTrue(stage7.stage7_fit_interp_like_node_count > 0, "fit metadata should count reconstructed non-seed nodes");
+    assertTrue(stage7.stage7_data_weight_policy.find("paired_seed") != std::string::npos,
+               "fit metadata should describe fidelity weighting policy");
+}
+
+void testStage7BoundaryModes() {
+    SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
+    FoldPatchAnalysisConfig config;
+    config.stage7_export_meshes = false;
+    config.stage7_method = FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit;
+    config.stage7_lambda = 2.0;
+    config.stage7_data_weight_seed = 0.8;
+    config.stage7_data_weight_interp = 0.2;
+    const std::size_t boundary_idx = nodeIndex(1, 2, inputs.stage5.grid.nx);
+    const double boundary_stage6 = inputs.stage6.z_outer_reconstructed[boundary_idx];
+
+    config.stage7_boundary_condition_mode = FoldPatchAnalysisConfig::Stage7BoundaryConditionMode::fixed_to_stage6;
+    const auto fixed = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    assertTrue(near(fixed.z_outer_smooth[boundary_idx], boundary_stage6, 1e-9),
+               "fixed_to_stage6 should preserve boundary reconstructed values");
+
+    config.stage7_boundary_condition_mode = FoldPatchAnalysisConfig::Stage7BoundaryConditionMode::free;
+    const auto free = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    config.stage7_boundary_condition_mode = FoldPatchAnalysisConfig::Stage7BoundaryConditionMode::soft_to_stage6;
+    const auto soft = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    assertTrue(std::fabs(soft.z_outer_smooth[boundary_idx] - free.z_outer_smooth[boundary_idx]) > 1e-12,
+               "soft boundary mode should produce deterministic differences from free mode");
+}
+
+void testStage7FitVsLegacyAndRoughness() {
+    SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
+    const std::size_t noisy_idx = nodeIndex(1, 1, inputs.stage5.grid.nx);
+    inputs.stage6.z_outer_reconstructed[noisy_idx] += 4.0;
+    inputs.stage6.z_inner_reconstructed[noisy_idx] += 4.0;
+    inputs.stage6.reconstructed_mask[noisy_idx] = 1;
+
+    FoldPatchAnalysisConfig legacy_config;
+    legacy_config.stage7_export_meshes = false;
+    const auto legacy = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, legacy_config, nullptr);
+
+    FoldPatchAnalysisConfig fit_config = legacy_config;
+    fit_config.stage7_method = FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit;
+    const auto fit = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, fit_config, nullptr);
+
+    assertTrue(std::fabs(legacy.z_outer_smooth[noisy_idx] - fit.z_outer_smooth[noisy_idx]) > 1e-10,
+               "thin-plate fit should differ from legacy smooth output");
+    assertTrue(fit.metric_domain_node_count > 0, "fit method should keep metric domain non-empty");
+
+    const double stage6_rough =
+        computeRoughnessLaplacianEnergy(inputs.stage6.grid, inputs.stage6.reconstructed_mask, inputs.stage6.z_outer_reconstructed);
+    const double fit_rough = computeRoughnessLaplacianEnergy(fit.grid, fit.smooth_valid_mask, fit.z_outer_smooth);
+    assertTrue(fit_rough < stage6_rough, "thin-plate fit should reduce roughness relative to Stage 6 target field");
+}
+
+void testStage7ThinPlateDeterminism() {
+    SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
+    FoldPatchAnalysisConfig config;
+    config.debug = true;
+    config.output_prefix = "stage7_fit_debug";
+    config.stage7_export_meshes = false;
+    config.stage7_method = FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit;
+
+    const auto first = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    const auto second = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    std::ifstream csv1(first.outer_smooth_csv_path);
+    std::ifstream csv2(second.outer_smooth_csv_path);
+    const std::string csv_first((std::istreambuf_iterator<char>(csv1)), std::istreambuf_iterator<char>());
+    const std::string csv_second((std::istreambuf_iterator<char>(csv2)), std::istreambuf_iterator<char>());
+    assertTrue(csv_first == csv_second, "thin-plate Stage 7 csv should be byte-deterministic");
+    assertTrue(first.outer_fit_final_residual == second.outer_fit_final_residual,
+               "thin-plate Stage 7 residual metadata should be deterministic");
+
+    removeIfExists(first.outer_smooth_csv_path);
+    removeIfExists(first.inner_smooth_csv_path);
+    removeIfExists(first.smooth_valid_mask_csv_path);
+    removeIfExists(first.metric_domain_mask_csv_path);
+    removeIfExists(first.smooth_non_crossing_adjustment_mask_csv_path);
+    removeIfExists(first.summary_csv_path);
+}
+
 void testStage1ToStage6Integration() {
     Capsid capsid = makeSimpleCapsid();
     FoldPatchAnalysisConfig config;
@@ -1718,6 +1865,63 @@ void testStage1ToStage7Integration() {
     removeIfExists(result.stage7_smooth.inner_mesh_path);
 }
 
+void testStage1ToStage7ThinPlateIntegration() {
+    Capsid capsid = makeSimpleCapsid();
+    FoldPatchAnalysisConfig config;
+    config.enabled = true;
+    config.fold_type = 2;
+    config.fold_index = 0;
+    config.cylinder_radius = 2.0;
+    config.grid_spacing = 1.0;
+    config.min_atoms_in_patch = 2;
+    config.debug = true;
+    config.stage6_export_obj_meshes = false;
+    config.stage7_export_meshes = true;
+    config.stage7_method = FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit;
+    config.output_prefix = "stage7_fit_integration";
+
+    const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
+    assertTrue(result.success, "Stage 1-7 integration with thin-plate should succeed");
+    assertTrue(result.stage7_smooth.success, "thin-plate Stage 7 should succeed in full pipeline");
+    assertTrue(result.stage7_smooth.stage7_method_label == "thin_plate_grid_fit", "Stage 7 method metadata should be populated");
+    assertTrue(result.stage7_smooth.stage7_fit_active_node_count > 0, "thin-plate fit domain should be non-empty");
+    assertTrue(std::filesystem::exists(result.stage7_smooth.summary_csv_path), "thin-plate Stage 7 summary should exist");
+    assertTrue(std::filesystem::exists(result.stage7_smooth.outer_mesh_path), "thin-plate Stage 7 mesh should exist");
+
+    removeIfExists(result.stage2_patch.export_path);
+    removeIfExists(result.stage4_raw.outer_csv_path);
+    removeIfExists(result.stage4_raw.inner_csv_path);
+    removeIfExists(result.stage4_raw.valid_mask_csv_path);
+    removeIfExists(result.stage4_raw.outer_only_mask_csv_path);
+    removeIfExists(result.stage4_raw.inner_only_mask_csv_path);
+    removeIfExists(result.stage4_raw.negative_thickness_mask_csv_path);
+    removeIfExists(result.stage4_raw.summary_csv_path);
+    removeIfExists(result.stage4_raw.contact_atoms_pdb_path);
+    removeIfExists(result.stage4_raw.stage3_normalized_atoms_csv_path);
+    removeIfExists(result.stage5_prep.outer_seed_csv_path);
+    removeIfExists(result.stage5_prep.inner_seed_csv_path);
+    removeIfExists(result.stage5_prep.paired_seed_mask_csv_path);
+    removeIfExists(result.stage5_prep.boundary_exclusion_mask_csv_path);
+    removeIfExists(result.stage5_prep.interp_allowed_mask_csv_path);
+    removeIfExists(result.stage5_prep.hard_invalid_mask_csv_path);
+    removeIfExists(result.stage5_prep.reliable_core_mask_csv_path);
+    removeIfExists(result.stage5_prep.summary_csv_path);
+    removeIfExists(result.stage6_surfaces.outer_reconstructed_csv_path);
+    removeIfExists(result.stage6_surfaces.inner_reconstructed_csv_path);
+    removeIfExists(result.stage6_surfaces.reconstructed_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.final_valid_analysis_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.non_crossing_adjustment_mask_csv_path);
+    removeIfExists(result.stage6_surfaces.summary_csv_path);
+    removeIfExists(result.stage7_smooth.outer_smooth_csv_path);
+    removeIfExists(result.stage7_smooth.inner_smooth_csv_path);
+    removeIfExists(result.stage7_smooth.smooth_valid_mask_csv_path);
+    removeIfExists(result.stage7_smooth.metric_domain_mask_csv_path);
+    removeIfExists(result.stage7_smooth.smooth_non_crossing_adjustment_mask_csv_path);
+    removeIfExists(result.stage7_smooth.summary_csv_path);
+    removeIfExists(result.stage7_smooth.outer_mesh_path);
+    removeIfExists(result.stage7_smooth.inner_mesh_path);
+}
+
 } // namespace
 
 int main() {
@@ -1768,7 +1972,13 @@ int main() {
         testStage7ReliableCoreDefinesMetricDomain();
         testStage7NonCrossingAndMetadata();
         testStage7MeshExportAndDeterminism();
+        testStage7MethodDispatchAndMetadata();
+        testStage7FitDomainWeightingMetadata();
+        testStage7BoundaryModes();
+        testStage7FitVsLegacyAndRoughness();
+        testStage7ThinPlateDeterminism();
         testStage1ToStage7Integration();
+        testStage1ToStage7ThinPlateIntegration();
         std::cout << "All geometry analysis Stage 1/2/3/4/5/6/7 tests passed.\n";
         return 0;
     } catch (const std::exception& e) {
