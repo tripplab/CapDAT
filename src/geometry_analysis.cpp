@@ -1043,6 +1043,101 @@ bool writeStage7MaskCsv(const GeometryStage7SmoothedSurfaceResult& result,
     return out.good();
 }
 
+enum class Stage7DeltaCsvKind : uint8_t { outer = 0, inner = 1, thickness = 2 };
+
+bool writeStage7DeltaCsv(const Stage4GridDescriptor& grid,
+                         const std::vector<uint8_t>& inside_disk_mask,
+                         const GeometryStage5SurfacePrepResult& stage5_result,
+                         const GeometryStage6SurfaceReconstructionResult& stage6_result,
+                         const GeometryStage7SmoothedSurfaceResult& stage7_result,
+                         Stage7DeltaCsvKind kind,
+                         const std::string& path,
+                         double& max_abs_delta,
+                         double& mean_abs_delta) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    if (kind == Stage7DeltaCsvKind::outer) {
+        out << "i,j,x,y,inside_disk,reconstructed,smooth_valid,metric_domain,paired_seed,interp_allowed,hard_invalid,"
+               "reliable_core,z_outer_stage6,z_outer_stage7,delta_outer\n";
+    } else if (kind == Stage7DeltaCsvKind::inner) {
+        out << "i,j,x,y,inside_disk,reconstructed,smooth_valid,metric_domain,paired_seed,interp_allowed,hard_invalid,"
+               "reliable_core,z_inner_stage6,z_inner_stage7,delta_inner\n";
+    } else {
+        out << "i,j,x,y,inside_disk,reconstructed,smooth_valid,metric_domain,paired_seed,interp_allowed,hard_invalid,"
+               "reliable_core,t_stage6,t_stage7,delta_t\n";
+    }
+
+    max_abs_delta = 0.0;
+    double sum_abs_delta = 0.0;
+    std::size_t finite_delta_count = 0;
+    for (std::size_t j = 0; j < grid.ny; ++j) {
+        for (std::size_t i = 0; i < grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, grid.nx);
+            out << i << ',' << j << ',' << grid.x_values[i] << ',' << grid.y_values[j] << ','
+                << static_cast<int>(inside_disk_mask[idx]) << ','
+                << static_cast<int>(stage6_result.reconstructed_mask[idx]) << ','
+                << static_cast<int>(stage7_result.smooth_valid_mask[idx]) << ','
+                << static_cast<int>(stage7_result.metric_domain_mask[idx]) << ','
+                << static_cast<int>(stage5_result.paired_seed_mask[idx]) << ','
+                << static_cast<int>(stage5_result.paired_interp_allowed_mask[idx]) << ','
+                << static_cast<int>(stage5_result.hard_invalid_mask[idx]) << ','
+                << static_cast<int>(stage5_result.reliable_core_mask[idx]) << ',';
+
+            double stage6_value = std::numeric_limits<double>::quiet_NaN();
+            double stage7_value = std::numeric_limits<double>::quiet_NaN();
+            double delta_value = std::numeric_limits<double>::quiet_NaN();
+            if (kind == Stage7DeltaCsvKind::outer) {
+                stage6_value = stage6_result.z_outer_reconstructed[idx];
+                stage7_value = stage7_result.z_outer_smooth[idx];
+            } else if (kind == Stage7DeltaCsvKind::inner) {
+                stage6_value = stage6_result.z_inner_reconstructed[idx];
+                stage7_value = stage7_result.z_inner_smooth[idx];
+            } else {
+                const double z_outer_stage6 = stage6_result.z_outer_reconstructed[idx];
+                const double z_inner_stage6 = stage6_result.z_inner_reconstructed[idx];
+                const double z_outer_stage7 = stage7_result.z_outer_smooth[idx];
+                const double z_inner_stage7 = stage7_result.z_inner_smooth[idx];
+                if (std::isfinite(z_outer_stage6) && std::isfinite(z_inner_stage6)) {
+                    stage6_value = z_outer_stage6 - z_inner_stage6;
+                }
+                if (std::isfinite(z_outer_stage7) && std::isfinite(z_inner_stage7)) {
+                    stage7_value = z_outer_stage7 - z_inner_stage7;
+                }
+            }
+            if (std::isfinite(stage6_value) && std::isfinite(stage7_value)) {
+                delta_value = stage7_value - stage6_value;
+            }
+
+            if (std::isfinite(stage6_value)) {
+                out << stage6_value;
+            } else {
+                out << "nan";
+            }
+            out << ',';
+            if (std::isfinite(stage7_value)) {
+                out << stage7_value;
+            } else {
+                out << "nan";
+            }
+            out << ',';
+            if (std::isfinite(delta_value)) {
+                out << delta_value;
+                const double abs_delta = std::fabs(delta_value);
+                max_abs_delta = std::max(max_abs_delta, abs_delta);
+                sum_abs_delta += abs_delta;
+                ++finite_delta_count;
+            } else {
+                out << "nan";
+            }
+            out << '\n';
+        }
+    }
+    mean_abs_delta = finite_delta_count > 0 ? (sum_abs_delta / static_cast<double>(finite_delta_count)) : 0.0;
+    return out.good();
+}
+
 bool writeStage7SummaryCsv(const GeometryStage7SmoothedSurfaceResult& result, const FoldPatchAnalysisConfig& config) {
     std::ofstream out(result.summary_csv_path);
     if (!out) {
@@ -1057,6 +1152,7 @@ bool writeStage7SummaryCsv(const GeometryStage7SmoothedSurfaceResult& result, co
            "inner_final_max_update,outer_fit_final_residual,inner_fit_final_residual,outer_fit_max_abs_residual,"
            "inner_fit_max_abs_residual,outer_fit_bending_energy,inner_fit_bending_energy,outer_solver_iterations_used,"
            "inner_solver_iterations_used,outer_solver_final_update,inner_solver_final_update,min_smooth_separation,max_smooth_separation,mean_smooth_separation,"
+           "max_abs_outer_delta,mean_abs_outer_delta,max_abs_inner_delta,mean_abs_inner_delta,max_abs_thickness_delta,mean_abs_thickness_delta,"
            "normal_orientation_outer,normal_orientation_inner,local_thickness_definition,metric_surface_definition,"
            "outer_mesh_vertex_count,outer_mesh_face_count,inner_mesh_vertex_count,inner_mesh_face_count,"
            "outer_mesh_unused_scalar_nodes,inner_mesh_unused_scalar_nodes\n";
@@ -1079,7 +1175,10 @@ bool writeStage7SummaryCsv(const GeometryStage7SmoothedSurfaceResult& result, co
         << result.inner_fit_bending_energy << ',' << result.outer_solver_iterations_used << ','
         << result.inner_solver_iterations_used << ',' << result.outer_solver_final_update << ','
         << result.inner_solver_final_update << ',' << result.min_smooth_separation << ','
-        << result.max_smooth_separation << ',' << result.mean_smooth_separation << ',' << result.normal_orientation_outer
+        << result.max_smooth_separation << ',' << result.mean_smooth_separation << ','
+        << result.max_abs_outer_delta << ',' << result.mean_abs_outer_delta << ',' << result.max_abs_inner_delta << ','
+        << result.mean_abs_inner_delta << ',' << result.max_abs_thickness_delta << ','
+        << result.mean_abs_thickness_delta << ',' << result.normal_orientation_outer
         << ',' << result.normal_orientation_inner << ',' << result.local_thickness_definition << ','
         << result.metric_surface_definition << ',' << result.outer_mesh_vertex_count << ','
         << result.outer_mesh_face_count << ',' << result.inner_mesh_vertex_count << ',' << result.inner_mesh_face_count
@@ -3082,6 +3181,51 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     }
     result.mean_smooth_separation = sum_sep / static_cast<double>(sep_count);
 
+    if (config.stage7_export_s7s6_deltas) {
+        double sum_abs_outer_delta = 0.0;
+        double sum_abs_inner_delta = 0.0;
+        double sum_abs_thickness_delta = 0.0;
+        std::size_t finite_outer_delta_count = 0;
+        std::size_t finite_inner_delta_count = 0;
+        std::size_t finite_thickness_delta_count = 0;
+        for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+            const double z_outer_stage6 = stage6_result.z_outer_reconstructed[idx];
+            const double z_outer_stage7 = result.z_outer_smooth[idx];
+            if (std::isfinite(z_outer_stage6) && std::isfinite(z_outer_stage7)) {
+                const double abs_delta = std::fabs(z_outer_stage7 - z_outer_stage6);
+                result.max_abs_outer_delta = std::max(result.max_abs_outer_delta, abs_delta);
+                sum_abs_outer_delta += abs_delta;
+                ++finite_outer_delta_count;
+            }
+
+            const double z_inner_stage6 = stage6_result.z_inner_reconstructed[idx];
+            const double z_inner_stage7 = result.z_inner_smooth[idx];
+            if (std::isfinite(z_inner_stage6) && std::isfinite(z_inner_stage7)) {
+                const double abs_delta = std::fabs(z_inner_stage7 - z_inner_stage6);
+                result.max_abs_inner_delta = std::max(result.max_abs_inner_delta, abs_delta);
+                sum_abs_inner_delta += abs_delta;
+                ++finite_inner_delta_count;
+            }
+
+            if (std::isfinite(z_outer_stage6) && std::isfinite(z_inner_stage6) && std::isfinite(z_outer_stage7) &&
+                std::isfinite(z_inner_stage7)) {
+                const double t_stage6 = z_outer_stage6 - z_inner_stage6;
+                const double t_stage7 = z_outer_stage7 - z_inner_stage7;
+                const double abs_delta = std::fabs(t_stage7 - t_stage6);
+                result.max_abs_thickness_delta = std::max(result.max_abs_thickness_delta, abs_delta);
+                sum_abs_thickness_delta += abs_delta;
+                ++finite_thickness_delta_count;
+            }
+        }
+        result.mean_abs_outer_delta =
+            finite_outer_delta_count > 0 ? (sum_abs_outer_delta / static_cast<double>(finite_outer_delta_count)) : 0.0;
+        result.mean_abs_inner_delta =
+            finite_inner_delta_count > 0 ? (sum_abs_inner_delta / static_cast<double>(finite_inner_delta_count)) : 0.0;
+        result.mean_abs_thickness_delta =
+            finite_thickness_delta_count > 0 ? (sum_abs_thickness_delta / static_cast<double>(finite_thickness_delta_count))
+                                             : 0.0;
+    }
+
     if (config.debug) {
         result.outer_smooth_csv_path = config.output_prefix + "_outer_smooth.csv";
         result.inner_smooth_csv_path = config.output_prefix + "_inner_smooth.csv";
@@ -3089,6 +3233,11 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
         result.metric_domain_mask_csv_path = config.output_prefix + "_smooth_metric_domain_mask.csv";
         result.smooth_non_crossing_adjustment_mask_csv_path =
             config.output_prefix + "_smooth_non_crossing_adjustment_mask.csv";
+        if (config.stage7_export_s7s6_deltas) {
+            result.outer_delta_csv_path = config.output_prefix + "_s7s6_outer_delta.csv";
+            result.inner_delta_csv_path = config.output_prefix + "_s7s6_inner_delta.csv";
+            result.thickness_delta_csv_path = config.output_prefix + "_s7s6_thickness_delta.csv";
+        }
         result.summary_csv_path = config.output_prefix + "_stage7_summary.csv";
         if (!writeStage7FieldCsv(result, result.outer_smooth_csv_path, "z_outer_smooth", result.z_outer_smooth)) {
             throw std::runtime_error("Failed to write Stage 7 outer smooth CSV");
@@ -3108,6 +3257,41 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
                                 "smooth_non_crossing_adjusted",
                                 result.smooth_non_crossing_adjustment_mask)) {
             throw std::runtime_error("Failed to write Stage 7 non-crossing-adjustment mask CSV");
+        }
+        if (config.stage7_export_s7s6_deltas) {
+            if (!writeStage7DeltaCsv(result.grid,
+                                     stage5_result.inside_disk_mask,
+                                     stage5_result,
+                                     stage6_result,
+                                     result,
+                                     Stage7DeltaCsvKind::outer,
+                                     result.outer_delta_csv_path,
+                                     result.max_abs_outer_delta,
+                                     result.mean_abs_outer_delta)) {
+                throw std::runtime_error("Failed to write Stage 7-vs-Stage 6 outer delta CSV");
+            }
+            if (!writeStage7DeltaCsv(result.grid,
+                                     stage5_result.inside_disk_mask,
+                                     stage5_result,
+                                     stage6_result,
+                                     result,
+                                     Stage7DeltaCsvKind::inner,
+                                     result.inner_delta_csv_path,
+                                     result.max_abs_inner_delta,
+                                     result.mean_abs_inner_delta)) {
+                throw std::runtime_error("Failed to write Stage 7-vs-Stage 6 inner delta CSV");
+            }
+            if (!writeStage7DeltaCsv(result.grid,
+                                     stage5_result.inside_disk_mask,
+                                     stage5_result,
+                                     stage6_result,
+                                     result,
+                                     Stage7DeltaCsvKind::thickness,
+                                     result.thickness_delta_csv_path,
+                                     result.max_abs_thickness_delta,
+                                     result.mean_abs_thickness_delta)) {
+                throw std::runtime_error("Failed to write Stage 7-vs-Stage 6 thickness delta CSV");
+            }
         }
         if (!writeStage7SummaryCsv(result, config)) {
             throw std::runtime_error("Failed to write Stage 7 summary CSV");
@@ -3215,6 +3399,12 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     result.messages.push_back("Geometry Stage 7 min smooth separation: " + std::to_string(result.min_smooth_separation));
     result.messages.push_back("Geometry Stage 7 max smooth separation: " + std::to_string(result.max_smooth_separation));
     result.messages.push_back("Geometry Stage 7 mean smooth separation: " + std::to_string(result.mean_smooth_separation));
+    if (config.stage7_export_s7s6_deltas) {
+        result.messages.push_back("Geometry Stage 7 max abs outer delta: " + formatScientific(result.max_abs_outer_delta));
+        result.messages.push_back("Geometry Stage 7 max abs inner delta: " + formatScientific(result.max_abs_inner_delta));
+        result.messages.push_back("Geometry Stage 7 max abs thickness delta: " +
+                                  formatScientific(result.max_abs_thickness_delta));
+    }
     if (config.debug) {
         result.messages.push_back("Geometry Stage 7 outer smooth CSV: " + result.outer_smooth_csv_path);
         result.messages.push_back("Geometry Stage 7 inner smooth CSV: " + result.inner_smooth_csv_path);
@@ -3222,6 +3412,12 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
         result.messages.push_back("Geometry Stage 7 metric-domain mask CSV: " + result.metric_domain_mask_csv_path);
         result.messages.push_back("Geometry Stage 7 non-crossing-adjustment mask CSV: " +
                                   result.smooth_non_crossing_adjustment_mask_csv_path);
+        if (config.stage7_export_s7s6_deltas) {
+            result.messages.push_back("Geometry Stage 7-vs-Stage 6 outer delta CSV: " + result.outer_delta_csv_path);
+            result.messages.push_back("Geometry Stage 7-vs-Stage 6 inner delta CSV: " + result.inner_delta_csv_path);
+            result.messages.push_back("Geometry Stage 7-vs-Stage 6 thickness delta CSV: " +
+                                      result.thickness_delta_csv_path);
+        }
         result.messages.push_back("Geometry Stage 7 summary CSV: " + result.summary_csv_path);
     }
     if (config.stage7_export_meshes) {

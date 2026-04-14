@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -24,6 +25,26 @@ void removeIfExists(const std::string& path) {
     if (!path.empty()) {
         std::filesystem::remove(path);
     }
+}
+
+std::vector<std::string> splitComma(const std::string& line) {
+    std::vector<std::string> parts;
+    std::stringstream ss(line);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        parts.push_back(item);
+    }
+    return parts;
+}
+
+std::vector<std::vector<std::string>> readCsvRows(const std::string& path) {
+    std::ifstream in(path);
+    std::vector<std::vector<std::string>> rows;
+    std::string line;
+    while (std::getline(in, line)) {
+        rows.push_back(splitComma(line));
+    }
+    return rows;
 }
 
 Capsid makeSimpleCapsid() {
@@ -1758,6 +1779,174 @@ void testStage7ThinPlateDeterminism() {
     removeIfExists(first.summary_csv_path);
 }
 
+void testStage7S7S6DeltaCsvsThinPlate() {
+    SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
+    FoldPatchAnalysisConfig config;
+    config.debug = true;
+    config.output_prefix = "stage7_s7s6_fit";
+    config.stage7_export_meshes = false;
+    config.stage7_method = FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit;
+    config.stage7_export_s7s6_deltas = true;
+
+    const std::size_t valid_idx = nodeIndex(2, 2, inputs.stage5.grid.nx);
+    const std::size_t nan_idx = nodeIndex(0, 0, inputs.stage5.grid.nx);
+    const std::size_t interp_idx = nodeIndex(1, 1, inputs.stage5.grid.nx);
+    inputs.stage5.hard_invalid_mask[valid_idx] = 1;
+    inputs.stage6.z_outer_reconstructed[nan_idx] = std::numeric_limits<double>::quiet_NaN();
+    inputs.stage6.z_inner_reconstructed[nan_idx] = std::numeric_limits<double>::quiet_NaN();
+
+    const auto first = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    assertTrue(std::filesystem::exists(first.outer_delta_csv_path), "outer delta csv should exist");
+    assertTrue(std::filesystem::exists(first.inner_delta_csv_path), "inner delta csv should exist");
+    assertTrue(std::filesystem::exists(first.thickness_delta_csv_path), "thickness delta csv should exist");
+
+    std::ifstream outer_header_file(first.outer_delta_csv_path);
+    std::ifstream inner_header_file(first.inner_delta_csv_path);
+    std::ifstream thick_header_file(first.thickness_delta_csv_path);
+    std::string outer_header;
+    std::string inner_header;
+    std::string thick_header;
+    std::getline(outer_header_file, outer_header);
+    std::getline(inner_header_file, inner_header);
+    std::getline(thick_header_file, thick_header);
+    assertTrue(outer_header ==
+                   "i,j,x,y,inside_disk,reconstructed,smooth_valid,metric_domain,paired_seed,interp_allowed,hard_invalid,"
+                   "reliable_core,z_outer_stage6,z_outer_stage7,delta_outer",
+               "outer delta csv header should match schema");
+    assertTrue(inner_header ==
+                   "i,j,x,y,inside_disk,reconstructed,smooth_valid,metric_domain,paired_seed,interp_allowed,hard_invalid,"
+                   "reliable_core,z_inner_stage6,z_inner_stage7,delta_inner",
+               "inner delta csv header should match schema");
+    assertTrue(thick_header ==
+                   "i,j,x,y,inside_disk,reconstructed,smooth_valid,metric_domain,paired_seed,interp_allowed,hard_invalid,"
+                   "reliable_core,t_stage6,t_stage7,delta_t",
+               "thickness delta csv header should match schema");
+
+    const auto outer_rows = readCsvRows(first.outer_delta_csv_path);
+    const auto inner_rows = readCsvRows(first.inner_delta_csv_path);
+    const auto thickness_rows = readCsvRows(first.thickness_delta_csv_path);
+    const std::size_t expected_row_count = (inputs.stage5.grid.nx * inputs.stage5.grid.ny) + 1;
+    assertTrue(outer_rows.size() == expected_row_count, "outer delta csv should include one row per grid node");
+    assertTrue(inner_rows.size() == expected_row_count, "inner delta csv should include one row per grid node");
+    assertTrue(thickness_rows.size() == expected_row_count, "thickness delta csv should include one row per grid node");
+
+    const std::size_t outer_row = valid_idx + 1;
+    const std::size_t inner_row = valid_idx + 1;
+    const std::size_t thick_row = valid_idx + 1;
+    const double z_outer_stage6 = std::stod(outer_rows[outer_row][12]);
+    const double z_outer_stage7 = std::stod(outer_rows[outer_row][13]);
+    const double delta_outer = std::stod(outer_rows[outer_row][14]);
+    assertTrue(near(z_outer_stage6, inputs.stage6.z_outer_reconstructed[valid_idx], 1e-6),
+               "outer stage6 column should match stage6 field");
+    assertTrue(near(z_outer_stage7, first.z_outer_smooth[valid_idx], 1e-5), "outer stage7 column should match stage7 field");
+    assertTrue(near(delta_outer, first.z_outer_smooth[valid_idx] - inputs.stage6.z_outer_reconstructed[valid_idx], 1e-5),
+               "outer delta should equal stage7-stage6");
+    const double z_inner_stage6 = std::stod(inner_rows[inner_row][12]);
+    const double z_inner_stage7 = std::stod(inner_rows[inner_row][13]);
+    const double delta_inner = std::stod(inner_rows[inner_row][14]);
+    assertTrue(near(z_inner_stage6, inputs.stage6.z_inner_reconstructed[valid_idx], 1e-6),
+               "inner stage6 column should match stage6 field");
+    assertTrue(near(z_inner_stage7, first.z_inner_smooth[valid_idx], 1e-5), "inner stage7 column should match stage7 field");
+    assertTrue(near(delta_inner, first.z_inner_smooth[valid_idx] - inputs.stage6.z_inner_reconstructed[valid_idx], 1e-5),
+               "inner delta should equal stage7-stage6");
+    const double t_stage6 = std::stod(thickness_rows[thick_row][12]);
+    const double t_stage7 = std::stod(thickness_rows[thick_row][13]);
+    const double delta_t = std::stod(thickness_rows[thick_row][14]);
+    const double expected_t_stage6 =
+        inputs.stage6.z_outer_reconstructed[valid_idx] - inputs.stage6.z_inner_reconstructed[valid_idx];
+    const double expected_t_stage7 = first.z_outer_smooth[valid_idx] - first.z_inner_smooth[valid_idx];
+    assertTrue(near(t_stage6, expected_t_stage6, 1e-6), "thickness stage6 column should match stage6 field");
+    assertTrue(near(t_stage7, expected_t_stage7, 1e-5), "thickness stage7 column should match stage7 field");
+    assertTrue(near(delta_t, expected_t_stage7 - expected_t_stage6, 1e-5), "thickness delta should equal stage7-stage6");
+
+    const std::size_t nan_row = nan_idx + 1;
+    assertTrue(outer_rows[nan_row][12] == "nan" && outer_rows[nan_row][14] == "nan",
+               "outer delta should write nan for invalid nodes");
+    assertTrue(inner_rows[nan_row][12] == "nan" && inner_rows[nan_row][14] == "nan",
+               "inner delta should write nan for invalid nodes");
+    assertTrue(thickness_rows[nan_row][12] == "nan" && thickness_rows[nan_row][14] == "nan",
+               "thickness delta should write nan for invalid nodes");
+
+    const std::size_t interp_row = interp_idx + 1;
+    assertTrue(outer_rows[outer_row][8] == "1", "paired_seed mask column should match underlying mask");
+    assertTrue(outer_rows[interp_row][9] == "1", "interp_allowed mask column should match underlying mask");
+    assertTrue(outer_rows[outer_row][7] == "1", "metric_domain mask column should match underlying mask");
+    assertTrue(outer_rows[outer_row][10] == "1", "hard_invalid mask column should match underlying mask");
+
+    const auto second = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    std::ifstream first_delta(first.outer_delta_csv_path);
+    std::ifstream second_delta(second.outer_delta_csv_path);
+    const std::string first_text((std::istreambuf_iterator<char>(first_delta)), std::istreambuf_iterator<char>());
+    const std::string second_text((std::istreambuf_iterator<char>(second_delta)), std::istreambuf_iterator<char>());
+    assertTrue(first_text == second_text, "Stage 7 s7s6 delta csv should be byte-deterministic");
+
+    removeIfExists(first.outer_smooth_csv_path);
+    removeIfExists(first.inner_smooth_csv_path);
+    removeIfExists(first.smooth_valid_mask_csv_path);
+    removeIfExists(first.metric_domain_mask_csv_path);
+    removeIfExists(first.smooth_non_crossing_adjustment_mask_csv_path);
+    removeIfExists(first.summary_csv_path);
+    removeIfExists(first.outer_delta_csv_path);
+    removeIfExists(first.inner_delta_csv_path);
+    removeIfExists(first.thickness_delta_csv_path);
+}
+
+void testStage7S7S6DeltaCsvsLegacySmooth() {
+    SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
+    FoldPatchAnalysisConfig config;
+    config.debug = true;
+    config.output_prefix = "stage7_s7s6_smooth";
+    config.stage7_export_meshes = false;
+    config.stage7_method = FoldPatchAnalysisConfig::Stage7Method::smooth;
+    config.stage7_export_s7s6_deltas = true;
+
+    const auto stage7 = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    assertTrue(std::filesystem::exists(stage7.outer_delta_csv_path), "legacy smooth should also emit outer delta csv");
+    assertTrue(std::filesystem::exists(stage7.inner_delta_csv_path), "legacy smooth should also emit inner delta csv");
+    assertTrue(std::filesystem::exists(stage7.thickness_delta_csv_path),
+               "legacy smooth should also emit thickness delta csv");
+
+    removeIfExists(stage7.outer_smooth_csv_path);
+    removeIfExists(stage7.inner_smooth_csv_path);
+    removeIfExists(stage7.smooth_valid_mask_csv_path);
+    removeIfExists(stage7.metric_domain_mask_csv_path);
+    removeIfExists(stage7.smooth_non_crossing_adjustment_mask_csv_path);
+    removeIfExists(stage7.summary_csv_path);
+    removeIfExists(stage7.outer_delta_csv_path);
+    removeIfExists(stage7.inner_delta_csv_path);
+    removeIfExists(stage7.thickness_delta_csv_path);
+}
+
+void testStage7S7S6DeltasDisabledByDefault() {
+    SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
+    FoldPatchAnalysisConfig config;
+    config.debug = true;
+    config.output_prefix = "stage7_s7s6_disabled";
+    config.stage7_export_meshes = false;
+    // default should remain disabled unless explicitly requested.
+    assertTrue(!config.stage7_export_s7s6_deltas, "s7s6 delta export flag should default to false");
+
+    const auto stage7 = runGeometryAnalysisStage7SurfaceSmoothing(inputs.stage6, inputs.stage5, config, nullptr);
+    assertTrue(stage7.outer_delta_csv_path.empty(), "outer delta path should remain empty when disabled");
+    assertTrue(stage7.inner_delta_csv_path.empty(), "inner delta path should remain empty when disabled");
+    assertTrue(stage7.thickness_delta_csv_path.empty(), "thickness delta path should remain empty when disabled");
+    assertTrue(near(stage7.max_abs_outer_delta, 0.0), "max abs outer delta should remain zero when disabled");
+    assertTrue(near(stage7.max_abs_inner_delta, 0.0), "max abs inner delta should remain zero when disabled");
+    assertTrue(near(stage7.max_abs_thickness_delta, 0.0),
+               "max abs thickness delta should remain zero when disabled");
+    assertTrue(near(stage7.mean_abs_outer_delta, 0.0), "mean abs outer delta should remain zero when disabled");
+    assertTrue(near(stage7.mean_abs_inner_delta, 0.0), "mean abs inner delta should remain zero when disabled");
+    assertTrue(near(stage7.mean_abs_thickness_delta, 0.0),
+               "mean abs thickness delta should remain zero when disabled");
+
+    removeIfExists(stage7.outer_smooth_csv_path);
+    removeIfExists(stage7.inner_smooth_csv_path);
+    removeIfExists(stage7.smooth_valid_mask_csv_path);
+    removeIfExists(stage7.metric_domain_mask_csv_path);
+    removeIfExists(stage7.smooth_non_crossing_adjustment_mask_csv_path);
+    removeIfExists(stage7.summary_csv_path);
+}
+
 void testStage1ToStage6Integration() {
     Capsid capsid = makeSimpleCapsid();
     FoldPatchAnalysisConfig config;
@@ -1977,6 +2166,9 @@ int main() {
         testStage7BoundaryModes();
         testStage7FitVsLegacyAndRoughness();
         testStage7ThinPlateDeterminism();
+        testStage7S7S6DeltaCsvsThinPlate();
+        testStage7S7S6DeltaCsvsLegacySmooth();
+        testStage7S7S6DeltasDisabledByDefault();
         testStage1ToStage7Integration();
         testStage1ToStage7ThinPlateIntegration();
         std::cout << "All geometry analysis Stage 1/2/3/4/5/6/7 tests passed.\n";

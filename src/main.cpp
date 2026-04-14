@@ -45,7 +45,7 @@ void printHelp(const std::string& program_name) {
       --geometry_fold_type <n>               Geometry fold type 2|3|5 (default: 2)
       --geometry_fold_index <n>              Geometry fold index for selected type (default: 0)
       --geometry_cylinder_radius <A>         Geometry cylinder radius in angstroms (default: 12.0)
-      --dvdW <A>                             Delta added to all assigned vdW radii in angstroms (default: 3.0)
+      --dvdW <A>                             Delta added to all assigned vdW radii in angstroms (default: 0.0)
       --geometry_grid_spacing <A>            Geometry Stage 4 XY grid spacing in angstroms (default: 2.0)
       --geometry_min_atoms_in_patch <n>      Minimum selected atoms required (default: 20)
       --geometry_boundary_margin <A>         Stage 5 boundary exclusion margin (default: auto)
@@ -74,6 +74,7 @@ void printHelp(const std::string& program_name) {
       --geometry_s7_boundary_condition_mode <free|fixed_to_stage6|soft_to_stage6> Stage 7 boundary policy
       --geometry_s7_solver_max_iterations <n> Stage 7 thin-plate solver max iterations (default: 500)
       --geometry_s7_solver_tolerance <x>      Stage 7 thin-plate solver tolerance (default: 1e-8)
+      --geometry_s7s6_deltas <true|false>     Export Stage 7-vs-Stage 6 delta-map CSVs (default: false)
 
   -h, --help                                 Show this help message
       --version                              Show version information
@@ -126,7 +127,7 @@ int main(int argc, char* argv[]) {
     int geometry_fold_type = 2;
     int geometry_fold_index = 0;
     double geometry_cylinder_radius = 12.0;
-    double delta_vdw = 3.0;
+    double delta_vdw = 0.0;
     double geometry_grid_spacing = 2.0;
     std::size_t geometry_min_atoms_in_patch = 20;
     double geometry_boundary_margin = 0.0;
@@ -156,6 +157,7 @@ int main(int argc, char* argv[]) {
         FoldPatchAnalysisConfig::Stage7BoundaryConditionMode::soft_to_stage6;
     std::size_t geometry_s7_solver_max_iterations = 500;
     double geometry_s7_solver_tolerance = 1e-8;
+    bool geometry_s7s6_deltas = false;
 
     const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
 
@@ -560,6 +562,19 @@ int main(int argc, char* argv[]) {
             geometry_s7_solver_tolerance = std::stod(argv[++i]);
             continue;
         }
+        if (arg == "--geometry_s7s6_deltas") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s7s6_deltas\n";
+                return 1;
+            }
+            try {
+                geometry_s7s6_deltas = parseBoolSwitch(argv[++i], "--geometry_s7s6_deltas");
+            } catch (const std::runtime_error& ex) {
+                std::cerr << ex.what() << '\n';
+                return 1;
+            }
+            continue;
+        }
 
         std::cerr << "Error: unknown argument: " << arg << '\n';
         return 1;
@@ -697,6 +712,7 @@ int main(int argc, char* argv[]) {
         geometry_config.stage7_boundary_condition_mode = geometry_s7_boundary_condition_mode;
         geometry_config.stage7_solver_max_iterations = geometry_s7_solver_max_iterations;
         geometry_config.stage7_solver_tolerance = geometry_s7_solver_tolerance;
+        geometry_config.stage7_export_s7s6_deltas = geometry_s7s6_deltas;
         geometry_config.stage7_enforce_non_crossing = geometry_smooth_enforce_non_crossing;
         geometry_config.stage7_min_separation = geometry_smooth_min_separation;
         geometry_config.stage7_export_meshes = geometry_smooth_export_meshes;
