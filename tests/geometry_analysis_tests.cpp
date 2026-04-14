@@ -1947,6 +1947,173 @@ void testStage7S7S6DeltasDisabledByDefault() {
     removeIfExists(stage7.summary_csv_path);
 }
 
+struct SyntheticStage8Inputs {
+    GeometryStage5SurfacePrepResult stage5;
+    GeometryStage7SmoothedSurfaceResult stage7;
+};
+
+SyntheticStage8Inputs makeSyntheticStage8QuadraticInputs() {
+    SyntheticStage8Inputs inputs;
+    inputs.stage5.success = true;
+    inputs.stage5.grid = buildStage4RegularGrid(3.0, 1.0);
+    inputs.stage5.node_count = inputs.stage5.grid.nx * inputs.stage5.grid.ny;
+    inputs.stage5.reliable_core_mask.assign(inputs.stage5.node_count, 1);
+    inputs.stage5.reliable_core_node_count = inputs.stage5.node_count;
+
+    inputs.stage7.success = true;
+    inputs.stage7.grid = inputs.stage5.grid;
+    inputs.stage7.node_count = inputs.stage5.node_count;
+    inputs.stage7.reconstructed_mask.assign(inputs.stage7.node_count, 1);
+    inputs.stage7.reliable_core_mask = inputs.stage5.reliable_core_mask;
+    inputs.stage7.smooth_valid_mask.assign(inputs.stage7.node_count, 1);
+    inputs.stage7.metric_domain_mask.assign(inputs.stage7.node_count, 1);
+    inputs.stage7.metric_domain_node_count = inputs.stage7.node_count;
+    inputs.stage7.smooth_valid_node_count = inputs.stage7.node_count;
+    inputs.stage7.z_outer_smooth.assign(inputs.stage7.node_count, std::numeric_limits<double>::quiet_NaN());
+    inputs.stage7.z_inner_smooth.assign(inputs.stage7.node_count, std::numeric_limits<double>::quiet_NaN());
+
+    const double ao = 2.0;
+    const double bo = -1.5;
+    const double co = 0.5;
+    const double do_ = 0.25;
+    const double eo = -0.4;
+    const double fo = 0.75;
+    const double ai = -1.0;
+    const double bi = 0.3;
+    const double ci = -0.2;
+    const double di = 0.1;
+    const double ei = 0.15;
+    const double fi = -0.05;
+
+    for (std::size_t j = 0; j < inputs.stage7.grid.ny; ++j) {
+        for (std::size_t i = 0; i < inputs.stage7.grid.nx; ++i) {
+            const std::size_t idx = nodeIndex(i, j, inputs.stage7.grid.nx);
+            const double x = inputs.stage7.grid.x_values[i];
+            const double y = inputs.stage7.grid.y_values[j];
+            inputs.stage7.z_outer_smooth[idx] = ao + (bo * x) + (co * y) + (do_ * x * x) + (eo * x * y) + (fo * y * y);
+            inputs.stage7.z_inner_smooth[idx] = ai + (bi * x) + (ci * y) + (di * x * x) + (ei * x * y) + (fi * y * y);
+        }
+    }
+    return inputs;
+}
+
+void testStage8ExactQuadraticRecovery() {
+    const SyntheticStage8Inputs inputs = makeSyntheticStage8QuadraticInputs();
+    FoldPatchAnalysisConfig config;
+    config.stage8_export_csv = false;
+    config.stage8_fit_radius = 2.5;
+    config.stage8_min_points = 9;
+    config.stage8_min_directional_span = 0.0;
+    const auto stage8 =
+        runGeometryAnalysisStage8DerivativeEstimation(inputs.stage7, inputs.stage5, config, nullptr);
+    const std::size_t idx = nodeIndex(3, 3, inputs.stage7.grid.nx); // center x=0,y=0
+    assertTrue(stage8.derivative_valid_mask[idx] == 1, "quadratic center node should be derivative-valid");
+    assertTrue(near(stage8.outer_dz_dx[idx], -1.5, 1e-10), "outer dz/dx should recover exact quadratic slope");
+    assertTrue(near(stage8.outer_dz_dy[idx], 0.5, 1e-10), "outer dz/dy should recover exact quadratic slope");
+    assertTrue(near(stage8.outer_d2z_dx2[idx], 0.5, 1e-10), "outer d2z/dx2 should recover exact quadratic curvature");
+    assertTrue(near(stage8.outer_d2z_dy2[idx], 1.5, 1e-10), "outer d2z/dy2 should recover exact quadratic curvature");
+    assertTrue(near(stage8.outer_d2z_dxdy[idx], -0.4, 1e-10), "outer d2z/dxdy should recover exact mixed term");
+    assertTrue(near(stage8.inner_dz_dx[idx], 0.3, 1e-10), "inner dz/dx should recover exact quadratic slope");
+    assertTrue(near(stage8.inner_dz_dy[idx], -0.2, 1e-10), "inner dz/dy should recover exact quadratic slope");
+    assertTrue(near(stage8.inner_d2z_dx2[idx], 0.2, 1e-10), "inner d2z/dx2 should recover exact quadratic curvature");
+    assertTrue(near(stage8.inner_d2z_dy2[idx], -0.1, 1e-10), "inner d2z/dy2 should recover exact quadratic curvature");
+    assertTrue(near(stage8.inner_d2z_dxdy[idx], 0.15, 1e-10), "inner d2z/dxdy should recover exact mixed term");
+    assertTrue(stage8.outer_fit_rms_residual[idx] < 1e-10, "outer fit residual should be near zero for exact quadratic");
+    assertTrue(stage8.inner_fit_rms_residual[idx] < 1e-10, "inner fit residual should be near zero for exact quadratic");
+}
+
+void testStage8InsufficientNeighborRejection() {
+    const SyntheticStage8Inputs inputs = makeSyntheticStage8QuadraticInputs();
+    FoldPatchAnalysisConfig config;
+    config.stage8_export_csv = false;
+    config.stage8_fit_radius = 0.01;
+    config.stage8_min_points = 9;
+    const auto stage8 =
+        runGeometryAnalysisStage8DerivativeEstimation(inputs.stage7, inputs.stage5, config, nullptr);
+    const std::size_t idx = nodeIndex(3, 3, inputs.stage7.grid.nx);
+    assertTrue(stage8.derivative_valid_mask[idx] == 0, "tiny radius should reject derivative fit");
+    assertTrue(stage8.derivative_invalid_insufficient_points_mask[idx] == 1,
+               "insufficient-point reason should be flagged");
+    assertTrue(std::isnan(stage8.outer_dz_dx[idx]), "invalid derivative output should remain NaN");
+}
+
+void testStage8BoundarySkewRejection() {
+    SyntheticStage8Inputs inputs = makeSyntheticStage8QuadraticInputs();
+    for (std::size_t j = 0; j < inputs.stage7.grid.ny; ++j) {
+        for (std::size_t i = 0; i < inputs.stage7.grid.nx; ++i) {
+            const std::size_t idx = nodeIndex(i, j, inputs.stage7.grid.nx);
+            if (inputs.stage7.grid.x_values[i] < 0.0) {
+                inputs.stage7.metric_domain_mask[idx] = 0;
+                inputs.stage7.smooth_valid_mask[idx] = 0;
+                inputs.stage5.reliable_core_mask[idx] = 0;
+            }
+        }
+    }
+    FoldPatchAnalysisConfig config;
+    config.stage8_export_csv = false;
+    config.stage8_fit_radius = 2.5;
+    config.stage8_min_points = 6;
+    const auto stage8 =
+        runGeometryAnalysisStage8DerivativeEstimation(inputs.stage7, inputs.stage5, config, nullptr);
+    const std::size_t idx = nodeIndex(3, 3, inputs.stage7.grid.nx);
+    assertTrue(stage8.derivative_valid_mask[idx] == 0, "one-sided neighborhood should be rejected");
+    assertTrue(stage8.derivative_invalid_boundary_neighbor_geometry_mask[idx] == 1,
+               "boundary-neighbor-geometry reason should be flagged");
+}
+
+void testStage8RankDeficientOrPoorConditioningRejection() {
+    SyntheticStage8Inputs inputs = makeSyntheticStage8QuadraticInputs();
+    for (std::size_t j = 0; j < inputs.stage7.grid.ny; ++j) {
+        for (std::size_t i = 0; i < inputs.stage7.grid.nx; ++i) {
+            const std::size_t idx = nodeIndex(i, j, inputs.stage7.grid.nx);
+            if (j != i) {
+                inputs.stage7.metric_domain_mask[idx] = 0;
+                inputs.stage7.smooth_valid_mask[idx] = 0;
+                inputs.stage5.reliable_core_mask[idx] = 0;
+            }
+        }
+    }
+    FoldPatchAnalysisConfig config;
+    config.stage8_export_csv = false;
+    config.stage8_fit_radius = 3.0;
+    config.stage8_min_points = 6;
+    config.stage8_require_centered_support = false;
+    config.stage8_min_directional_span = 0.5;
+    const auto stage8 =
+        runGeometryAnalysisStage8DerivativeEstimation(inputs.stage7, inputs.stage5, config, nullptr);
+    const std::size_t idx = nodeIndex(3, 3, inputs.stage7.grid.nx);
+    assertTrue(stage8.derivative_valid_mask[idx] == 0, "rank-deficient neighborhood should not validate");
+    assertTrue(stage8.derivative_invalid_rank_deficient_mask[idx] == 1 ||
+                   stage8.derivative_invalid_poor_conditioning_mask[idx] == 1 ||
+                   stage8.derivative_invalid_high_residual_mask[idx] == 1 ||
+                   stage8.derivative_invalid_boundary_neighbor_geometry_mask[idx] == 1 ||
+                   stage8.derivative_invalid_insufficient_points_mask[idx] == 1,
+               "pathological support should report a deterministic instability-related rejection reason");
+}
+
+void testStage8CsvExportSmoke() {
+    const SyntheticStage8Inputs inputs = makeSyntheticStage8QuadraticInputs();
+    FoldPatchAnalysisConfig config;
+    config.output_prefix = "stage8_smoke";
+    config.stage8_export_csv = true;
+    config.stage8_fit_radius = 2.5;
+    config.stage8_min_points = 9;
+    const auto stage8 =
+        runGeometryAnalysisStage8DerivativeEstimation(inputs.stage7, inputs.stage5, config, nullptr);
+    assertTrue(std::filesystem::exists(stage8.outer_derivatives_csv_path), "outer derivative csv should be exported");
+    assertTrue(std::filesystem::exists(stage8.inner_derivatives_csv_path), "inner derivative csv should be exported");
+    assertTrue(std::filesystem::exists(stage8.derivative_valid_mask_csv_path), "derivative-valid mask csv should exist");
+    assertTrue(std::filesystem::exists(stage8.derivative_failure_reason_csv_path), "failure-reason csv should exist");
+    assertTrue(std::filesystem::exists(stage8.derivative_summary_csv_path), "stage8 summary csv should exist");
+    assertTrue(stage8.outer_derivatives_csv_path.find("_outer_derivatives.csv") != std::string::npos,
+               "outer derivative filename should follow required suffix");
+    removeIfExists(stage8.outer_derivatives_csv_path);
+    removeIfExists(stage8.inner_derivatives_csv_path);
+    removeIfExists(stage8.derivative_valid_mask_csv_path);
+    removeIfExists(stage8.derivative_failure_reason_csv_path);
+    removeIfExists(stage8.derivative_summary_csv_path);
+}
+
 void testStage1ToStage6Integration() {
     Capsid capsid = makeSimpleCapsid();
     FoldPatchAnalysisConfig config;
@@ -2054,7 +2221,7 @@ void testStage1ToStage7Integration() {
     removeIfExists(result.stage7_smooth.inner_mesh_path);
 }
 
-void testStage1ToStage7ThinPlateIntegration() {
+void testStage1ToStage8ThinPlateIntegration() {
     Capsid capsid = makeSimpleCapsid();
     FoldPatchAnalysisConfig config;
     config.enabled = true;
@@ -2067,15 +2234,31 @@ void testStage1ToStage7ThinPlateIntegration() {
     config.stage6_export_obj_meshes = false;
     config.stage7_export_meshes = true;
     config.stage7_method = FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit;
+    config.stage8_enabled = true;
+    config.stage8_export_csv = true;
+    config.stage8_min_points = 6;
+    config.stage8_fit_radius = 3.0;
+    config.stage8_max_rms_residual = 1e6;
+    config.stage8_max_abs_residual = 1e6;
+    config.stage8_max_condition_indicator = 1e12;
+    config.stage8_require_centered_support = false;
+    config.stage8_min_directional_span = 0.1;
     config.output_prefix = "stage7_fit_integration";
 
     const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
-    assertTrue(result.success, "Stage 1-7 integration with thin-plate should succeed");
+    assertTrue(result.success, "Stage 1-8 integration with thin-plate should succeed");
     assertTrue(result.stage7_smooth.success, "thin-plate Stage 7 should succeed in full pipeline");
+    assertTrue(result.stage8_derivatives.success, "Stage 8 should succeed in full pipeline");
     assertTrue(result.stage7_smooth.stage7_method_label == "thin_plate_grid_fit", "Stage 7 method metadata should be populated");
     assertTrue(result.stage7_smooth.stage7_fit_active_node_count > 0, "thin-plate fit domain should be non-empty");
+    assertTrue(result.stage8_derivatives.derivative_fit_attempted_node_count > 0,
+               "Stage 8 should attempt derivative fits on the thin-plate metric domain");
     assertTrue(std::filesystem::exists(result.stage7_smooth.summary_csv_path), "thin-plate Stage 7 summary should exist");
     assertTrue(std::filesystem::exists(result.stage7_smooth.outer_mesh_path), "thin-plate Stage 7 mesh should exist");
+    assertTrue(std::filesystem::exists(result.stage8_derivatives.outer_derivatives_csv_path),
+               "Stage 8 outer derivative csv should exist");
+    assertTrue(std::filesystem::exists(result.stage8_derivatives.derivative_summary_csv_path),
+               "Stage 8 summary csv should exist");
 
     removeIfExists(result.stage2_patch.export_path);
     removeIfExists(result.stage4_raw.outer_csv_path);
@@ -2109,6 +2292,11 @@ void testStage1ToStage7ThinPlateIntegration() {
     removeIfExists(result.stage7_smooth.summary_csv_path);
     removeIfExists(result.stage7_smooth.outer_mesh_path);
     removeIfExists(result.stage7_smooth.inner_mesh_path);
+    removeIfExists(result.stage8_derivatives.outer_derivatives_csv_path);
+    removeIfExists(result.stage8_derivatives.inner_derivatives_csv_path);
+    removeIfExists(result.stage8_derivatives.derivative_valid_mask_csv_path);
+    removeIfExists(result.stage8_derivatives.derivative_failure_reason_csv_path);
+    removeIfExists(result.stage8_derivatives.derivative_summary_csv_path);
 }
 
 } // namespace
@@ -2169,9 +2357,14 @@ int main() {
         testStage7S7S6DeltaCsvsThinPlate();
         testStage7S7S6DeltaCsvsLegacySmooth();
         testStage7S7S6DeltasDisabledByDefault();
+        testStage8ExactQuadraticRecovery();
+        testStage8InsufficientNeighborRejection();
+        testStage8BoundarySkewRejection();
+        testStage8RankDeficientOrPoorConditioningRejection();
+        testStage8CsvExportSmoke();
         testStage1ToStage7Integration();
-        testStage1ToStage7ThinPlateIntegration();
-        std::cout << "All geometry analysis Stage 1/2/3/4/5/6/7 tests passed.\n";
+        testStage1ToStage8ThinPlateIntegration();
+        std::cout << "All geometry analysis Stage 1/2/3/4/5/6/7/8 tests passed.\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Geometry analysis test failure: " << e.what() << '\n';
