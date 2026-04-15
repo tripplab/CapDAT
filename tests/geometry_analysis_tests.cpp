@@ -2198,8 +2198,10 @@ void testStage9PlaneCurvature() {
     assertTrue(stage9.curvature_valid_node_count == stage8.node_count, "all derivative-valid plane nodes should be curvature-valid");
     for (std::size_t idx = 0; idx < stage9.node_count; ++idx) {
         assertTrue(near(stage9.outer_mean_curvature_H[idx], 0.0, 1e-12), "plane outer H should be zero");
+        assertTrue(near(stage9.outer_oriented_mean_curvature_H[idx], 0.0, 1e-12), "plane outer oriented H should be zero");
         assertTrue(near(stage9.outer_gaussian_curvature_K[idx], 0.0, 1e-12), "plane outer K should be zero");
         assertTrue(near(stage9.inner_mean_curvature_H[idx], 0.0, 1e-12), "plane inner H should be zero");
+        assertTrue(near(stage9.inner_oriented_mean_curvature_H[idx], 0.0, 1e-12), "plane inner oriented H should be zero");
         assertTrue(near(stage9.inner_gaussian_curvature_K[idx], 0.0, 1e-12), "plane inner K should be zero");
     }
 }
@@ -2236,9 +2238,17 @@ void testStage9ParaboloidCurvatureAtOrigin() {
     assertTrue(near(stage9.outer_mean_curvature_H[center], expected_H, 1e-12), "paraboloid outer H at origin should match analytic");
     assertTrue(near(stage9.outer_gaussian_curvature_K[center], expected_K, 1e-12),
                "paraboloid outer K at origin should match analytic");
+    assertTrue(near(stage9.outer_oriented_mean_curvature_H[center], -expected_H, 1e-12),
+               "paraboloid outer oriented H should flip when graph normal is not outward");
+    assertTrue(stage9.outer_orientation_flip_applied_flag[center] == 1, "outer center should apply orientation flip");
+    assertTrue(stage9.outer_outward_normal_alignment_flag[center] == 0, "outer center graph normal should not be outward");
     assertTrue(near(stage9.inner_mean_curvature_H[center], expected_H, 1e-12), "paraboloid inner H at origin should match analytic");
     assertTrue(near(stage9.inner_gaussian_curvature_K[center], expected_K, 1e-12),
                "paraboloid inner K at origin should match analytic");
+    assertTrue(near(stage9.inner_oriented_mean_curvature_H[center], -expected_H, 1e-12),
+               "paraboloid inner oriented H should flip when graph normal is not outward");
+    assertTrue(stage9.inner_orientation_flip_applied_flag[center] == 1, "inner center should apply orientation flip");
+    assertTrue(stage9.inner_outward_normal_alignment_flag[center] == 0, "inner center graph normal should not be outward");
 }
 
 void testStage9InvalidInputPropagation() {
@@ -2253,8 +2263,10 @@ void testStage9InvalidInputPropagation() {
     assertTrue(stage9.curvature_valid_mask[idx] == 0, "non-finite derivative input should invalidate curvature node");
     assertTrue(stage9.curvature_invalid_nonfinite_input_mask[idx] == 1, "non-finite input mask should be flagged");
     assertTrue(std::isnan(stage9.outer_mean_curvature_H[idx]), "invalid node outer H should remain NaN");
+    assertTrue(std::isnan(stage9.outer_oriented_mean_curvature_H[idx]), "invalid node outer oriented H should remain NaN");
     assertTrue(std::isnan(stage9.outer_gaussian_curvature_K[idx]), "invalid node outer K should remain NaN");
     assertTrue(std::isnan(stage9.inner_mean_curvature_H[idx]), "invalid node inner H should remain NaN");
+    assertTrue(std::isnan(stage9.inner_oriented_mean_curvature_H[idx]), "invalid node inner oriented H should remain NaN");
     assertTrue(std::isnan(stage9.inner_gaussian_curvature_K[idx]), "invalid node inner K should remain NaN");
     assertTrue(stage9.curvature_invalid_nonfinite_input_count == 1, "invalid non-finite input count should increment");
 }
@@ -2345,6 +2357,11 @@ void testStage9CsvExportIncludesQcColumns() {
     const auto hasColumn = [&header](const std::string& name) {
         return std::find(header.begin(), header.end(), name) != header.end();
     };
+    assertTrue(hasColumn("H_raw"), "outer curvature csv should include H_raw");
+    assertTrue(hasColumn("H_oriented"), "outer curvature csv should include H_oriented");
+    assertTrue(hasColumn("K_raw"), "outer curvature csv should include K_raw");
+    assertTrue(hasColumn("graph_normal_dot_radial"), "outer curvature csv should include graph_normal_dot_radial");
+    assertTrue(hasColumn("orientation_flip_applied"), "outer curvature csv should include orientation_flip_applied");
     assertTrue(hasColumn("K_global_tail_flag"), "outer curvature csv should include K_global_tail_flag");
     assertTrue(hasColumn("K_local_spike_flag"), "outer curvature csv should include K_local_spike_flag");
     assertTrue(hasColumn("K_qc_warn_flag"), "outer curvature csv should include K_qc_warn_flag");

@@ -3825,8 +3825,11 @@ Stage9ScalarStats computeStage9ScalarStats(const std::vector<double>& values, co
 
 bool writeStage9CurvatureCsv(const GeometryStage9CurvatureComputationResult& result,
                              const std::string& path,
-                             const std::vector<double>& H,
-                             const std::vector<double>& K,
+                             const std::vector<double>& raw_H,
+                             const std::vector<double>& oriented_H,
+                             const std::vector<double>& raw_K,
+                             const std::vector<double>& graph_normal_dot_radial,
+                             const std::vector<uint8_t>& orientation_flip_applied,
                              const std::vector<uint8_t>& global_tail_flag,
                              const std::vector<uint8_t>& local_spike_flag,
                              const std::vector<uint8_t>& qc_warn_flag,
@@ -3835,8 +3838,9 @@ bool writeStage9CurvatureCsv(const GeometryStage9CurvatureComputationResult& res
     if (!out) {
         return false;
     }
-    out << "i,j,x,y,reconstructed,reliable_core,metric_domain,derivative_valid,curvature_valid,H,K,"
-           "K_global_tail_flag,K_local_spike_flag,K_qc_warn_flag,K_confidence_class\n";
+    out << "i,j,x,y,reconstructed,reliable_core,metric_domain,derivative_valid,curvature_valid,H_raw,H_oriented,K_raw,"
+           "graph_normal_dot_radial,orientation_flip_applied,K_global_tail_flag,K_local_spike_flag,K_qc_warn_flag,"
+           "K_confidence_class\n";
     for (std::size_t j = 0; j < result.grid.ny; ++j) {
         for (std::size_t i = 0; i < result.grid.nx; ++i) {
             const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
@@ -3844,7 +3848,9 @@ bool writeStage9CurvatureCsv(const GeometryStage9CurvatureComputationResult& res
                 << static_cast<int>(result.reconstructed_mask[idx]) << ',' << static_cast<int>(result.reliable_core_mask[idx])
                 << ',' << static_cast<int>(result.metric_domain_mask[idx]) << ','
                 << static_cast<int>(result.derivative_valid_mask[idx]) << ','
-                << static_cast<int>(result.curvature_valid_mask[idx]) << ',' << H[idx] << ',' << K[idx] << ','
+                << static_cast<int>(result.curvature_valid_mask[idx]) << ',' << raw_H[idx] << ',' << oriented_H[idx] << ','
+                << raw_K[idx] << ',' << graph_normal_dot_radial[idx] << ','
+                << static_cast<int>(orientation_flip_applied[idx]) << ','
                 << static_cast<int>(global_tail_flag[idx]) << ',' << static_cast<int>(local_spike_flag[idx]) << ','
                 << static_cast<int>(qc_warn_flag[idx]) << ',' << static_cast<int>(confidence_class[idx]) << '\n';
         }
@@ -3886,8 +3892,12 @@ bool writeStage9SummaryCsv(const GeometryStage9CurvatureComputationResult& resul
            "outer_K_qc_warn_fraction_of_curvature_valid,inner_K_global_tail_fraction_of_curvature_valid,"
            "inner_K_local_spike_fraction_of_curvature_valid,inner_K_qc_warn_fraction_of_curvature_valid,"
            "outer_mean_H,outer_median_H,outer_stddev_H,outer_min_H,outer_max_H,"
+           "outer_mean_oriented_H,outer_median_oriented_H,outer_stddev_oriented_H,outer_min_oriented_H,"
+           "outer_max_oriented_H,"
            "outer_mean_K,outer_median_K,outer_stddev_K,outer_min_K,outer_max_K,"
            "inner_mean_H,inner_median_H,inner_stddev_H,inner_min_H,inner_max_H,"
+           "inner_mean_oriented_H,inner_median_oriented_H,inner_stddev_oriented_H,inner_min_oriented_H,"
+           "inner_max_oriented_H,"
            "inner_mean_K,inner_median_K,inner_stddev_K,inner_min_K,inner_max_K\n";
     out << result.node_count << ',' << result.metric_domain_node_count << ',' << result.derivative_valid_node_count << ','
         << result.curvature_valid_node_count << ',' << result.curvature_valid_fraction_of_metric_domain << ','
@@ -3902,9 +3912,13 @@ bool writeStage9SummaryCsv(const GeometryStage9CurvatureComputationResult& resul
         << result.inner_K_local_spike_fraction_of_curvature_valid << ','
         << result.inner_K_qc_warn_fraction_of_curvature_valid << ',' << result.outer_mean_H << ','
         << result.outer_median_H << ',' << result.outer_stddev_H << ',' << result.outer_min_H << ',' << result.outer_max_H
+        << ',' << result.outer_mean_oriented_H << ',' << result.outer_median_oriented_H << ','
+        << result.outer_stddev_oriented_H << ',' << result.outer_min_oriented_H << ',' << result.outer_max_oriented_H
         << ',' << result.outer_mean_K << ',' << result.outer_median_K << ',' << result.outer_stddev_K << ','
         << result.outer_min_K << ',' << result.outer_max_K << ',' << result.inner_mean_H << ',' << result.inner_median_H
         << ',' << result.inner_stddev_H << ',' << result.inner_min_H << ',' << result.inner_max_H << ','
+        << result.inner_mean_oriented_H << ',' << result.inner_median_oriented_H << ','
+        << result.inner_stddev_oriented_H << ',' << result.inner_min_oriented_H << ',' << result.inner_max_oriented_H << ','
         << result.inner_mean_K << ',' << result.inner_median_K << ',' << result.inner_stddev_K << ','
         << result.inner_min_K << ',' << result.inner_max_K << '\n';
     return out.good();
@@ -4254,9 +4268,17 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
     result.outer_K_confidence_class.assign(result.node_count, 0);
     result.inner_K_confidence_class.assign(result.node_count, 0);
     result.outer_mean_curvature_H.assign(result.node_count, nan);
+    result.outer_oriented_mean_curvature_H.assign(result.node_count, nan);
     result.outer_gaussian_curvature_K.assign(result.node_count, nan);
+    result.outer_graph_normal_dot_radial.assign(result.node_count, nan);
+    result.outer_outward_normal_alignment_flag.assign(result.node_count, 0);
+    result.outer_orientation_flip_applied_flag.assign(result.node_count, 0);
     result.inner_mean_curvature_H.assign(result.node_count, nan);
+    result.inner_oriented_mean_curvature_H.assign(result.node_count, nan);
     result.inner_gaussian_curvature_K.assign(result.node_count, nan);
+    result.inner_graph_normal_dot_radial.assign(result.node_count, nan);
+    result.inner_outward_normal_alignment_flag.assign(result.node_count, 0);
+    result.inner_orientation_flip_applied_flag.assign(result.node_count, 0);
 
     for (std::size_t idx = 0; idx < result.node_count; ++idx) {
         if (result.metric_domain_mask[idx] != 0) {
@@ -4316,8 +4338,34 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
         const double outer_H = outer_H_num / (2.0 * std::pow(outer_denom_base, 1.5));
         const double inner_H = inner_H_num / (2.0 * std::pow(inner_denom_base, 1.5));
 
+        const std::size_t i = idx % result.grid.nx;
+        const std::size_t j = idx / result.grid.nx;
+        const double x = result.grid.x_values[i];
+        const double y = result.grid.y_values[j];
+        const double outer_z = stage7_result.z_outer_smooth[idx];
+        const double inner_z = stage7_result.z_inner_smooth[idx];
+
+        const double outer_graph_normal_x = -outer_zx;
+        const double outer_graph_normal_y = -outer_zy;
+        const double outer_graph_normal_z = 1.0;
+        const double inner_graph_normal_x = -inner_zx;
+        const double inner_graph_normal_y = -inner_zy;
+        const double inner_graph_normal_z = 1.0;
+
+        const double outer_graph_normal_dot_radial =
+            (outer_graph_normal_x * x) + (outer_graph_normal_y * y) + (outer_graph_normal_z * outer_z);
+        const double inner_graph_normal_dot_radial =
+            (inner_graph_normal_x * x) + (inner_graph_normal_y * y) + (inner_graph_normal_z * inner_z);
+
+        const bool outer_graph_normal_is_outward = outer_graph_normal_dot_radial > 0.0;
+        const bool inner_graph_normal_is_outward = inner_graph_normal_dot_radial > 0.0;
+        const double outer_oriented_H = outer_graph_normal_is_outward ? outer_H : -outer_H;
+        const double inner_oriented_H = inner_graph_normal_is_outward ? inner_H : -inner_H;
+
         const bool finite_outputs =
-            std::isfinite(outer_H) && std::isfinite(outer_K) && std::isfinite(inner_H) && std::isfinite(inner_K);
+            std::isfinite(outer_H) && std::isfinite(outer_K) && std::isfinite(inner_H) && std::isfinite(inner_K) &&
+            std::isfinite(outer_graph_normal_dot_radial) && std::isfinite(inner_graph_normal_dot_radial) &&
+            std::isfinite(outer_oriented_H) && std::isfinite(inner_oriented_H);
         if (!finite_outputs) {
             result.curvature_invalid_nonfinite_output_mask[idx] = 1;
             ++result.curvature_invalid_nonfinite_output_count;
@@ -4327,9 +4375,17 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
         result.curvature_valid_mask[idx] = 1;
         ++result.curvature_valid_node_count;
         result.outer_mean_curvature_H[idx] = outer_H;
+        result.outer_oriented_mean_curvature_H[idx] = outer_oriented_H;
         result.outer_gaussian_curvature_K[idx] = outer_K;
+        result.outer_graph_normal_dot_radial[idx] = outer_graph_normal_dot_radial;
+        result.outer_outward_normal_alignment_flag[idx] = static_cast<uint8_t>(outer_graph_normal_is_outward ? 1 : 0);
+        result.outer_orientation_flip_applied_flag[idx] = static_cast<uint8_t>(outer_graph_normal_is_outward ? 0 : 1);
         result.inner_mean_curvature_H[idx] = inner_H;
+        result.inner_oriented_mean_curvature_H[idx] = inner_oriented_H;
         result.inner_gaussian_curvature_K[idx] = inner_K;
+        result.inner_graph_normal_dot_radial[idx] = inner_graph_normal_dot_radial;
+        result.inner_outward_normal_alignment_flag[idx] = static_cast<uint8_t>(inner_graph_normal_is_outward ? 1 : 0);
+        result.inner_orientation_flip_applied_flag[idx] = static_cast<uint8_t>(inner_graph_normal_is_outward ? 0 : 1);
         result.outer_K_confidence_class[idx] = 2;
         result.inner_K_confidence_class[idx] = 2;
     }
@@ -4455,6 +4511,13 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
     result.outer_stddev_H = outer_H_stats.stddev;
     result.outer_min_H = outer_H_stats.min;
     result.outer_max_H = outer_H_stats.max;
+    const Stage9ScalarStats outer_oriented_H_stats =
+        computeStage9ScalarStats(result.outer_oriented_mean_curvature_H, result.curvature_valid_mask);
+    result.outer_mean_oriented_H = outer_oriented_H_stats.mean;
+    result.outer_median_oriented_H = outer_oriented_H_stats.median;
+    result.outer_stddev_oriented_H = outer_oriented_H_stats.stddev;
+    result.outer_min_oriented_H = outer_oriented_H_stats.min;
+    result.outer_max_oriented_H = outer_oriented_H_stats.max;
 
     const Stage9ScalarStats outer_K_stats = computeStage9ScalarStats(result.outer_gaussian_curvature_K, result.curvature_valid_mask);
     result.outer_mean_K = outer_K_stats.mean;
@@ -4469,6 +4532,13 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
     result.inner_stddev_H = inner_H_stats.stddev;
     result.inner_min_H = inner_H_stats.min;
     result.inner_max_H = inner_H_stats.max;
+    const Stage9ScalarStats inner_oriented_H_stats =
+        computeStage9ScalarStats(result.inner_oriented_mean_curvature_H, result.curvature_valid_mask);
+    result.inner_mean_oriented_H = inner_oriented_H_stats.mean;
+    result.inner_median_oriented_H = inner_oriented_H_stats.median;
+    result.inner_stddev_oriented_H = inner_oriented_H_stats.stddev;
+    result.inner_min_oriented_H = inner_oriented_H_stats.min;
+    result.inner_max_oriented_H = inner_oriented_H_stats.max;
 
     const Stage9ScalarStats inner_K_stats = computeStage9ScalarStats(result.inner_gaussian_curvature_K, result.curvature_valid_mask);
     result.inner_mean_K = inner_K_stats.mean;
@@ -4494,7 +4564,10 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
         if (!writeStage9CurvatureCsv(result,
                                      result.outer_curvature_csv_path,
                                      result.outer_mean_curvature_H,
+                                     result.outer_oriented_mean_curvature_H,
                                      result.outer_gaussian_curvature_K,
+                                     result.outer_graph_normal_dot_radial,
+                                     result.outer_orientation_flip_applied_flag,
                                      result.outer_K_global_tail_flag,
                                      result.outer_K_local_spike_flag,
                                      result.outer_K_qc_warn_flag,
@@ -4504,7 +4577,10 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
         if (!writeStage9CurvatureCsv(result,
                                      result.inner_curvature_csv_path,
                                      result.inner_mean_curvature_H,
+                                     result.inner_oriented_mean_curvature_H,
                                      result.inner_gaussian_curvature_K,
+                                     result.inner_graph_normal_dot_radial,
+                                     result.inner_orientation_flip_applied_flag,
                                      result.inner_K_global_tail_flag,
                                      result.inner_K_local_spike_flag,
                                      result.inner_K_qc_warn_flag,
@@ -4540,12 +4616,24 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
     result.messages.push_back("Geometry Stage 9 outer H stats (mean/median/std/min/max): " + std::to_string(result.outer_mean_H) +
                               ", " + std::to_string(result.outer_median_H) + ", " + std::to_string(result.outer_stddev_H) + ", " +
                               std::to_string(result.outer_min_H) + ", " + std::to_string(result.outer_max_H));
+    result.messages.push_back("Geometry Stage 9 outer oriented H stats (mean/median/std/min/max): " +
+                              std::to_string(result.outer_mean_oriented_H) + ", " +
+                              std::to_string(result.outer_median_oriented_H) + ", " +
+                              std::to_string(result.outer_stddev_oriented_H) + ", " +
+                              std::to_string(result.outer_min_oriented_H) + ", " +
+                              std::to_string(result.outer_max_oriented_H));
     result.messages.push_back("Geometry Stage 9 outer K stats (mean/median/std/min/max): " + std::to_string(result.outer_mean_K) +
                               ", " + std::to_string(result.outer_median_K) + ", " + std::to_string(result.outer_stddev_K) + ", " +
                               std::to_string(result.outer_min_K) + ", " + std::to_string(result.outer_max_K));
     result.messages.push_back("Geometry Stage 9 inner H stats (mean/median/std/min/max): " + std::to_string(result.inner_mean_H) +
                               ", " + std::to_string(result.inner_median_H) + ", " + std::to_string(result.inner_stddev_H) + ", " +
                               std::to_string(result.inner_min_H) + ", " + std::to_string(result.inner_max_H));
+    result.messages.push_back("Geometry Stage 9 inner oriented H stats (mean/median/std/min/max): " +
+                              std::to_string(result.inner_mean_oriented_H) + ", " +
+                              std::to_string(result.inner_median_oriented_H) + ", " +
+                              std::to_string(result.inner_stddev_oriented_H) + ", " +
+                              std::to_string(result.inner_min_oriented_H) + ", " +
+                              std::to_string(result.inner_max_oriented_H));
     result.messages.push_back("Geometry Stage 9 inner K stats (mean/median/std/min/max): " + std::to_string(result.inner_mean_K) +
                               ", " + std::to_string(result.inner_median_K) + ", " + std::to_string(result.inner_stddev_K) + ", " +
                               std::to_string(result.inner_min_K) + ", " + std::to_string(result.inner_max_K));
