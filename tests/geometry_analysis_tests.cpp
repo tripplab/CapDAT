@@ -496,6 +496,15 @@ void testStage1IdentityFor2_0() {
     assertTrue(result.resolved_fold_name == "2_0", "resolved fold should be 2_0");
     assertTrue(result.used_identity_rotation, "2_0 -> +Z should be identity");
     assertTrue(!result.coordinates_modified_in_place, "identity transform should not alter coordinates");
+    bool found_identity_frame_note = false;
+    for (const std::string& message : result.messages) {
+        if (message.find("final working frame: derived_reoriented_frame (already aligned to +Z; workflow recorded without coordinate changes)") !=
+            std::string::npos) {
+            found_identity_frame_note = true;
+            break;
+        }
+    }
+    assertTrue(found_identity_frame_note, "identity Stage 1 logs should clarify frame provenance without coordinate edits");
 
     const auto& state = capsid.orientationState();
     assertTrue(state.reoriented_in_place, "orientation state should mark reoriented workflow");
@@ -2203,6 +2212,10 @@ void testStage9PlaneCurvature() {
         assertTrue(near(stage9.inner_mean_curvature_H[idx], 0.0, 1e-12), "plane inner H should be zero");
         assertTrue(near(stage9.inner_oriented_mean_curvature_H[idx], 0.0, 1e-12), "plane inner oriented H should be zero");
         assertTrue(near(stage9.inner_gaussian_curvature_K[idx], 0.0, 1e-12), "plane inner K should be zero");
+        assertTrue(std::fabs(stage9.outer_graph_normal_dot_radial[idx]) <= 1.0 + 1e-12,
+                   "plane outer graph_normal_dot_radial should be normalized to [-1,1]");
+        assertTrue(std::fabs(stage9.inner_graph_normal_dot_radial[idx]) <= 1.0 + 1e-12,
+                   "plane inner graph_normal_dot_radial should be normalized to [-1,1]");
     }
 }
 
