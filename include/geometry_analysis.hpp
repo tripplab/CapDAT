@@ -39,6 +39,7 @@ struct PatchAtom {
 struct FoldPatchAnalysisConfig {
     enum class Stage7Method : uint8_t { smooth = 0, thin_plate_grid_fit = 1 };
     enum class Stage7BoundaryConditionMode : uint8_t { free = 0, fixed_to_stage6 = 1, soft_to_stage6 = 2 };
+    enum class Stage10ThicknessMethod : uint8_t { vertical = 0 };
     enum class MeshExportFormat : uint8_t { obj = 0, stl = 1 };
 
     bool enabled = false;
@@ -93,6 +94,7 @@ struct FoldPatchAnalysisConfig {
     std::size_t stage9_qc_min_neighbors = 3;
     double stage9_qc_abs_scale_floor = 1e-6;
     bool stage10_enabled = true;
+    Stage10ThicknessMethod stage10_thickness_method = Stage10ThicknessMethod::vertical;
     bool stage10_export_csv = true;
     bool stage10_use_curvature_valid_domain_only = false;
     double stage10_min_thickness = 0.0;
@@ -628,13 +630,14 @@ struct GeometryStage10ThicknessResult {
     std::size_t node_count = 0;
     std::size_t thickness_attempted_node_count = 0;
     std::size_t thickness_valid_node_count = 0;
-    std::size_t thickness_invalid_node_count = 0;
-    std::size_t thickness_invalid_outside_domain_count = 0;
+    std::size_t thickness_excluded_outside_domain_count = 0;
+    std::size_t thickness_attempted_invalid_node_count = 0;
     std::size_t thickness_invalid_nonfinite_surface_count = 0;
     std::size_t thickness_invalid_negative_or_zero_count = 0;
     std::size_t thickness_invalid_below_min_threshold_count = 0;
     std::size_t thickness_invalid_above_max_threshold_count = 0;
     std::size_t thickness_qc_warn_count = 0;
+    std::size_t thickness_valid_and_curvature_valid_node_count = 0;
 
     double mean_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
     double median_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
@@ -642,10 +645,13 @@ struct GeometryStage10ThicknessResult {
     double min_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
     double max_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
     double thickness_valid_fraction_of_metric_domain = std::numeric_limits<double>::quiet_NaN();
-    double thickness_valid_fraction_of_curvature_valid = std::numeric_limits<double>::quiet_NaN();
+    double thickness_valid_intersection_fraction_of_metric_domain = std::numeric_limits<double>::quiet_NaN();
 
-    std::string thickness_method_label = "vertical_difference";
-    std::string local_thickness_definition = "z_outer_smooth_minus_z_inner_smooth";
+    std::string thickness_method_label = "stage10_vertical_difference_from_stage7_smooth_surfaces";
+    std::string local_thickness_definition = "stage7_z_outer_smooth_minus_stage7_z_inner_smooth";
+    std::string thickness_input_surface_definition = "stage7_smoothed_outer_inner_graph_surfaces";
+    std::string thickness_contract_note =
+        "stage10_v1_vertical_thickness_is_stage7_smooth_vertical_separation_repackaged_as_a_dedicated_stage10_field";
     std::string thickness_domain_definition = "stage7_metric_domain";
 
     std::string thickness_vertical_csv_path;

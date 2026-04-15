@@ -108,6 +108,14 @@ const char* stage7BoundaryConditionModeLabel(FoldPatchAnalysisConfig::Stage7Boun
     return "unknown";
 }
 
+const char* stage10ThicknessMethodLabel(FoldPatchAnalysisConfig::Stage10ThicknessMethod method) {
+    switch (method) {
+    case FoldPatchAnalysisConfig::Stage10ThicknessMethod::vertical:
+        return "vertical";
+    }
+    return "unknown";
+}
+
 bool writeGeometryRunSummaryJson(const FoldPatchAnalysisConfig& config,
                                  const ParserConfig& parser_config,
                                  const std::string& path) {
@@ -186,6 +194,7 @@ bool writeGeometryRunSummaryJson(const FoldPatchAnalysisConfig& config,
     out << "  },\n";
     out << "  \"stage10\": {\n";
     out << "    \"enabled\": " << (config.stage10_enabled ? "true" : "false") << ",\n";
+    out << "    \"thickness_method\": \"" << stage10ThicknessMethodLabel(config.stage10_thickness_method) << "\",\n";
     out << "    \"export_csv\": " << (config.stage10_export_csv ? "true" : "false") << ",\n";
     out << "    \"use_curvature_valid_domain_only\": "
         << (config.stage10_use_curvature_valid_domain_only ? "true" : "false") << ",\n";
@@ -4046,18 +4055,28 @@ bool writeStage10SummaryCsv(const GeometryStage10ThicknessResult& result, const 
     if (!out) {
         return false;
     }
-    out << "thickness_method_label,local_thickness_definition,thickness_domain_definition,node_count,"            "thickness_attempted_node_count,thickness_valid_node_count,thickness_invalid_node_count,"            "thickness_invalid_outside_domain_count,thickness_invalid_nonfinite_surface_count,"            "thickness_invalid_negative_or_zero_count,thickness_invalid_below_min_threshold_count,"            "thickness_invalid_above_max_threshold_count,thickness_qc_warn_count,mean_thickness_vertical,"            "median_thickness_vertical,stddev_thickness_vertical,min_thickness_vertical,max_thickness_vertical,"            "thickness_valid_fraction_of_metric_domain,thickness_valid_fraction_of_curvature_valid\n";
+    out << "thickness_method_label,local_thickness_definition,thickness_input_surface_definition,"
+           "thickness_contract_note,thickness_domain_definition,node_count,thickness_excluded_outside_domain_count,"
+           "thickness_attempted_node_count,thickness_valid_node_count,thickness_attempted_invalid_node_count,"
+           "thickness_invalid_nonfinite_surface_count,thickness_invalid_negative_or_zero_count,"
+           "thickness_invalid_below_min_threshold_count,thickness_invalid_above_max_threshold_count,"
+           "thickness_qc_warn_count,thickness_valid_and_curvature_valid_node_count,mean_thickness_vertical,"
+           "median_thickness_vertical,stddev_thickness_vertical,min_thickness_vertical,max_thickness_vertical,"
+           "thickness_valid_fraction_of_metric_domain,thickness_valid_intersection_fraction_of_metric_domain\n";
     out << result.thickness_method_label << ',' << result.local_thickness_definition << ','
-        << result.thickness_domain_definition << ',' << result.node_count << ',' << result.thickness_attempted_node_count
-        << ',' << result.thickness_valid_node_count << ',' << result.thickness_invalid_node_count << ','
-        << result.thickness_invalid_outside_domain_count << ',' << result.thickness_invalid_nonfinite_surface_count << ','
+        << result.thickness_input_surface_definition << ',' << result.thickness_contract_note << ','
+        << result.thickness_domain_definition << ',' << result.node_count << ','
+        << result.thickness_excluded_outside_domain_count << ',' << result.thickness_attempted_node_count << ','
+        << result.thickness_valid_node_count << ',' << result.thickness_attempted_invalid_node_count << ','
+        << result.thickness_invalid_nonfinite_surface_count << ','
         << result.thickness_invalid_negative_or_zero_count << ','
         << result.thickness_invalid_below_min_threshold_count << ','
         << result.thickness_invalid_above_max_threshold_count << ',' << result.thickness_qc_warn_count << ','
+        << result.thickness_valid_and_curvature_valid_node_count << ','
         << result.mean_thickness_vertical << ',' << result.median_thickness_vertical << ','
         << result.stddev_thickness_vertical << ',' << result.min_thickness_vertical << ','
         << result.max_thickness_vertical << ',' << result.thickness_valid_fraction_of_metric_domain << ','
-        << result.thickness_valid_fraction_of_curvature_valid << '\n';
+        << result.thickness_valid_intersection_fraction_of_metric_domain << '\n';
     return out.good();
 }
 } // namespace
@@ -4816,6 +4835,9 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
     if (stage7_result.node_count == 0 || stage7_result.grid.nx == 0 || stage7_result.grid.ny == 0) {
         throw std::runtime_error("Stage 10 requires a non-empty Stage 7 grid");
     }
+    if (config.stage10_thickness_method != FoldPatchAnalysisConfig::Stage10ThicknessMethod::vertical) {
+        throw std::runtime_error("Stage 10 requires geometry_thickness_method=vertical");
+    }
 
     result.messages.push_back("Geometry Stage 10");
     result.messages.push_back("Geometry analysis: starting Stage 10 vertical thickness computation.");
@@ -4853,13 +4875,9 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
     }
 
     std::size_t metric_domain_node_count = 0;
-    std::size_t curvature_valid_node_count = 0;
     for (std::size_t idx = 0; idx < result.node_count; ++idx) {
         if (result.metric_domain_mask[idx] != 0) {
             ++metric_domain_node_count;
-        }
-        if (result.curvature_valid_mask[idx] != 0) {
-            ++curvature_valid_node_count;
         }
     }
 
@@ -4868,7 +4886,7 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
                                (!config.stage10_use_curvature_valid_domain_only || result.curvature_valid_mask[idx] != 0);
         if (!in_domain) {
             result.thickness_invalid_outside_domain_mask[idx] = 1;
-            ++result.thickness_invalid_outside_domain_count;
+            ++result.thickness_excluded_outside_domain_count;
             continue;
         }
 
@@ -4879,6 +4897,7 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
         const double z_inner = stage7_result.z_inner_smooth[idx];
         if (!std::isfinite(z_outer) || !std::isfinite(z_inner)) {
             result.thickness_invalid_nonfinite_surface_mask[idx] = 1;
+            ++result.thickness_attempted_invalid_node_count;
             ++result.thickness_invalid_nonfinite_surface_count;
             continue;
         }
@@ -4888,30 +4907,34 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
 
         if (t_z <= tolerance) {
             result.thickness_invalid_negative_or_zero_mask[idx] = 1;
+            ++result.thickness_attempted_invalid_node_count;
             ++result.thickness_invalid_negative_or_zero_count;
             continue;
         }
         if (config.stage10_min_thickness > 0.0 && t_z < config.stage10_min_thickness) {
             result.thickness_invalid_below_min_threshold_mask[idx] = 1;
+            ++result.thickness_attempted_invalid_node_count;
             ++result.thickness_invalid_below_min_threshold_count;
             continue;
         }
         if (config.stage10_max_thickness > 0.0 && t_z > config.stage10_max_thickness) {
             result.thickness_invalid_above_max_threshold_mask[idx] = 1;
+            ++result.thickness_attempted_invalid_node_count;
             ++result.thickness_invalid_above_max_threshold_count;
             continue;
         }
 
         result.thickness_valid_mask[idx] = 1;
         ++result.thickness_valid_node_count;
+        if (result.curvature_valid_mask[idx] != 0) {
+            ++result.thickness_valid_and_curvature_valid_node_count;
+        }
 
         if (!config.stage10_use_curvature_valid_domain_only && result.curvature_valid_mask[idx] == 0) {
             result.thickness_qc_warn_mask[idx] = 1;
             ++result.thickness_qc_warn_count;
         }
     }
-
-    result.thickness_invalid_node_count = result.thickness_attempted_node_count - result.thickness_valid_node_count;
 
     const Stage10ScalarStats stats = computeStage10ScalarStats(result.thickness_vertical, result.thickness_valid_mask);
     result.mean_thickness_vertical = stats.mean;
@@ -4923,10 +4946,9 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
     if (metric_domain_node_count > 0) {
         result.thickness_valid_fraction_of_metric_domain =
             static_cast<double>(result.thickness_valid_node_count) / static_cast<double>(metric_domain_node_count);
-    }
-    if (curvature_valid_node_count > 0) {
-        result.thickness_valid_fraction_of_curvature_valid =
-            static_cast<double>(result.thickness_valid_node_count) / static_cast<double>(curvature_valid_node_count);
+        result.thickness_valid_intersection_fraction_of_metric_domain =
+            static_cast<double>(result.thickness_valid_and_curvature_valid_node_count) /
+            static_cast<double>(metric_domain_node_count);
     }
 
     if (config.stage10_export_csv) {
@@ -4948,9 +4970,16 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
         }
     }
 
+    result.messages.push_back("Geometry Stage 10 method: " + std::string(stage10ThicknessMethodLabel(config.stage10_thickness_method)));
     result.messages.push_back("Geometry Stage 10 domain mode: " + result.thickness_domain_definition);
     result.messages.push_back("Geometry Stage 10 attempted node count: " + std::to_string(result.thickness_attempted_node_count));
     result.messages.push_back("Geometry Stage 10 valid node count: " + std::to_string(result.thickness_valid_node_count));
+    result.messages.push_back("Geometry Stage 10 excluded outside-domain node count: " +
+                              std::to_string(result.thickness_excluded_outside_domain_count));
+    result.messages.push_back("Geometry Stage 10 attempted-invalid node count: " +
+                              std::to_string(result.thickness_attempted_invalid_node_count));
+    result.messages.push_back("Geometry Stage 10 thickness-valid and curvature-valid intersection node count: " +
+                              std::to_string(result.thickness_valid_and_curvature_valid_node_count));
 
     if (result.thickness_valid_node_count > 0) {
         result.messages.push_back("Geometry Stage 10 thickness stats (mean/min/max): " + std::to_string(result.mean_thickness_vertical) +
