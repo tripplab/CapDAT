@@ -66,8 +66,8 @@ void printHelp(const std::string& program_name) {
       --geometry_smooth_enforce_non_crossing <true|false>  Enforce Stage 7 non-crossing constraint (default: true)
       --geometry_smooth_min_separation <A>   Stage 7 minimum outer-inner separation in angstroms (default: 1.0)
       --geometry_smooth_export_meshes <true|false> Export Stage 7 smoothed meshes (default: true)
-      --geometry_s7_method <smooth|thin_plate_grid_fit> Stage 7 method selector (default: smooth)
-      --geometry_s7_lambda <x>                Stage 7 thin-plate bending regularization weight (default: 1.0)
+      --geometry_s7_method <smooth|thin_plate_grid_fit> Stage 7 method selector (default: thin_plate_grid_fit)
+      --geometry_s7_lambda <x>                Stage 7 thin-plate bending regularization weight (default: 3.0)
       --geometry_s7_data_weight_seed <x>      Stage 7 fidelity weight for paired-seed nodes (default: 1.0)
       --geometry_s7_data_weight_interp <x>    Stage 7 fidelity weight for reconstructed non-seed nodes (default: 0.25)
       --geometry_s7_use_reliable_core_only_for_fit <true|false> Restrict Stage 7 fit domain to reliable core
@@ -78,7 +78,7 @@ void printHelp(const std::string& program_name) {
 
   [Geometry derivative]
       --geometry_s8_enabled <true|false>      Stage 8 derivative estimation enable switch (default: true)
-      --geometry_s8_fit_radius <A>            Stage 8 local-support radius in angstroms (default: auto)
+      --geometry_s8_fit_radius <A>            Stage 8 local-support radius in angstroms (default: 3.0)
       --geometry_s8_min_points <n>            Stage 8 minimum support points per fit (default: 9)
       --geometry_s8_max_points <n>            Stage 8 maximum support points per fit (default: all in radius)
       --geometry_s8_max_rms_residual <x>      Stage 8 max RMS residual per fit (default: 0.25)
@@ -160,8 +160,8 @@ int main(int argc, char* argv[]) {
     double geometry_smooth_min_separation = 1.0;
     // Stage 7 mesh export runs by default when Stage 7 smoothing is enabled.
     bool geometry_smooth_export_meshes = true;
-    FoldPatchAnalysisConfig::Stage7Method geometry_s7_method = FoldPatchAnalysisConfig::Stage7Method::smooth;
-    double geometry_s7_lambda = 1.0;
+    FoldPatchAnalysisConfig::Stage7Method geometry_s7_method = FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit;
+    double geometry_s7_lambda = 3.0;
     double geometry_s7_data_weight_seed = 1.0;
     double geometry_s7_data_weight_interp = 0.25;
     bool geometry_s7_use_reliable_core_only_for_fit = false;
@@ -171,7 +171,7 @@ int main(int argc, char* argv[]) {
     double geometry_s7_solver_tolerance = 1e-8;
     bool geometry_s7s6_deltas = false;
     bool geometry_s8_enabled = true;
-    double geometry_s8_fit_radius = 0.0;
+    double geometry_s8_fit_radius = 3.0;
     std::size_t geometry_s8_min_points = 9;
     std::size_t geometry_s8_max_points = 0;
     double geometry_s8_max_rms_residual = 0.25;
