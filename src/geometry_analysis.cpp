@@ -178,7 +178,11 @@ bool writeGeometryRunSummaryJson(const FoldPatchAnalysisConfig& config,
     out << "  },\n";
     out << "  \"stage9\": {\n";
     out << "    \"enabled\": " << (config.stage9_enabled ? "true" : "false") << ",\n";
-    out << "    \"export_csv\": " << (config.stage9_export_csv ? "true" : "false") << "\n";
+    out << "    \"export_csv\": " << (config.stage9_export_csv ? "true" : "false") << ",\n";
+    out << "    \"qc_n_tail\": " << config.stage9_qc_n_tail << ",\n";
+    out << "    \"qc_n_spike\": " << config.stage9_qc_n_spike << ",\n";
+    out << "    \"qc_min_neighbors\": " << config.stage9_qc_min_neighbors << ",\n";
+    out << "    \"qc_abs_scale_floor\": " << config.stage9_qc_abs_scale_floor << "\n";
     out << "  },\n";
     out << "  \"parser\": {\n";
     out << "    \"include_hetatm\": " << (parser_config.include_hetatm ? "true" : "false") << ",\n";
@@ -3740,6 +3744,44 @@ struct Stage9ScalarStats {
     double max = std::numeric_limits<double>::quiet_NaN();
 };
 
+double medianOfSortedValues(const std::vector<double>& sorted_values) {
+    if (sorted_values.empty()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    const std::size_t n = sorted_values.size();
+    if ((n % 2U) == 1U) {
+        return sorted_values[n / 2U];
+    }
+    return 0.5 * (sorted_values[(n / 2U) - 1U] + sorted_values[n / 2U]);
+}
+
+double medianOfValues(std::vector<double> values) {
+    if (values.empty()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    std::sort(values.begin(), values.end());
+    return medianOfSortedValues(values);
+}
+
+double robustSigmaFromValues(const std::vector<double>& values, double median) {
+    if (values.empty() || !std::isfinite(median)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    std::vector<double> abs_deviations;
+    abs_deviations.reserve(values.size());
+    for (const double value : values) {
+        if (!std::isfinite(value)) {
+            continue;
+        }
+        abs_deviations.push_back(std::abs(value - median));
+    }
+    if (abs_deviations.empty()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    const double mad = medianOfValues(abs_deviations);
+    return 1.4826 * mad;
+}
+
 Stage9ScalarStats computeStage9ScalarStats(const std::vector<double>& values, const std::vector<uint8_t>& valid_mask) {
     Stage9ScalarStats stats;
     std::vector<double> selected;
@@ -3784,12 +3826,17 @@ Stage9ScalarStats computeStage9ScalarStats(const std::vector<double>& values, co
 bool writeStage9CurvatureCsv(const GeometryStage9CurvatureComputationResult& result,
                              const std::string& path,
                              const std::vector<double>& H,
-                             const std::vector<double>& K) {
+                             const std::vector<double>& K,
+                             const std::vector<uint8_t>& global_tail_flag,
+                             const std::vector<uint8_t>& local_spike_flag,
+                             const std::vector<uint8_t>& qc_warn_flag,
+                             const std::vector<uint8_t>& confidence_class) {
     std::ofstream out(path);
     if (!out) {
         return false;
     }
-    out << "i,j,x,y,reconstructed,reliable_core,metric_domain,derivative_valid,curvature_valid,H,K\n";
+    out << "i,j,x,y,reconstructed,reliable_core,metric_domain,derivative_valid,curvature_valid,H,K,"
+           "K_global_tail_flag,K_local_spike_flag,K_qc_warn_flag,K_confidence_class\n";
     for (std::size_t j = 0; j < result.grid.ny; ++j) {
         for (std::size_t i = 0; i < result.grid.nx; ++i) {
             const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
@@ -3797,7 +3844,9 @@ bool writeStage9CurvatureCsv(const GeometryStage9CurvatureComputationResult& res
                 << static_cast<int>(result.reconstructed_mask[idx]) << ',' << static_cast<int>(result.reliable_core_mask[idx])
                 << ',' << static_cast<int>(result.metric_domain_mask[idx]) << ','
                 << static_cast<int>(result.derivative_valid_mask[idx]) << ','
-                << static_cast<int>(result.curvature_valid_mask[idx]) << ',' << H[idx] << ',' << K[idx] << '\n';
+                << static_cast<int>(result.curvature_valid_mask[idx]) << ',' << H[idx] << ',' << K[idx] << ','
+                << static_cast<int>(global_tail_flag[idx]) << ',' << static_cast<int>(local_spike_flag[idx]) << ','
+                << static_cast<int>(qc_warn_flag[idx]) << ',' << static_cast<int>(confidence_class[idx]) << '\n';
         }
     }
     return out.good();
@@ -3831,6 +3880,11 @@ bool writeStage9SummaryCsv(const GeometryStage9CurvatureComputationResult& resul
     out << "node_count,metric_domain_node_count,derivative_valid_node_count,curvature_valid_node_count,"
            "curvature_valid_fraction_of_metric_domain,curvature_valid_fraction_of_derivative_valid,"
            "curvature_invalid_nonfinite_input_count,curvature_invalid_nonfinite_output_count,"
+           "outer_K_global_tail_count,outer_K_local_spike_count,outer_K_qc_warn_count,"
+           "inner_K_global_tail_count,inner_K_local_spike_count,inner_K_qc_warn_count,"
+           "outer_K_global_tail_fraction_of_curvature_valid,outer_K_local_spike_fraction_of_curvature_valid,"
+           "outer_K_qc_warn_fraction_of_curvature_valid,inner_K_global_tail_fraction_of_curvature_valid,"
+           "inner_K_local_spike_fraction_of_curvature_valid,inner_K_qc_warn_fraction_of_curvature_valid,"
            "outer_mean_H,outer_median_H,outer_stddev_H,outer_min_H,outer_max_H,"
            "outer_mean_K,outer_median_K,outer_stddev_K,outer_min_K,outer_max_K,"
            "inner_mean_H,inner_median_H,inner_stddev_H,inner_min_H,inner_max_H,"
@@ -3838,7 +3892,15 @@ bool writeStage9SummaryCsv(const GeometryStage9CurvatureComputationResult& resul
     out << result.node_count << ',' << result.metric_domain_node_count << ',' << result.derivative_valid_node_count << ','
         << result.curvature_valid_node_count << ',' << result.curvature_valid_fraction_of_metric_domain << ','
         << result.curvature_valid_fraction_of_derivative_valid << ',' << result.curvature_invalid_nonfinite_input_count
-        << ',' << result.curvature_invalid_nonfinite_output_count << ',' << result.outer_mean_H << ','
+        << ',' << result.curvature_invalid_nonfinite_output_count << ',' << result.outer_K_global_tail_count << ','
+        << result.outer_K_local_spike_count << ',' << result.outer_K_qc_warn_count << ','
+        << result.inner_K_global_tail_count << ',' << result.inner_K_local_spike_count << ','
+        << result.inner_K_qc_warn_count << ',' << result.outer_K_global_tail_fraction_of_curvature_valid << ','
+        << result.outer_K_local_spike_fraction_of_curvature_valid << ','
+        << result.outer_K_qc_warn_fraction_of_curvature_valid << ','
+        << result.inner_K_global_tail_fraction_of_curvature_valid << ','
+        << result.inner_K_local_spike_fraction_of_curvature_valid << ','
+        << result.inner_K_qc_warn_fraction_of_curvature_valid << ',' << result.outer_mean_H << ','
         << result.outer_median_H << ',' << result.outer_stddev_H << ',' << result.outer_min_H << ',' << result.outer_max_H
         << ',' << result.outer_mean_K << ',' << result.outer_median_K << ',' << result.outer_stddev_K << ','
         << result.outer_min_K << ',' << result.outer_max_K << ',' << result.inner_mean_H << ',' << result.inner_median_H
@@ -4160,6 +4222,15 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
     if (stage8_result.node_count == 0 || stage8_result.grid.nx == 0 || stage8_result.grid.ny == 0) {
         throw std::runtime_error("Stage 9 requires a non-empty Stage 8 derivative grid");
     }
+    if (config.stage9_qc_n_tail <= 0.0 || config.stage9_qc_n_spike <= 0.0) {
+        throw std::runtime_error("Stage 9 QC thresholds must be positive");
+    }
+    if (config.stage9_qc_min_neighbors == 0) {
+        throw std::runtime_error("Stage 9 QC minimum neighborhood size must be >= 1");
+    }
+    if (config.stage9_qc_abs_scale_floor <= 0.0) {
+        throw std::runtime_error("Stage 9 QC absolute scale floor must be > 0");
+    }
 
     result.messages.push_back("Geometry Stage 9");
     result.messages.push_back("Geometry analysis: starting Stage 9 curvature computation.");
@@ -4174,6 +4245,14 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
     result.curvature_valid_mask.assign(result.node_count, 0);
     result.curvature_invalid_nonfinite_input_mask.assign(result.node_count, 0);
     result.curvature_invalid_nonfinite_output_mask.assign(result.node_count, 0);
+    result.outer_K_global_tail_flag.assign(result.node_count, 0);
+    result.inner_K_global_tail_flag.assign(result.node_count, 0);
+    result.outer_K_local_spike_flag.assign(result.node_count, 0);
+    result.inner_K_local_spike_flag.assign(result.node_count, 0);
+    result.outer_K_qc_warn_flag.assign(result.node_count, 0);
+    result.inner_K_qc_warn_flag.assign(result.node_count, 0);
+    result.outer_K_confidence_class.assign(result.node_count, 0);
+    result.inner_K_confidence_class.assign(result.node_count, 0);
     result.outer_mean_curvature_H.assign(result.node_count, nan);
     result.outer_gaussian_curvature_K.assign(result.node_count, nan);
     result.inner_mean_curvature_H.assign(result.node_count, nan);
@@ -4251,6 +4330,123 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
         result.outer_gaussian_curvature_K[idx] = outer_K;
         result.inner_mean_curvature_H[idx] = inner_H;
         result.inner_gaussian_curvature_K[idx] = inner_K;
+        result.outer_K_confidence_class[idx] = 2;
+        result.inner_K_confidence_class[idx] = 2;
+    }
+
+    std::vector<double> outer_valid_K;
+    std::vector<double> inner_valid_K;
+    outer_valid_K.reserve(result.curvature_valid_node_count);
+    inner_valid_K.reserve(result.curvature_valid_node_count);
+    for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+        if (result.curvature_valid_mask[idx] == 0) {
+            continue;
+        }
+        outer_valid_K.push_back(result.outer_gaussian_curvature_K[idx]);
+        inner_valid_K.push_back(result.inner_gaussian_curvature_K[idx]);
+    }
+
+    const double outer_global_median = medianOfValues(outer_valid_K);
+    const double inner_global_median = medianOfValues(inner_valid_K);
+    const double outer_global_sigma = robustSigmaFromValues(outer_valid_K, outer_global_median);
+    const double inner_global_sigma = robustSigmaFromValues(inner_valid_K, inner_global_median);
+
+    for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+        if (result.curvature_valid_mask[idx] == 0) {
+            continue;
+        }
+        if (std::isfinite(outer_global_sigma) && outer_global_sigma > 0.0 &&
+            std::abs(result.outer_gaussian_curvature_K[idx] - outer_global_median) > config.stage9_qc_n_tail * outer_global_sigma) {
+            result.outer_K_global_tail_flag[idx] = 1;
+            ++result.outer_K_global_tail_count;
+        }
+        if (std::isfinite(inner_global_sigma) && inner_global_sigma > 0.0 &&
+            std::abs(result.inner_gaussian_curvature_K[idx] - inner_global_median) > config.stage9_qc_n_tail * inner_global_sigma) {
+            result.inner_K_global_tail_flag[idx] = 1;
+            ++result.inner_K_global_tail_count;
+        }
+    }
+
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            if (result.curvature_valid_mask[idx] == 0) {
+                continue;
+            }
+
+            std::vector<double> outer_neighbor_K;
+            std::vector<double> inner_neighbor_K;
+            outer_neighbor_K.reserve(8);
+            inner_neighbor_K.reserve(8);
+            for (int dj = -1; dj <= 1; ++dj) {
+                for (int di = -1; di <= 1; ++di) {
+                    if (di == 0 && dj == 0) {
+                        continue;
+                    }
+                    const long ni = static_cast<long>(i) + di;
+                    const long nj = static_cast<long>(j) + dj;
+                    if (ni < 0 || nj < 0 || ni >= static_cast<long>(result.grid.nx) || nj >= static_cast<long>(result.grid.ny)) {
+                        continue;
+                    }
+                    const std::size_t nidx =
+                        stage4NodeIndex(static_cast<std::size_t>(ni), static_cast<std::size_t>(nj), result.grid.nx);
+                    if (result.curvature_valid_mask[nidx] == 0) {
+                        continue;
+                    }
+                    outer_neighbor_K.push_back(result.outer_gaussian_curvature_K[nidx]);
+                    inner_neighbor_K.push_back(result.inner_gaussian_curvature_K[nidx]);
+                }
+            }
+
+            if (outer_neighbor_K.size() >= config.stage9_qc_min_neighbors) {
+                const double local_median = medianOfValues(outer_neighbor_K);
+                const double local_sigma = robustSigmaFromValues(outer_neighbor_K, local_median);
+                const double local_scale = std::max(config.stage9_qc_abs_scale_floor, local_sigma);
+                if (std::isfinite(local_scale) &&
+                    std::abs(result.outer_gaussian_curvature_K[idx] - local_median) > config.stage9_qc_n_spike * local_scale) {
+                    result.outer_K_local_spike_flag[idx] = 1;
+                    ++result.outer_K_local_spike_count;
+                }
+            }
+            if (inner_neighbor_K.size() >= config.stage9_qc_min_neighbors) {
+                const double local_median = medianOfValues(inner_neighbor_K);
+                const double local_sigma = robustSigmaFromValues(inner_neighbor_K, local_median);
+                const double local_scale = std::max(config.stage9_qc_abs_scale_floor, local_sigma);
+                if (std::isfinite(local_scale) &&
+                    std::abs(result.inner_gaussian_curvature_K[idx] - local_median) > config.stage9_qc_n_spike * local_scale) {
+                    result.inner_K_local_spike_flag[idx] = 1;
+                    ++result.inner_K_local_spike_count;
+                }
+            }
+        }
+    }
+
+    for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+        if (result.curvature_valid_mask[idx] == 0) {
+            continue;
+        }
+        const bool outer_warn = result.outer_K_global_tail_flag[idx] != 0 || result.outer_K_local_spike_flag[idx] != 0;
+        const bool inner_warn = result.inner_K_global_tail_flag[idx] != 0 || result.inner_K_local_spike_flag[idx] != 0;
+        if (outer_warn) {
+            result.outer_K_qc_warn_flag[idx] = 1;
+            result.outer_K_confidence_class[idx] = 1;
+            ++result.outer_K_qc_warn_count;
+        }
+        if (inner_warn) {
+            result.inner_K_qc_warn_flag[idx] = 1;
+            result.inner_K_confidence_class[idx] = 1;
+            ++result.inner_K_qc_warn_count;
+        }
+    }
+
+    if (result.curvature_valid_node_count > 0) {
+        const double denom = static_cast<double>(result.curvature_valid_node_count);
+        result.outer_K_global_tail_fraction_of_curvature_valid = static_cast<double>(result.outer_K_global_tail_count) / denom;
+        result.inner_K_global_tail_fraction_of_curvature_valid = static_cast<double>(result.inner_K_global_tail_count) / denom;
+        result.outer_K_local_spike_fraction_of_curvature_valid = static_cast<double>(result.outer_K_local_spike_count) / denom;
+        result.inner_K_local_spike_fraction_of_curvature_valid = static_cast<double>(result.inner_K_local_spike_count) / denom;
+        result.outer_K_qc_warn_fraction_of_curvature_valid = static_cast<double>(result.outer_K_qc_warn_count) / denom;
+        result.inner_K_qc_warn_fraction_of_curvature_valid = static_cast<double>(result.inner_K_qc_warn_count) / denom;
     }
 
     const Stage9ScalarStats outer_H_stats = computeStage9ScalarStats(result.outer_mean_curvature_H, result.curvature_valid_mask);
@@ -4298,13 +4494,21 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
         if (!writeStage9CurvatureCsv(result,
                                      result.outer_curvature_csv_path,
                                      result.outer_mean_curvature_H,
-                                     result.outer_gaussian_curvature_K)) {
+                                     result.outer_gaussian_curvature_K,
+                                     result.outer_K_global_tail_flag,
+                                     result.outer_K_local_spike_flag,
+                                     result.outer_K_qc_warn_flag,
+                                     result.outer_K_confidence_class)) {
             throw std::runtime_error("Failed to write Stage 9 outer curvature CSV");
         }
         if (!writeStage9CurvatureCsv(result,
                                      result.inner_curvature_csv_path,
                                      result.inner_mean_curvature_H,
-                                     result.inner_gaussian_curvature_K)) {
+                                     result.inner_gaussian_curvature_K,
+                                     result.inner_K_global_tail_flag,
+                                     result.inner_K_local_spike_flag,
+                                     result.inner_K_qc_warn_flag,
+                                     result.inner_K_confidence_class)) {
             throw std::runtime_error("Failed to write Stage 9 inner curvature CSV");
         }
         if (!writeStage9CurvatureMaskCsv(result, result.curvature_valid_mask_csv_path)) {
@@ -4323,6 +4527,12 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
                               std::to_string(result.curvature_invalid_nonfinite_input_count));
     result.messages.push_back("Geometry Stage 9 invalid nonfinite-output count: " +
                               std::to_string(result.curvature_invalid_nonfinite_output_count));
+    result.messages.push_back("Geometry Stage 9 outer K global-tail count: " + std::to_string(result.outer_K_global_tail_count));
+    result.messages.push_back("Geometry Stage 9 outer K local-spike count: " + std::to_string(result.outer_K_local_spike_count));
+    result.messages.push_back("Geometry Stage 9 outer K warn count: " + std::to_string(result.outer_K_qc_warn_count));
+    result.messages.push_back("Geometry Stage 9 inner K global-tail count: " + std::to_string(result.inner_K_global_tail_count));
+    result.messages.push_back("Geometry Stage 9 inner K local-spike count: " + std::to_string(result.inner_K_local_spike_count));
+    result.messages.push_back("Geometry Stage 9 inner K warn count: " + std::to_string(result.inner_K_qc_warn_count));
     result.messages.push_back("Geometry Stage 9 curvature-valid fraction of metric domain: " +
                               std::to_string(result.curvature_valid_fraction_of_metric_domain));
     result.messages.push_back("Geometry Stage 9 curvature-valid fraction of derivative valid: " +
