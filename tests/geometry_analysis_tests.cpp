@@ -2300,6 +2300,62 @@ void testStage9CsvExportSmoke() {
     removeIfExists(stage9.curvature_summary_csv_path);
 }
 
+void testStage9QcWarnFlagsAndConfidenceClass() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    const std::size_t center = nodeIndex(1, 1, stage8.grid.nx);
+    stage8.outer_d2z_dx2[center] = 10.0;
+    stage8.outer_d2z_dy2[center] = 10.0;
+    stage8.inner_d2z_dx2[center] = 10.0;
+    stage8.inner_d2z_dy2[center] = 10.0;
+
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    FoldPatchAnalysisConfig config;
+    config.stage9_export_csv = false;
+    config.stage9_qc_n_tail = 4.0;
+    config.stage9_qc_n_spike = 2.0;
+    config.stage9_qc_abs_scale_floor = 1e-6;
+    const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+
+    assertTrue(stage9.outer_K_local_spike_flag[center] == 1, "outer center node should be local-spike flagged");
+    assertTrue(stage9.inner_K_local_spike_flag[center] == 1, "inner center node should be local-spike flagged");
+    assertTrue(stage9.outer_K_qc_warn_flag[center] == 1, "outer center node should be warned");
+    assertTrue(stage9.inner_K_qc_warn_flag[center] == 1, "inner center node should be warned");
+    assertTrue(stage9.outer_K_confidence_class[center] == 1, "warned outer node should have confidence class 1");
+    assertTrue(stage9.inner_K_confidence_class[center] == 1, "warned inner node should have confidence class 1");
+    assertTrue(stage9.outer_K_local_spike_count > 0, "outer local-spike count should increment");
+    assertTrue(stage9.inner_K_local_spike_count > 0, "inner local-spike count should increment");
+
+    const std::size_t corner = nodeIndex(0, 0, stage8.grid.nx);
+    assertTrue(stage9.outer_K_confidence_class[corner] == 2, "nominal valid outer node should have confidence class 2");
+    assertTrue(stage9.inner_K_confidence_class[corner] == 2, "nominal valid inner node should have confidence class 2");
+}
+
+void testStage9CsvExportIncludesQcColumns() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    FoldPatchAnalysisConfig config;
+    config.output_prefix = "stage9_qc_columns";
+    config.stage9_export_csv = true;
+
+    const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+    const auto outer_rows = readCsvRows(stage9.outer_curvature_csv_path);
+    assertTrue(!outer_rows.empty(), "outer curvature csv should include a header");
+
+    const auto& header = outer_rows[0];
+    const auto hasColumn = [&header](const std::string& name) {
+        return std::find(header.begin(), header.end(), name) != header.end();
+    };
+    assertTrue(hasColumn("K_global_tail_flag"), "outer curvature csv should include K_global_tail_flag");
+    assertTrue(hasColumn("K_local_spike_flag"), "outer curvature csv should include K_local_spike_flag");
+    assertTrue(hasColumn("K_qc_warn_flag"), "outer curvature csv should include K_qc_warn_flag");
+    assertTrue(hasColumn("K_confidence_class"), "outer curvature csv should include K_confidence_class");
+
+    removeIfExists(stage9.outer_curvature_csv_path);
+    removeIfExists(stage9.inner_curvature_csv_path);
+    removeIfExists(stage9.curvature_valid_mask_csv_path);
+    removeIfExists(stage9.curvature_summary_csv_path);
+}
+
 void testStage1ToStage6Integration() {
     Capsid capsid = makeSimpleCapsid();
     FoldPatchAnalysisConfig config;
@@ -2564,6 +2620,8 @@ int main() {
         testStage9InvalidInputPropagation();
         testStage9NonFiniteOutputGuard();
         testStage9CsvExportSmoke();
+        testStage9QcWarnFlagsAndConfidenceClass();
+        testStage9CsvExportIncludesQcColumns();
         testStage1ToStage7Integration();
         testStage1ToStage9ThinPlateIntegration();
         std::cout << "All geometry analysis Stage 1/2/3/4/5/6/7/8/9 tests passed.\n";

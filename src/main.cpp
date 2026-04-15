@@ -88,6 +88,10 @@ void printHelp(const std::string& program_name) {
       --geometry_s8_min_directional_span <A>  Stage 8 minimum directional span in angstroms (default: auto)
       --geometry_s8_export_csv <true|false>   Stage 8 CSV artifact export enable switch (default: true)
 
+  [Geometry curvature QC]
+      --qc_n_tail <x>                          Stage 9a global-tail threshold in robust sigma units (default: 4.0)
+      --qc_n_spike <x>                         Stage 9a local-spike threshold in robust sigma units (default: 4.0)
+
   -h, --help                                 Show this help message
       --version                              Show version information
 
@@ -180,6 +184,8 @@ int main(int argc, char* argv[]) {
     bool geometry_s8_require_centered_support = true;
     double geometry_s8_min_directional_span = 0.0;
     bool geometry_s8_export_csv = true;
+    double geometry_qc_n_tail = 4.0;
+    double geometry_qc_n_spike = 4.0;
 
     const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
 
@@ -693,6 +699,22 @@ int main(int argc, char* argv[]) {
             }
             continue;
         }
+        if (arg == "--qc_n_tail") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --qc_n_tail\n";
+                return 1;
+            }
+            geometry_qc_n_tail = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--qc_n_spike") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --qc_n_spike\n";
+                return 1;
+            }
+            geometry_qc_n_spike = std::stod(argv[++i]);
+            continue;
+        }
 
         std::cerr << "Error: unknown argument: " << arg << '\n';
         return 1;
@@ -765,6 +787,14 @@ int main(int argc, char* argv[]) {
     }
     if (geometry_s8_max_condition_indicator <= 0.0) {
         std::cerr << "Error: --geometry_s8_max_condition_indicator must be > 0\n";
+        return 1;
+    }
+    if (geometry_qc_n_tail <= 0.0) {
+        std::cerr << "Error: --qc_n_tail must be > 0\n";
+        return 1;
+    }
+    if (geometry_qc_n_spike <= 0.0) {
+        std::cerr << "Error: --qc_n_spike must be > 0\n";
         return 1;
     }
     if (geometry_s8_min_directional_span < 0.0) {
@@ -872,6 +902,8 @@ int main(int argc, char* argv[]) {
         geometry_config.stage8_require_centered_support = geometry_s8_require_centered_support;
         geometry_config.stage8_min_directional_span = geometry_s8_min_directional_span;
         geometry_config.stage8_export_csv = geometry_s8_export_csv;
+        geometry_config.stage9_qc_n_tail = geometry_qc_n_tail;
+        geometry_config.stage9_qc_n_spike = geometry_qc_n_spike;
 
         const GeometryAnalysisResult geometry_result =
             runFoldPatchGeometryAnalysis(capsid, geometry_config, config, &logger);

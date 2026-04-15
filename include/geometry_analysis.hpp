@@ -88,6 +88,10 @@ struct FoldPatchAnalysisConfig {
     bool stage8_export_csv = true;
     bool stage9_enabled = true;
     bool stage9_export_csv = true;
+    double stage9_qc_n_tail = 4.0;
+    double stage9_qc_n_spike = 4.0;
+    std::size_t stage9_qc_min_neighbors = 3;
+    double stage9_qc_abs_scale_floor = 1e-6;
     MeshExportFormat stage6_mesh_export_format = MeshExportFormat::stl;
     bool stage6_split_in_out_meshes = false;
     bool export_rotated_capsid = false;
@@ -510,6 +514,14 @@ struct GeometryStage9CurvatureComputationResult {
     std::vector<uint8_t> curvature_valid_mask;
     std::vector<uint8_t> curvature_invalid_nonfinite_input_mask;
     std::vector<uint8_t> curvature_invalid_nonfinite_output_mask;
+    std::vector<uint8_t> outer_K_global_tail_flag;
+    std::vector<uint8_t> inner_K_global_tail_flag;
+    std::vector<uint8_t> outer_K_local_spike_flag;
+    std::vector<uint8_t> inner_K_local_spike_flag;
+    std::vector<uint8_t> outer_K_qc_warn_flag;
+    std::vector<uint8_t> inner_K_qc_warn_flag;
+    std::vector<uint8_t> outer_K_confidence_class;
+    std::vector<uint8_t> inner_K_confidence_class;
 
     std::vector<double> outer_mean_curvature_H;
     std::vector<double> outer_gaussian_curvature_K;
@@ -522,6 +534,19 @@ struct GeometryStage9CurvatureComputationResult {
     std::size_t curvature_valid_node_count = 0;
     std::size_t curvature_invalid_nonfinite_input_count = 0;
     std::size_t curvature_invalid_nonfinite_output_count = 0;
+    std::size_t outer_K_global_tail_count = 0;
+    std::size_t inner_K_global_tail_count = 0;
+    std::size_t outer_K_local_spike_count = 0;
+    std::size_t inner_K_local_spike_count = 0;
+    std::size_t outer_K_qc_warn_count = 0;
+    std::size_t inner_K_qc_warn_count = 0;
+
+    double outer_K_global_tail_fraction_of_curvature_valid = std::numeric_limits<double>::quiet_NaN();
+    double inner_K_global_tail_fraction_of_curvature_valid = std::numeric_limits<double>::quiet_NaN();
+    double outer_K_local_spike_fraction_of_curvature_valid = std::numeric_limits<double>::quiet_NaN();
+    double inner_K_local_spike_fraction_of_curvature_valid = std::numeric_limits<double>::quiet_NaN();
+    double outer_K_qc_warn_fraction_of_curvature_valid = std::numeric_limits<double>::quiet_NaN();
+    double inner_K_qc_warn_fraction_of_curvature_valid = std::numeric_limits<double>::quiet_NaN();
 
     double outer_mean_H = std::numeric_limits<double>::quiet_NaN();
     double outer_median_H = std::numeric_limits<double>::quiet_NaN();
