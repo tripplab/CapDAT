@@ -1847,7 +1847,12 @@ GeometryPreparationResult prepareGeometryAnalysisStage1(Capsid& capsid,
                               (result.used_identity_rotation ? "true" : "false"));
     result.messages.push_back(std::string("Geometry Stage 1 coordinates modified in place: ") +
                               (result.coordinates_modified_in_place ? "true" : "false"));
-    result.messages.push_back("Geometry Stage 1 final working frame: " + result.final_frame_description);
+    std::string final_working_frame_message = result.final_frame_description;
+    if (result.used_identity_rotation && !result.coordinates_modified_in_place &&
+        result.final_frame_description == "derived_reoriented_frame") {
+        final_working_frame_message += " (already aligned to +Z; workflow recorded without coordinate changes)";
+    }
+    result.messages.push_back("Geometry Stage 1 final working frame: " + final_working_frame_message);
 
     if (config.export_rotated_capsid) {
         ExportCapsidConfig writer_config;
@@ -4352,10 +4357,24 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
         const double inner_graph_normal_y = -inner_zy;
         const double inner_graph_normal_z = 1.0;
 
-        const double outer_graph_normal_dot_radial =
+        const double outer_graph_normal_norm = std::sqrt((outer_graph_normal_x * outer_graph_normal_x) +
+                                                         (outer_graph_normal_y * outer_graph_normal_y) +
+                                                         (outer_graph_normal_z * outer_graph_normal_z));
+        const double inner_graph_normal_norm = std::sqrt((inner_graph_normal_x * inner_graph_normal_x) +
+                                                         (inner_graph_normal_y * inner_graph_normal_y) +
+                                                         (inner_graph_normal_z * inner_graph_normal_z));
+        const double outer_radial_norm = std::sqrt((x * x) + (y * y) + (outer_z * outer_z));
+        const double inner_radial_norm = std::sqrt((x * x) + (y * y) + (inner_z * inner_z));
+        const double outer_graph_normal_dot_radial_raw =
             (outer_graph_normal_x * x) + (outer_graph_normal_y * y) + (outer_graph_normal_z * outer_z);
-        const double inner_graph_normal_dot_radial =
+        const double inner_graph_normal_dot_radial_raw =
             (inner_graph_normal_x * x) + (inner_graph_normal_y * y) + (inner_graph_normal_z * inner_z);
+        const double outer_graph_normal_dot_radial_denom = outer_graph_normal_norm * outer_radial_norm;
+        const double inner_graph_normal_dot_radial_denom = inner_graph_normal_norm * inner_radial_norm;
+        const double outer_graph_normal_dot_radial =
+            (outer_graph_normal_dot_radial_denom > tolerance) ? (outer_graph_normal_dot_radial_raw / outer_graph_normal_dot_radial_denom) : 0.0;
+        const double inner_graph_normal_dot_radial =
+            (inner_graph_normal_dot_radial_denom > tolerance) ? (inner_graph_normal_dot_radial_raw / inner_graph_normal_dot_radial_denom) : 0.0;
 
         const bool outer_graph_normal_is_outward = outer_graph_normal_dot_radial > 0.0;
         const bool inner_graph_normal_is_outward = inner_graph_normal_dot_radial > 0.0;
