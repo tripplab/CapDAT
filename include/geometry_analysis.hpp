@@ -2,6 +2,7 @@
 #define CAPDAT_GEOMETRY_ANALYSIS_HPP
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -85,6 +86,8 @@ struct FoldPatchAnalysisConfig {
     bool stage8_require_centered_support = true;
     double stage8_min_directional_span = 0.0;
     bool stage8_export_csv = true;
+    bool stage9_enabled = true;
+    bool stage9_export_csv = true;
     MeshExportFormat stage6_mesh_export_format = MeshExportFormat::stl;
     bool stage6_split_in_out_meshes = false;
     bool export_rotated_capsid = false;
@@ -495,6 +498,64 @@ struct GeometryStage8DerivativeEstimationResult {
     std::vector<std::string> messages;
 };
 
+struct GeometryStage9CurvatureComputationResult {
+    bool success = false;
+    Stage4GridDescriptor grid;
+
+    std::vector<uint8_t> reconstructed_mask;
+    std::vector<uint8_t> reliable_core_mask;
+    std::vector<uint8_t> metric_domain_mask;
+    std::vector<uint8_t> derivative_valid_mask;
+
+    std::vector<uint8_t> curvature_valid_mask;
+    std::vector<uint8_t> curvature_invalid_nonfinite_input_mask;
+    std::vector<uint8_t> curvature_invalid_nonfinite_output_mask;
+
+    std::vector<double> outer_mean_curvature_H;
+    std::vector<double> outer_gaussian_curvature_K;
+    std::vector<double> inner_mean_curvature_H;
+    std::vector<double> inner_gaussian_curvature_K;
+
+    std::size_t node_count = 0;
+    std::size_t metric_domain_node_count = 0;
+    std::size_t derivative_valid_node_count = 0;
+    std::size_t curvature_valid_node_count = 0;
+    std::size_t curvature_invalid_nonfinite_input_count = 0;
+    std::size_t curvature_invalid_nonfinite_output_count = 0;
+
+    double outer_mean_H = std::numeric_limits<double>::quiet_NaN();
+    double outer_median_H = std::numeric_limits<double>::quiet_NaN();
+    double outer_stddev_H = std::numeric_limits<double>::quiet_NaN();
+    double outer_min_H = std::numeric_limits<double>::quiet_NaN();
+    double outer_max_H = std::numeric_limits<double>::quiet_NaN();
+    double outer_mean_K = std::numeric_limits<double>::quiet_NaN();
+    double outer_median_K = std::numeric_limits<double>::quiet_NaN();
+    double outer_stddev_K = std::numeric_limits<double>::quiet_NaN();
+    double outer_min_K = std::numeric_limits<double>::quiet_NaN();
+    double outer_max_K = std::numeric_limits<double>::quiet_NaN();
+
+    double inner_mean_H = std::numeric_limits<double>::quiet_NaN();
+    double inner_median_H = std::numeric_limits<double>::quiet_NaN();
+    double inner_stddev_H = std::numeric_limits<double>::quiet_NaN();
+    double inner_min_H = std::numeric_limits<double>::quiet_NaN();
+    double inner_max_H = std::numeric_limits<double>::quiet_NaN();
+    double inner_mean_K = std::numeric_limits<double>::quiet_NaN();
+    double inner_median_K = std::numeric_limits<double>::quiet_NaN();
+    double inner_stddev_K = std::numeric_limits<double>::quiet_NaN();
+    double inner_min_K = std::numeric_limits<double>::quiet_NaN();
+    double inner_max_K = std::numeric_limits<double>::quiet_NaN();
+
+    double curvature_valid_fraction_of_metric_domain = std::numeric_limits<double>::quiet_NaN();
+    double curvature_valid_fraction_of_derivative_valid = std::numeric_limits<double>::quiet_NaN();
+
+    std::string outer_curvature_csv_path;
+    std::string inner_curvature_csv_path;
+    std::string curvature_valid_mask_csv_path;
+    std::string curvature_summary_csv_path;
+
+    std::vector<std::string> messages;
+};
+
 struct GeometryAnalysisResult {
     bool success = false;
     GeometryPreparationResult preparation;
@@ -505,6 +566,7 @@ struct GeometryAnalysisResult {
     GeometryStage6SurfaceReconstructionResult stage6_surfaces;
     GeometryStage7SmoothedSurfaceResult stage7_smooth;
     GeometryStage8DerivativeEstimationResult stage8_derivatives;
+    GeometryStage9CurvatureComputationResult stage9_curvature;
     std::vector<std::string> messages;
 };
 
@@ -579,6 +641,13 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
 GeometryStage8DerivativeEstimationResult runGeometryAnalysisStage8DerivativeEstimation(
     const GeometryStage7SmoothedSurfaceResult& stage7_result,
     const GeometryStage5SurfacePrepResult& stage5_result,
+    const FoldPatchAnalysisConfig& config,
+    Logger* logger,
+    double tolerance = 1e-12);
+
+GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureComputation(
+    const GeometryStage7SmoothedSurfaceResult& stage7_result,
+    const GeometryStage8DerivativeEstimationResult& stage8_result,
     const FoldPatchAnalysisConfig& config,
     Logger* logger,
     double tolerance = 1e-12);
