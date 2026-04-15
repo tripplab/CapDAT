@@ -76,6 +76,18 @@ void printHelp(const std::string& program_name) {
       --geometry_s7_solver_tolerance <x>      Stage 7 thin-plate solver tolerance (default: 1e-8)
       --geometry_s7s6_deltas <true|false>     Export Stage 7-vs-Stage 6 delta-map CSVs (default: false)
 
+  [Geometry derivative]
+      --geometry_s8_enabled <true|false>      Stage 8 derivative estimation enable switch (default: true)
+      --geometry_s8_fit_radius <A>            Stage 8 local-support radius in angstroms (default: auto)
+      --geometry_s8_min_points <n>            Stage 8 minimum support points per fit (default: 9)
+      --geometry_s8_max_points <n>            Stage 8 maximum support points per fit (default: all in radius)
+      --geometry_s8_max_rms_residual <x>      Stage 8 max RMS residual per fit (default: 0.25)
+      --geometry_s8_max_abs_residual <x>      Stage 8 max absolute residual per fit (default: 0.75)
+      --geometry_s8_max_condition_indicator <x>  Stage 8 max fit conditioning indicator (default: 1e8)
+      --geometry_s8_require_centered_support <true|false>  Stage 8 require ±u/±v support coverage (default: true)
+      --geometry_s8_min_directional_span <A>  Stage 8 minimum directional span in angstroms (default: auto)
+      --geometry_s8_export_csv <true|false>   Stage 8 CSV artifact export enable switch (default: true)
+
   -h, --help                                 Show this help message
       --version                              Show version information
 
@@ -158,6 +170,16 @@ int main(int argc, char* argv[]) {
     std::size_t geometry_s7_solver_max_iterations = 500;
     double geometry_s7_solver_tolerance = 1e-8;
     bool geometry_s7s6_deltas = false;
+    bool geometry_s8_enabled = true;
+    double geometry_s8_fit_radius = 0.0;
+    std::size_t geometry_s8_min_points = 9;
+    std::size_t geometry_s8_max_points = 0;
+    double geometry_s8_max_rms_residual = 0.25;
+    double geometry_s8_max_abs_residual = 0.75;
+    double geometry_s8_max_condition_indicator = 1e8;
+    bool geometry_s8_require_centered_support = true;
+    double geometry_s8_min_directional_span = 0.0;
+    bool geometry_s8_export_csv = true;
 
     const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
 
@@ -575,6 +597,102 @@ int main(int argc, char* argv[]) {
             }
             continue;
         }
+        if (arg == "--geometry_s8_enabled") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s8_enabled\n";
+                return 1;
+            }
+            try {
+                geometry_s8_enabled = parseBoolSwitch(argv[++i], "--geometry_s8_enabled");
+            } catch (const std::runtime_error& ex) {
+                std::cerr << ex.what() << '\n';
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "--geometry_s8_fit_radius") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s8_fit_radius\n";
+                return 1;
+            }
+            geometry_s8_fit_radius = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_s8_min_points") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s8_min_points\n";
+                return 1;
+            }
+            geometry_s8_min_points = static_cast<std::size_t>(std::stoul(argv[++i]));
+            continue;
+        }
+        if (arg == "--geometry_s8_max_points") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s8_max_points\n";
+                return 1;
+            }
+            geometry_s8_max_points = static_cast<std::size_t>(std::stoul(argv[++i]));
+            continue;
+        }
+        if (arg == "--geometry_s8_max_rms_residual") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s8_max_rms_residual\n";
+                return 1;
+            }
+            geometry_s8_max_rms_residual = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_s8_max_abs_residual") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s8_max_abs_residual\n";
+                return 1;
+            }
+            geometry_s8_max_abs_residual = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_s8_max_condition_indicator") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s8_max_condition_indicator\n";
+                return 1;
+            }
+            geometry_s8_max_condition_indicator = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_s8_require_centered_support") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s8_require_centered_support\n";
+                return 1;
+            }
+            try {
+                geometry_s8_require_centered_support =
+                    parseBoolSwitch(argv[++i], "--geometry_s8_require_centered_support");
+            } catch (const std::runtime_error& ex) {
+                std::cerr << ex.what() << '\n';
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "--geometry_s8_min_directional_span") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s8_min_directional_span\n";
+                return 1;
+            }
+            geometry_s8_min_directional_span = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_s8_export_csv") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_s8_export_csv\n";
+                return 1;
+            }
+            try {
+                geometry_s8_export_csv = parseBoolSwitch(argv[++i], "--geometry_s8_export_csv");
+            } catch (const std::runtime_error& ex) {
+                std::cerr << ex.what() << '\n';
+                return 1;
+            }
+            continue;
+        }
 
         std::cerr << "Error: unknown argument: " << arg << '\n';
         return 1;
@@ -623,6 +741,34 @@ int main(int argc, char* argv[]) {
     }
     if (geometry_s7_solver_tolerance <= 0.0) {
         std::cerr << "Error: --geometry_s7_solver_tolerance must be > 0\n";
+        return 1;
+    }
+    if (geometry_s8_fit_radius < 0.0) {
+        std::cerr << "Error: --geometry_s8_fit_radius must be >= 0\n";
+        return 1;
+    }
+    if (geometry_s8_min_points < 6) {
+        std::cerr << "Error: --geometry_s8_min_points must be >= 6\n";
+        return 1;
+    }
+    if (geometry_s8_max_points > 0 && geometry_s8_max_points < geometry_s8_min_points) {
+        std::cerr << "Error: --geometry_s8_max_points must be 0 or >= --geometry_s8_min_points\n";
+        return 1;
+    }
+    if (geometry_s8_max_rms_residual < 0.0) {
+        std::cerr << "Error: --geometry_s8_max_rms_residual must be >= 0\n";
+        return 1;
+    }
+    if (geometry_s8_max_abs_residual < 0.0) {
+        std::cerr << "Error: --geometry_s8_max_abs_residual must be >= 0\n";
+        return 1;
+    }
+    if (geometry_s8_max_condition_indicator <= 0.0) {
+        std::cerr << "Error: --geometry_s8_max_condition_indicator must be > 0\n";
+        return 1;
+    }
+    if (geometry_s8_min_directional_span < 0.0) {
+        std::cerr << "Error: --geometry_s8_min_directional_span must be >= 0\n";
         return 1;
     }
 
@@ -716,6 +862,16 @@ int main(int argc, char* argv[]) {
         geometry_config.stage7_enforce_non_crossing = geometry_smooth_enforce_non_crossing;
         geometry_config.stage7_min_separation = geometry_smooth_min_separation;
         geometry_config.stage7_export_meshes = geometry_smooth_export_meshes;
+        geometry_config.stage8_enabled = geometry_s8_enabled;
+        geometry_config.stage8_fit_radius = geometry_s8_fit_radius;
+        geometry_config.stage8_min_points = geometry_s8_min_points;
+        geometry_config.stage8_max_points = geometry_s8_max_points;
+        geometry_config.stage8_max_rms_residual = geometry_s8_max_rms_residual;
+        geometry_config.stage8_max_abs_residual = geometry_s8_max_abs_residual;
+        geometry_config.stage8_max_condition_indicator = geometry_s8_max_condition_indicator;
+        geometry_config.stage8_require_centered_support = geometry_s8_require_centered_support;
+        geometry_config.stage8_min_directional_span = geometry_s8_min_directional_span;
+        geometry_config.stage8_export_csv = geometry_s8_export_csv;
 
         const GeometryAnalysisResult geometry_result =
             runFoldPatchGeometryAnalysis(capsid, geometry_config, config, &logger);
