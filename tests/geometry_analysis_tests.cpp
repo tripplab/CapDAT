@@ -2196,6 +2196,167 @@ GeometryStage7SmoothedSurfaceResult makeSyntheticStage7ResultForStage9(const Geo
     return stage7;
 }
 
+GeometryStage9CurvatureComputationResult makeSyntheticStage9ResultForStage10(
+    const GeometryStage7SmoothedSurfaceResult& stage7) {
+    GeometryStage9CurvatureComputationResult stage9;
+    stage9.success = true;
+    stage9.grid = stage7.grid;
+    stage9.node_count = stage7.node_count;
+    stage9.reconstructed_mask = stage7.reconstructed_mask;
+    stage9.reliable_core_mask = stage7.reliable_core_mask;
+    stage9.metric_domain_mask = stage7.metric_domain_mask;
+    stage9.derivative_valid_mask.assign(stage9.node_count, 1);
+    stage9.curvature_valid_mask.assign(stage9.node_count, 1);
+    stage9.metric_domain_node_count = stage9.node_count;
+    stage9.derivative_valid_node_count = stage9.node_count;
+    stage9.curvature_valid_node_count = stage9.node_count;
+    return stage9;
+}
+
+void testStage10SimpleValidThicknessField() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, 7.0);
+    const auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    FoldPatchAnalysisConfig config;
+    config.stage10_export_csv = false;
+
+    const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
+    assertTrue(stage10.success, "Stage 10 should succeed for positive constant vertical thickness");
+    assertTrue(stage10.thickness_valid_node_count == stage10.node_count, "all nodes should be valid");
+    for (std::size_t idx = 0; idx < stage10.node_count; ++idx) {
+        assertTrue(near(stage10.thickness_vertical[idx], 3.0, 1e-12), "thickness should be outer-inner at each node");
+        assertTrue(stage10.thickness_valid_mask[idx] == 1, "all constant-thickness nodes should be valid");
+    }
+    assertTrue(near(stage10.mean_thickness_vertical, 3.0, 1e-12), "mean thickness should be 3");
+    assertTrue(near(stage10.median_thickness_vertical, 3.0, 1e-12), "median thickness should be 3");
+    assertTrue(near(stage10.min_thickness_vertical, 3.0, 1e-12), "min thickness should be 3");
+    assertTrue(near(stage10.max_thickness_vertical, 3.0, 1e-12), "max thickness should be 3");
+}
+
+void testStage10OutsideDomainInvalidation() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, 7.0);
+    stage7.metric_domain_mask.assign(stage7.node_count, 0);
+    stage7.metric_domain_mask[nodeIndex(1, 1, stage7.grid.nx)] = 1;
+    stage7.metric_domain_mask[nodeIndex(2, 1, stage7.grid.nx)] = 1;
+    const auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    FoldPatchAnalysisConfig config;
+    config.stage10_export_csv = false;
+
+    const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
+    assertTrue(stage10.success, "Stage 10 should still succeed when only a subset is in domain");
+    assertTrue(stage10.thickness_attempted_node_count == 2, "only metric-domain nodes should be attempted");
+    assertTrue(stage10.thickness_valid_node_count == 2, "only in-domain nodes should validate");
+    assertTrue(stage10.thickness_invalid_outside_domain_count == stage10.node_count - 2,
+               "outside-domain count should match excluded nodes");
+    for (std::size_t idx = 0; idx < stage10.node_count; ++idx) {
+        if (stage7.metric_domain_mask[idx] == 0) {
+            assertTrue(stage10.thickness_attempted_mask[idx] == 0, "outside-domain nodes should not be attempted");
+            assertTrue(stage10.thickness_invalid_outside_domain_mask[idx] == 1, "outside-domain reason should be set");
+        }
+    }
+}
+
+void testStage10NegativeOrZeroInvalidation() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, 7.0);
+    const std::size_t zero_idx = nodeIndex(0, 0, stage7.grid.nx);
+    const std::size_t negative_idx = nodeIndex(0, 1, stage7.grid.nx);
+    stage7.z_inner_smooth[zero_idx] = stage7.z_outer_smooth[zero_idx];
+    stage7.z_inner_smooth[negative_idx] = stage7.z_outer_smooth[negative_idx] + 1.0;
+    const auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    FoldPatchAnalysisConfig config;
+    config.stage10_export_csv = false;
+
+    const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
+    assertTrue(stage10.thickness_invalid_negative_or_zero_mask[zero_idx] == 1, "zero thickness should be invalid");
+    assertTrue(stage10.thickness_invalid_negative_or_zero_mask[negative_idx] == 1, "negative thickness should be invalid");
+    assertTrue(stage10.thickness_invalid_negative_or_zero_count == 2, "negative/zero counter should match");
+    assertTrue(stage10.thickness_valid_mask[zero_idx] == 0 && stage10.thickness_valid_mask[negative_idx] == 0,
+               "nonphysical nodes should not be valid");
+    assertTrue(stage10.thickness_valid_node_count == stage10.node_count - 2, "valid count should exclude invalid nodes");
+    assertTrue(stage10.min_thickness_vertical > 0.0, "summary stats should only consider positive valid nodes");
+}
+
+void testStage10ThresholdInvalidation() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, 7.0);
+    stage7.z_inner_smooth[nodeIndex(0, 0, stage7.grid.nx)] = 9.2; // 0.8 below min
+    stage7.z_inner_smooth[nodeIndex(0, 1, stage7.grid.nx)] = 2.0; // 8.0 above max
+    const auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    FoldPatchAnalysisConfig config;
+    config.stage10_export_csv = false;
+    config.stage10_min_thickness = 1.0;
+    config.stage10_max_thickness = 5.0;
+
+    const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
+    assertTrue(stage10.thickness_invalid_below_min_threshold_count == 1, "below-min threshold count should be tracked");
+    assertTrue(stage10.thickness_invalid_above_max_threshold_count == 1, "above-max threshold count should be tracked");
+    assertTrue(stage10.thickness_invalid_below_min_threshold_mask[nodeIndex(0, 0, stage7.grid.nx)] == 1,
+               "below-min mask should be set");
+    assertTrue(stage10.thickness_invalid_above_max_threshold_mask[nodeIndex(0, 1, stage7.grid.nx)] == 1,
+               "above-max mask should be set");
+}
+
+void testStage10CurvatureValidRestrictionMode() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, 7.0);
+    auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    stage9.curvature_valid_mask.assign(stage9.node_count, 0);
+    stage9.curvature_valid_mask[nodeIndex(1, 1, stage7.grid.nx)] = 1;
+    stage9.curvature_valid_mask[nodeIndex(2, 1, stage7.grid.nx)] = 1;
+    stage9.curvature_valid_node_count = 2;
+    FoldPatchAnalysisConfig unrestricted;
+    unrestricted.stage10_export_csv = false;
+    FoldPatchAnalysisConfig restricted = unrestricted;
+    restricted.stage10_use_curvature_valid_domain_only = true;
+
+    const auto stage10_unrestricted =
+        runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, unrestricted, nullptr);
+    const auto stage10_restricted =
+        runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, restricted, nullptr);
+
+    assertTrue(stage10_unrestricted.thickness_attempted_node_count == stage7.node_count,
+               "unrestricted mode should attempt full metric domain");
+    assertTrue(stage10_restricted.thickness_attempted_node_count == 2,
+               "restricted mode should attempt only curvature-valid subset");
+    assertTrue(stage10_unrestricted.thickness_domain_definition == "stage7_metric_domain",
+               "unrestricted label should match contract");
+    assertTrue(stage10_restricted.thickness_domain_definition == "stage7_metric_domain_intersect_stage9_curvature_valid",
+               "restricted label should match contract");
+}
+
+void testStage10Stage8FailureDoesNotBlockVerticalThickness() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    stage8.success = false;
+    stage8.derivative_valid_mask.clear();
+    auto stage7 = makeSyntheticStage7ResultForStage9(makeSyntheticStage8ResultForStage9());
+    stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, 8.5);
+    const auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    FoldPatchAnalysisConfig config;
+    config.stage10_export_csv = false;
+
+    const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
+    assertTrue(stage10.success, "Stage 10 should run even if Stage 8 failed");
+    assertTrue(stage10.thickness_valid_node_count == stage7.node_count, "Stage 10 should compute from Stage 7 surfaces");
+    const bool has_stage8_notice =
+        std::any_of(stage10.messages.begin(), stage10.messages.end(), [](const std::string& msg) {
+            return msg.find("Stage 8 derivative estimation unavailable") != std::string::npos;
+        });
+    assertTrue(has_stage8_notice, "Stage 10 should report Stage 8 unavailability in messages");
+}
+
 void testStage9PlaneCurvature() {
     auto stage8 = makeSyntheticStage8ResultForStage9();
     const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
@@ -2652,9 +2813,15 @@ int main() {
         testStage9CsvExportSmoke();
         testStage9QcWarnFlagsAndConfidenceClass();
         testStage9CsvExportIncludesQcColumns();
+        testStage10SimpleValidThicknessField();
+        testStage10OutsideDomainInvalidation();
+        testStage10NegativeOrZeroInvalidation();
+        testStage10ThresholdInvalidation();
+        testStage10CurvatureValidRestrictionMode();
+        testStage10Stage8FailureDoesNotBlockVerticalThickness();
         testStage1ToStage7Integration();
         testStage1ToStage9ThinPlateIntegration();
-        std::cout << "All geometry analysis Stage 1/2/3/4/5/6/7/8/9 tests passed.\n";
+        std::cout << "All geometry analysis Stage 1/2/3/4/5/6/7/8/9/10 tests passed.\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Geometry analysis test failure: " << e.what() << '\n';

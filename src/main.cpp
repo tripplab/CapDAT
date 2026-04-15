@@ -92,6 +92,13 @@ void printHelp(const std::string& program_name) {
       --qc_n_tail <x>                          Stage 9a global-tail threshold in robust sigma units (default: 4.0)
       --qc_n_spike <x>                         Stage 9a local-spike threshold in robust sigma units (default: 4.0)
 
+  [Geometry thickness]
+      --geometry_thickness_enabled <true|false>  Stage 10 vertical thickness enable switch (default: true)
+      --geometry_thickness_export_csv <true|false> Stage 10 CSV artifact export enable switch (default: true)
+      --geometry_thickness_use_curvature_valid_domain_only <true|false>  Restrict Stage 10 domain to Stage 9 curvature-valid
+      --geometry_thickness_min_thickness <A>   Stage 10 lower acceptance threshold (default: disabled)
+      --geometry_thickness_max_thickness <A>   Stage 10 upper acceptance threshold (default: disabled)
+
   -h, --help                                 Show this help message
       --version                              Show version information
 
@@ -186,6 +193,11 @@ int main(int argc, char* argv[]) {
     bool geometry_s8_export_csv = true;
     double geometry_qc_n_tail = 4.0;
     double geometry_qc_n_spike = 4.0;
+    bool geometry_thickness_enabled = true;
+    bool geometry_thickness_export_csv = true;
+    bool geometry_thickness_use_curvature_valid_domain_only = false;
+    double geometry_thickness_min_thickness = 0.0;
+    double geometry_thickness_max_thickness = 0.0;
 
     const std::string program_name = (argc > 0) ? argv[0] : "capsid_analyzer";
 
@@ -715,6 +727,62 @@ int main(int argc, char* argv[]) {
             geometry_qc_n_spike = std::stod(argv[++i]);
             continue;
         }
+        if (arg == "--geometry_thickness_enabled") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_thickness_enabled\n";
+                return 1;
+            }
+            try {
+                geometry_thickness_enabled = parseBoolSwitch(argv[++i], "--geometry_thickness_enabled");
+            } catch (const std::runtime_error& ex) {
+                std::cerr << ex.what() << '\n';
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "--geometry_thickness_export_csv") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_thickness_export_csv\n";
+                return 1;
+            }
+            try {
+                geometry_thickness_export_csv = parseBoolSwitch(argv[++i], "--geometry_thickness_export_csv");
+            } catch (const std::runtime_error& ex) {
+                std::cerr << ex.what() << '\n';
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "--geometry_thickness_use_curvature_valid_domain_only") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_thickness_use_curvature_valid_domain_only\n";
+                return 1;
+            }
+            try {
+                geometry_thickness_use_curvature_valid_domain_only =
+                    parseBoolSwitch(argv[++i], "--geometry_thickness_use_curvature_valid_domain_only");
+            } catch (const std::runtime_error& ex) {
+                std::cerr << ex.what() << '\n';
+                return 1;
+            }
+            continue;
+        }
+        if (arg == "--geometry_thickness_min_thickness") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_thickness_min_thickness\n";
+                return 1;
+            }
+            geometry_thickness_min_thickness = std::stod(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_thickness_max_thickness") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_thickness_max_thickness\n";
+                return 1;
+            }
+            geometry_thickness_max_thickness = std::stod(argv[++i]);
+            continue;
+        }
 
         std::cerr << "Error: unknown argument: " << arg << '\n';
         return 1;
@@ -799,6 +867,19 @@ int main(int argc, char* argv[]) {
     }
     if (geometry_s8_min_directional_span < 0.0) {
         std::cerr << "Error: --geometry_s8_min_directional_span must be >= 0\n";
+        return 1;
+    }
+    if (geometry_thickness_min_thickness < 0.0) {
+        std::cerr << "Error: --geometry_thickness_min_thickness must be >= 0\n";
+        return 1;
+    }
+    if (geometry_thickness_max_thickness < 0.0) {
+        std::cerr << "Error: --geometry_thickness_max_thickness must be >= 0\n";
+        return 1;
+    }
+    if (geometry_thickness_min_thickness > 0.0 && geometry_thickness_max_thickness > 0.0 &&
+        geometry_thickness_max_thickness < geometry_thickness_min_thickness) {
+        std::cerr << "Error: --geometry_thickness_max_thickness must be >= --geometry_thickness_min_thickness when both are > 0\n";
         return 1;
     }
 
@@ -904,6 +985,11 @@ int main(int argc, char* argv[]) {
         geometry_config.stage8_export_csv = geometry_s8_export_csv;
         geometry_config.stage9_qc_n_tail = geometry_qc_n_tail;
         geometry_config.stage9_qc_n_spike = geometry_qc_n_spike;
+        geometry_config.stage10_enabled = geometry_thickness_enabled;
+        geometry_config.stage10_export_csv = geometry_thickness_export_csv;
+        geometry_config.stage10_use_curvature_valid_domain_only = geometry_thickness_use_curvature_valid_domain_only;
+        geometry_config.stage10_min_thickness = geometry_thickness_min_thickness;
+        geometry_config.stage10_max_thickness = geometry_thickness_max_thickness;
 
         const GeometryAnalysisResult geometry_result =
             runFoldPatchGeometryAnalysis(capsid, geometry_config, config, &logger);

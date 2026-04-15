@@ -184,6 +184,14 @@ bool writeGeometryRunSummaryJson(const FoldPatchAnalysisConfig& config,
     out << "    \"qc_min_neighbors\": " << config.stage9_qc_min_neighbors << ",\n";
     out << "    \"qc_abs_scale_floor\": " << config.stage9_qc_abs_scale_floor << "\n";
     out << "  },\n";
+    out << "  \"stage10\": {\n";
+    out << "    \"enabled\": " << (config.stage10_enabled ? "true" : "false") << ",\n";
+    out << "    \"export_csv\": " << (config.stage10_export_csv ? "true" : "false") << ",\n";
+    out << "    \"use_curvature_valid_domain_only\": "
+        << (config.stage10_use_curvature_valid_domain_only ? "true" : "false") << ",\n";
+    out << "    \"min_thickness\": " << config.stage10_min_thickness << ",\n";
+    out << "    \"max_thickness\": " << config.stage10_max_thickness << "\n";
+    out << "  },\n";
     out << "  \"parser\": {\n";
     out << "    \"include_hetatm\": " << (parser_config.include_hetatm ? "true" : "false") << ",\n";
     out << "    \"strict_mode\": " << (parser_config.strict_mode ? "true" : "false") << ",\n";
@@ -3929,6 +3937,129 @@ bool writeStage9SummaryCsv(const GeometryStage9CurvatureComputationResult& resul
     return out.good();
 }
 
+
+
+struct Stage10ScalarStats {
+    double mean = std::numeric_limits<double>::quiet_NaN();
+    double median = std::numeric_limits<double>::quiet_NaN();
+    double stddev = std::numeric_limits<double>::quiet_NaN();
+    double min = std::numeric_limits<double>::quiet_NaN();
+    double max = std::numeric_limits<double>::quiet_NaN();
+};
+
+Stage10ScalarStats computeStage10ScalarStats(const std::vector<double>& values, const std::vector<uint8_t>& valid_mask) {
+    Stage10ScalarStats stats;
+    std::vector<double> selected;
+    selected.reserve(values.size());
+    for (std::size_t idx = 0; idx < values.size(); ++idx) {
+        if (valid_mask[idx] == 0 || !std::isfinite(values[idx])) {
+            continue;
+        }
+        selected.push_back(values[idx]);
+    }
+    if (selected.empty()) {
+        return stats;
+    }
+
+    double sum = 0.0;
+    stats.min = selected[0];
+    stats.max = selected[0];
+    for (double value : selected) {
+        sum += value;
+        stats.min = std::min(stats.min, value);
+        stats.max = std::max(stats.max, value);
+    }
+    stats.mean = sum / static_cast<double>(selected.size());
+
+    std::sort(selected.begin(), selected.end());
+    stats.median = medianOfSortedValues(selected);
+
+    if (selected.size() >= 2) {
+        double variance_sum = 0.0;
+        for (double value : selected) {
+            const double delta = value - stats.mean;
+            variance_sum += delta * delta;
+        }
+        stats.stddev = std::sqrt(variance_sum / static_cast<double>(selected.size() - 1));
+    }
+    return stats;
+}
+
+bool writeStage10ThicknessCsv(const GeometryStage10ThicknessResult& result, const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,in_metric_domain,curvature_valid,thickness_attempted,thickness_valid,thickness_vertical\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.metric_domain_mask[idx]) << ','
+                << static_cast<int>(result.curvature_valid_mask[idx]) << ','
+                << static_cast<int>(result.thickness_attempted_mask[idx]) << ','
+                << static_cast<int>(result.thickness_valid_mask[idx]) << ',' << result.thickness_vertical[idx] << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage10ValidMaskCsv(const GeometryStage10ThicknessResult& result, const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,thickness_valid\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.thickness_valid_mask[idx]) << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage10InvalidReasonCsv(const GeometryStage10ThicknessResult& result, const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,outside_domain,nonfinite_surface,negative_or_zero,below_min_threshold,above_max_threshold,qc_warn\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.thickness_invalid_outside_domain_mask[idx]) << ','
+                << static_cast<int>(result.thickness_invalid_nonfinite_surface_mask[idx]) << ','
+                << static_cast<int>(result.thickness_invalid_negative_or_zero_mask[idx]) << ','
+                << static_cast<int>(result.thickness_invalid_below_min_threshold_mask[idx]) << ','
+                << static_cast<int>(result.thickness_invalid_above_max_threshold_mask[idx]) << ','
+                << static_cast<int>(result.thickness_qc_warn_mask[idx]) << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage10SummaryCsv(const GeometryStage10ThicknessResult& result, const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "thickness_method_label,local_thickness_definition,thickness_domain_definition,node_count,"            "thickness_attempted_node_count,thickness_valid_node_count,thickness_invalid_node_count,"            "thickness_invalid_outside_domain_count,thickness_invalid_nonfinite_surface_count,"            "thickness_invalid_negative_or_zero_count,thickness_invalid_below_min_threshold_count,"            "thickness_invalid_above_max_threshold_count,thickness_qc_warn_count,mean_thickness_vertical,"            "median_thickness_vertical,stddev_thickness_vertical,min_thickness_vertical,max_thickness_vertical,"            "thickness_valid_fraction_of_metric_domain,thickness_valid_fraction_of_curvature_valid\n";
+    out << result.thickness_method_label << ',' << result.local_thickness_definition << ','
+        << result.thickness_domain_definition << ',' << result.node_count << ',' << result.thickness_attempted_node_count
+        << ',' << result.thickness_valid_node_count << ',' << result.thickness_invalid_node_count << ','
+        << result.thickness_invalid_outside_domain_count << ',' << result.thickness_invalid_nonfinite_surface_count << ','
+        << result.thickness_invalid_negative_or_zero_count << ','
+        << result.thickness_invalid_below_min_threshold_count << ','
+        << result.thickness_invalid_above_max_threshold_count << ',' << result.thickness_qc_warn_count << ','
+        << result.mean_thickness_vertical << ',' << result.median_thickness_vertical << ','
+        << result.stddev_thickness_vertical << ',' << result.min_thickness_vertical << ','
+        << result.max_thickness_vertical << ',' << result.thickness_valid_fraction_of_metric_domain << ','
+        << result.thickness_valid_fraction_of_curvature_valid << '\n';
+    return out.good();
+}
 } // namespace
 
 GeometryStage8DerivativeEstimationResult runGeometryAnalysisStage8DerivativeEstimation(
@@ -4668,6 +4799,180 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
     return result;
 }
 
+GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
+    const GeometryStage7SmoothedSurfaceResult& stage7_result,
+    const GeometryStage8DerivativeEstimationResult& stage8_result,
+    const GeometryStage9CurvatureComputationResult& stage9_result,
+    const FoldPatchAnalysisConfig& config,
+    Logger* logger,
+    double tolerance) {
+    GeometryStage10ThicknessResult result;
+    if (!stage7_result.success) {
+        throw std::runtime_error("Stage 10 cannot run before successful Stage 7 surface smoothing");
+    }
+    if (!stage9_result.success) {
+        throw std::runtime_error("Stage 10 cannot run before successful Stage 9 curvature computation");
+    }
+    if (stage7_result.node_count == 0 || stage7_result.grid.nx == 0 || stage7_result.grid.ny == 0) {
+        throw std::runtime_error("Stage 10 requires a non-empty Stage 7 grid");
+    }
+
+    result.messages.push_back("Geometry Stage 10");
+    result.messages.push_back("Geometry analysis: starting Stage 10 vertical thickness computation.");
+    result.grid = stage7_result.grid;
+    result.node_count = stage7_result.node_count;
+    result.reconstructed_mask = stage7_result.reconstructed_mask;
+    result.reliable_core_mask = stage7_result.reliable_core_mask;
+    result.metric_domain_mask = stage7_result.metric_domain_mask;
+    result.derivative_valid_mask = stage8_result.derivative_valid_mask;
+    if (result.derivative_valid_mask.size() != result.node_count) {
+        result.derivative_valid_mask.assign(result.node_count, 0);
+    }
+    result.curvature_valid_mask = stage9_result.curvature_valid_mask;
+    if (result.curvature_valid_mask.size() != result.node_count) {
+        result.curvature_valid_mask.assign(result.node_count, 0);
+    }
+
+    result.thickness_domain_definition = config.stage10_use_curvature_valid_domain_only
+                                             ? "stage7_metric_domain_intersect_stage9_curvature_valid"
+                                             : "stage7_metric_domain";
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    result.thickness_vertical.assign(result.node_count, nan);
+    result.thickness_attempted_mask.assign(result.node_count, 0);
+    result.thickness_valid_mask.assign(result.node_count, 0);
+    result.thickness_invalid_outside_domain_mask.assign(result.node_count, 0);
+    result.thickness_invalid_nonfinite_surface_mask.assign(result.node_count, 0);
+    result.thickness_invalid_negative_or_zero_mask.assign(result.node_count, 0);
+    result.thickness_invalid_below_min_threshold_mask.assign(result.node_count, 0);
+    result.thickness_invalid_above_max_threshold_mask.assign(result.node_count, 0);
+    result.thickness_qc_warn_mask.assign(result.node_count, 0);
+
+    if (!stage8_result.success) {
+        result.messages.push_back("Geometry Stage 10 note: Stage 8 derivative estimation unavailable; continuing with vertical thickness only.");
+    }
+
+    std::size_t metric_domain_node_count = 0;
+    std::size_t curvature_valid_node_count = 0;
+    for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+        if (result.metric_domain_mask[idx] != 0) {
+            ++metric_domain_node_count;
+        }
+        if (result.curvature_valid_mask[idx] != 0) {
+            ++curvature_valid_node_count;
+        }
+    }
+
+    for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+        const bool in_domain = result.metric_domain_mask[idx] != 0 &&
+                               (!config.stage10_use_curvature_valid_domain_only || result.curvature_valid_mask[idx] != 0);
+        if (!in_domain) {
+            result.thickness_invalid_outside_domain_mask[idx] = 1;
+            ++result.thickness_invalid_outside_domain_count;
+            continue;
+        }
+
+        result.thickness_attempted_mask[idx] = 1;
+        ++result.thickness_attempted_node_count;
+
+        const double z_outer = stage7_result.z_outer_smooth[idx];
+        const double z_inner = stage7_result.z_inner_smooth[idx];
+        if (!std::isfinite(z_outer) || !std::isfinite(z_inner)) {
+            result.thickness_invalid_nonfinite_surface_mask[idx] = 1;
+            ++result.thickness_invalid_nonfinite_surface_count;
+            continue;
+        }
+
+        const double t_z = z_outer - z_inner;
+        result.thickness_vertical[idx] = t_z;
+
+        if (t_z <= tolerance) {
+            result.thickness_invalid_negative_or_zero_mask[idx] = 1;
+            ++result.thickness_invalid_negative_or_zero_count;
+            continue;
+        }
+        if (config.stage10_min_thickness > 0.0 && t_z < config.stage10_min_thickness) {
+            result.thickness_invalid_below_min_threshold_mask[idx] = 1;
+            ++result.thickness_invalid_below_min_threshold_count;
+            continue;
+        }
+        if (config.stage10_max_thickness > 0.0 && t_z > config.stage10_max_thickness) {
+            result.thickness_invalid_above_max_threshold_mask[idx] = 1;
+            ++result.thickness_invalid_above_max_threshold_count;
+            continue;
+        }
+
+        result.thickness_valid_mask[idx] = 1;
+        ++result.thickness_valid_node_count;
+
+        if (!config.stage10_use_curvature_valid_domain_only && result.curvature_valid_mask[idx] == 0) {
+            result.thickness_qc_warn_mask[idx] = 1;
+            ++result.thickness_qc_warn_count;
+        }
+    }
+
+    result.thickness_invalid_node_count = result.thickness_attempted_node_count - result.thickness_valid_node_count;
+
+    const Stage10ScalarStats stats = computeStage10ScalarStats(result.thickness_vertical, result.thickness_valid_mask);
+    result.mean_thickness_vertical = stats.mean;
+    result.median_thickness_vertical = stats.median;
+    result.stddev_thickness_vertical = stats.stddev;
+    result.min_thickness_vertical = stats.min;
+    result.max_thickness_vertical = stats.max;
+
+    if (metric_domain_node_count > 0) {
+        result.thickness_valid_fraction_of_metric_domain =
+            static_cast<double>(result.thickness_valid_node_count) / static_cast<double>(metric_domain_node_count);
+    }
+    if (curvature_valid_node_count > 0) {
+        result.thickness_valid_fraction_of_curvature_valid =
+            static_cast<double>(result.thickness_valid_node_count) / static_cast<double>(curvature_valid_node_count);
+    }
+
+    if (config.stage10_export_csv) {
+        result.thickness_vertical_csv_path = config.output_prefix + "_thickness_vertical.csv";
+        result.thickness_valid_mask_csv_path = config.output_prefix + "_thickness_vertical_valid_mask.csv";
+        result.thickness_invalid_reason_csv_path = config.output_prefix + "_thickness_vertical_invalid_reason.csv";
+        result.thickness_summary_csv_path = config.output_prefix + "_thickness_vertical_summary.csv";
+        if (!writeStage10ThicknessCsv(result, result.thickness_vertical_csv_path)) {
+            throw std::runtime_error("Failed to write Stage 10 thickness CSV");
+        }
+        if (!writeStage10ValidMaskCsv(result, result.thickness_valid_mask_csv_path)) {
+            throw std::runtime_error("Failed to write Stage 10 thickness valid-mask CSV");
+        }
+        if (!writeStage10InvalidReasonCsv(result, result.thickness_invalid_reason_csv_path)) {
+            throw std::runtime_error("Failed to write Stage 10 thickness invalid-reason CSV");
+        }
+        if (!writeStage10SummaryCsv(result, result.thickness_summary_csv_path)) {
+            throw std::runtime_error("Failed to write Stage 10 thickness summary CSV");
+        }
+    }
+
+    result.messages.push_back("Geometry Stage 10 domain mode: " + result.thickness_domain_definition);
+    result.messages.push_back("Geometry Stage 10 attempted node count: " + std::to_string(result.thickness_attempted_node_count));
+    result.messages.push_back("Geometry Stage 10 valid node count: " + std::to_string(result.thickness_valid_node_count));
+
+    if (result.thickness_valid_node_count > 0) {
+        result.messages.push_back("Geometry Stage 10 thickness stats (mean/min/max): " + std::to_string(result.mean_thickness_vertical) +
+                                  ", " + std::to_string(result.min_thickness_vertical) + ", " +
+                                  std::to_string(result.max_thickness_vertical));
+        result.success = true;
+    } else {
+        result.messages.push_back("Geometry Stage 10 failure: no valid thickness nodes were produced.");
+        result.success = false;
+    }
+
+    if (config.stage10_export_csv) {
+        result.messages.push_back("Geometry Stage 10 thickness CSV: " + result.thickness_vertical_csv_path);
+        result.messages.push_back("Geometry Stage 10 valid-mask CSV: " + result.thickness_valid_mask_csv_path);
+        result.messages.push_back("Geometry Stage 10 invalid-reason CSV: " + result.thickness_invalid_reason_csv_path);
+        result.messages.push_back("Geometry Stage 10 summary CSV: " + result.thickness_summary_csv_path);
+    }
+    result.messages.push_back("Geometry analysis: completed Stage 10 vertical thickness computation.");
+    logMessages(result.messages, logger);
+    return result;
+}
+
 GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                                                     const FoldPatchAnalysisConfig& config,
                                                     const ParserConfig& parser_config,
@@ -4730,9 +5035,19 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                                result.stage9_curvature.messages.begin(),
                                result.stage9_curvature.messages.end());
     }
+    if (config.stage10_enabled) {
+        result.stage10_thickness = runGeometryAnalysisStage10ThicknessComputation(
+            result.stage7_smooth, result.stage8_derivatives, result.stage9_curvature, config, logger);
+    } else {
+        result.stage10_thickness.messages.push_back("Geometry Stage 10 thickness computation disabled by configuration.");
+        result.messages.insert(result.messages.end(),
+                               result.stage10_thickness.messages.begin(),
+                               result.stage10_thickness.messages.end());
+    }
     result.success = result.preparation.success && result.stage2_patch.success && result.stage3_patch.success &&
                      result.stage4_raw.success && result.stage5_prep.success && result.stage6_surfaces.success &&
-                     result.stage7_smooth.success && result.stage8_derivatives.success && result.stage9_curvature.success;
+                     result.stage7_smooth.success && result.stage8_derivatives.success && result.stage9_curvature.success &&
+                     (!config.stage10_enabled || result.stage10_thickness.success);
     const std::string run_summary_json_path = config.output_prefix + "_run_summary.json";
     if (!writeGeometryRunSummaryJson(config, parser_config, run_summary_json_path)) {
         throw std::runtime_error("Failed to write geometry run summary JSON: " + run_summary_json_path);
