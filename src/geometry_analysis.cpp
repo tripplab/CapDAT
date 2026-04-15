@@ -176,6 +176,10 @@ bool writeGeometryRunSummaryJson(const FoldPatchAnalysisConfig& config,
     out << "    \"min_directional_span\": " << config.stage8_min_directional_span << ",\n";
     out << "    \"export_csv\": " << (config.stage8_export_csv ? "true" : "false") << "\n";
     out << "  },\n";
+    out << "  \"stage9\": {\n";
+    out << "    \"enabled\": " << (config.stage9_enabled ? "true" : "false") << ",\n";
+    out << "    \"export_csv\": " << (config.stage9_export_csv ? "true" : "false") << "\n";
+    out << "  },\n";
     out << "  \"parser\": {\n";
     out << "    \"include_hetatm\": " << (parser_config.include_hetatm ? "true" : "false") << ",\n";
     out << "    \"strict_mode\": " << (parser_config.strict_mode ? "true" : "false") << ",\n";
@@ -3728,6 +3732,122 @@ bool writeStage8SummaryCsv(const GeometryStage8DerivativeEstimationResult& resul
     return out.good();
 }
 
+struct Stage9ScalarStats {
+    double mean = std::numeric_limits<double>::quiet_NaN();
+    double median = std::numeric_limits<double>::quiet_NaN();
+    double stddev = std::numeric_limits<double>::quiet_NaN();
+    double min = std::numeric_limits<double>::quiet_NaN();
+    double max = std::numeric_limits<double>::quiet_NaN();
+};
+
+Stage9ScalarStats computeStage9ScalarStats(const std::vector<double>& values, const std::vector<uint8_t>& valid_mask) {
+    Stage9ScalarStats stats;
+    std::vector<double> selected;
+    selected.reserve(values.size());
+    for (std::size_t idx = 0; idx < values.size(); ++idx) {
+        if (valid_mask[idx] == 0 || !std::isfinite(values[idx])) {
+            continue;
+        }
+        selected.push_back(values[idx]);
+    }
+    if (selected.empty()) {
+        return stats;
+    }
+
+    double sum = 0.0;
+    stats.min = selected[0];
+    stats.max = selected[0];
+    for (const double value : selected) {
+        sum += value;
+        stats.min = std::min(stats.min, value);
+        stats.max = std::max(stats.max, value);
+    }
+    stats.mean = sum / static_cast<double>(selected.size());
+
+    std::sort(selected.begin(), selected.end());
+    const std::size_t n = selected.size();
+    if ((n % 2U) == 1U) {
+        stats.median = selected[n / 2U];
+    } else {
+        stats.median = 0.5 * (selected[(n / 2U) - 1U] + selected[n / 2U]);
+    }
+
+    double variance_sum = 0.0;
+    for (const double value : selected) {
+        const double delta = value - stats.mean;
+        variance_sum += delta * delta;
+    }
+    stats.stddev = std::sqrt(variance_sum / static_cast<double>(n));
+    return stats;
+}
+
+bool writeStage9CurvatureCsv(const GeometryStage9CurvatureComputationResult& result,
+                             const std::string& path,
+                             const std::vector<double>& H,
+                             const std::vector<double>& K) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,reconstructed,reliable_core,metric_domain,derivative_valid,curvature_valid,H,K\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.reconstructed_mask[idx]) << ',' << static_cast<int>(result.reliable_core_mask[idx])
+                << ',' << static_cast<int>(result.metric_domain_mask[idx]) << ','
+                << static_cast<int>(result.derivative_valid_mask[idx]) << ','
+                << static_cast<int>(result.curvature_valid_mask[idx]) << ',' << H[idx] << ',' << K[idx] << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage9CurvatureMaskCsv(const GeometryStage9CurvatureComputationResult& result, const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,x,y,metric_domain,derivative_valid,curvature_valid,invalid_nonfinite_input,invalid_nonfinite_output\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << static_cast<int>(result.metric_domain_mask[idx]) << ','
+                << static_cast<int>(result.derivative_valid_mask[idx]) << ','
+                << static_cast<int>(result.curvature_valid_mask[idx]) << ','
+                << static_cast<int>(result.curvature_invalid_nonfinite_input_mask[idx]) << ','
+                << static_cast<int>(result.curvature_invalid_nonfinite_output_mask[idx]) << '\n';
+        }
+    }
+    return out.good();
+}
+
+bool writeStage9SummaryCsv(const GeometryStage9CurvatureComputationResult& result, const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "node_count,metric_domain_node_count,derivative_valid_node_count,curvature_valid_node_count,"
+           "curvature_valid_fraction_of_metric_domain,curvature_valid_fraction_of_derivative_valid,"
+           "curvature_invalid_nonfinite_input_count,curvature_invalid_nonfinite_output_count,"
+           "outer_mean_H,outer_median_H,outer_stddev_H,outer_min_H,outer_max_H,"
+           "outer_mean_K,outer_median_K,outer_stddev_K,outer_min_K,outer_max_K,"
+           "inner_mean_H,inner_median_H,inner_stddev_H,inner_min_H,inner_max_H,"
+           "inner_mean_K,inner_median_K,inner_stddev_K,inner_min_K,inner_max_K\n";
+    out << result.node_count << ',' << result.metric_domain_node_count << ',' << result.derivative_valid_node_count << ','
+        << result.curvature_valid_node_count << ',' << result.curvature_valid_fraction_of_metric_domain << ','
+        << result.curvature_valid_fraction_of_derivative_valid << ',' << result.curvature_invalid_nonfinite_input_count
+        << ',' << result.curvature_invalid_nonfinite_output_count << ',' << result.outer_mean_H << ','
+        << result.outer_median_H << ',' << result.outer_stddev_H << ',' << result.outer_min_H << ',' << result.outer_max_H
+        << ',' << result.outer_mean_K << ',' << result.outer_median_K << ',' << result.outer_stddev_K << ','
+        << result.outer_min_K << ',' << result.outer_max_K << ',' << result.inner_mean_H << ',' << result.inner_median_H
+        << ',' << result.inner_stddev_H << ',' << result.inner_min_H << ',' << result.inner_max_H << ','
+        << result.inner_mean_K << ',' << result.inner_median_K << ',' << result.inner_stddev_K << ','
+        << result.inner_min_K << ',' << result.inner_max_K << '\n';
+    return out.good();
+}
+
 } // namespace
 
 GeometryStage8DerivativeEstimationResult runGeometryAnalysisStage8DerivativeEstimation(
@@ -4024,6 +4144,213 @@ GeometryStage8DerivativeEstimationResult runGeometryAnalysisStage8DerivativeEsti
     return result;
 }
 
+GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureComputation(
+    const GeometryStage7SmoothedSurfaceResult& stage7_result,
+    const GeometryStage8DerivativeEstimationResult& stage8_result,
+    const FoldPatchAnalysisConfig& config,
+    Logger* logger,
+    double tolerance) {
+    GeometryStage9CurvatureComputationResult result;
+    if (!stage7_result.success) {
+        throw std::runtime_error("Stage 9 cannot run before successful Stage 7 surface smoothing");
+    }
+    if (!stage8_result.success) {
+        throw std::runtime_error("Stage 9 cannot run before successful Stage 8 derivative estimation");
+    }
+    if (stage8_result.node_count == 0 || stage8_result.grid.nx == 0 || stage8_result.grid.ny == 0) {
+        throw std::runtime_error("Stage 9 requires a non-empty Stage 8 derivative grid");
+    }
+
+    result.messages.push_back("Geometry Stage 9");
+    result.messages.push_back("Geometry analysis: starting Stage 9 curvature computation.");
+    result.grid = stage8_result.grid;
+    result.node_count = stage8_result.node_count;
+    result.reconstructed_mask = stage8_result.reconstructed_mask;
+    result.reliable_core_mask = stage8_result.reliable_core_mask;
+    result.metric_domain_mask = stage8_result.metric_domain_mask;
+    result.derivative_valid_mask = stage8_result.derivative_valid_mask;
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    result.curvature_valid_mask.assign(result.node_count, 0);
+    result.curvature_invalid_nonfinite_input_mask.assign(result.node_count, 0);
+    result.curvature_invalid_nonfinite_output_mask.assign(result.node_count, 0);
+    result.outer_mean_curvature_H.assign(result.node_count, nan);
+    result.outer_gaussian_curvature_K.assign(result.node_count, nan);
+    result.inner_mean_curvature_H.assign(result.node_count, nan);
+    result.inner_gaussian_curvature_K.assign(result.node_count, nan);
+
+    for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+        if (result.metric_domain_mask[idx] != 0) {
+            ++result.metric_domain_node_count;
+        }
+        if (result.derivative_valid_mask[idx] != 0) {
+            ++result.derivative_valid_node_count;
+        }
+    }
+
+    for (std::size_t idx = 0; idx < result.node_count; ++idx) {
+        if (result.derivative_valid_mask[idx] == 0) {
+            continue;
+        }
+
+        const bool finite_inputs = std::isfinite(stage8_result.outer_dz_dx[idx]) && std::isfinite(stage8_result.outer_dz_dy[idx]) &&
+                                   std::isfinite(stage8_result.outer_d2z_dx2[idx]) &&
+                                   std::isfinite(stage8_result.outer_d2z_dy2[idx]) &&
+                                   std::isfinite(stage8_result.outer_d2z_dxdy[idx]) &&
+                                   std::isfinite(stage8_result.inner_dz_dx[idx]) && std::isfinite(stage8_result.inner_dz_dy[idx]) &&
+                                   std::isfinite(stage8_result.inner_d2z_dx2[idx]) &&
+                                   std::isfinite(stage8_result.inner_d2z_dy2[idx]) &&
+                                   std::isfinite(stage8_result.inner_d2z_dxdy[idx]);
+        if (!finite_inputs) {
+            result.curvature_invalid_nonfinite_input_mask[idx] = 1;
+            ++result.curvature_invalid_nonfinite_input_count;
+            continue;
+        }
+
+        const double outer_zx = stage8_result.outer_dz_dx[idx];
+        const double outer_zy = stage8_result.outer_dz_dy[idx];
+        const double outer_zxx = stage8_result.outer_d2z_dx2[idx];
+        const double outer_zyy = stage8_result.outer_d2z_dy2[idx];
+        const double outer_zxy = stage8_result.outer_d2z_dxdy[idx];
+
+        const double inner_zx = stage8_result.inner_dz_dx[idx];
+        const double inner_zy = stage8_result.inner_dz_dy[idx];
+        const double inner_zxx = stage8_result.inner_d2z_dx2[idx];
+        const double inner_zyy = stage8_result.inner_d2z_dy2[idx];
+        const double inner_zxy = stage8_result.inner_d2z_dxdy[idx];
+
+        // Monge-patch Gaussian curvature formula:
+        // K = (z_xx z_yy - z_xy^2) / (1 + z_x^2 + z_y^2)^2
+        const double outer_denom_base = 1.0 + (outer_zx * outer_zx) + (outer_zy * outer_zy);
+        const double inner_denom_base = 1.0 + (inner_zx * inner_zx) + (inner_zy * inner_zy);
+        const double outer_K =
+            ((outer_zxx * outer_zyy) - (outer_zxy * outer_zxy)) / (outer_denom_base * outer_denom_base);
+        const double inner_K =
+            ((inner_zxx * inner_zyy) - (inner_zxy * inner_zxy)) / (inner_denom_base * inner_denom_base);
+
+        // Monge-patch mean curvature formula:
+        // H = ((1+z_x^2) z_yy - 2 z_x z_y z_xy + (1+z_y^2) z_xx) / (2(1+z_x^2+z_y^2)^(3/2))
+        const double outer_H_num = ((1.0 + (outer_zx * outer_zx)) * outer_zyy) - (2.0 * outer_zx * outer_zy * outer_zxy) +
+                                   ((1.0 + (outer_zy * outer_zy)) * outer_zxx);
+        const double inner_H_num = ((1.0 + (inner_zx * inner_zx)) * inner_zyy) - (2.0 * inner_zx * inner_zy * inner_zxy) +
+                                   ((1.0 + (inner_zy * inner_zy)) * inner_zxx);
+        const double outer_H = outer_H_num / (2.0 * std::pow(outer_denom_base, 1.5));
+        const double inner_H = inner_H_num / (2.0 * std::pow(inner_denom_base, 1.5));
+
+        const bool finite_outputs =
+            std::isfinite(outer_H) && std::isfinite(outer_K) && std::isfinite(inner_H) && std::isfinite(inner_K);
+        if (!finite_outputs) {
+            result.curvature_invalid_nonfinite_output_mask[idx] = 1;
+            ++result.curvature_invalid_nonfinite_output_count;
+            continue;
+        }
+
+        result.curvature_valid_mask[idx] = 1;
+        ++result.curvature_valid_node_count;
+        result.outer_mean_curvature_H[idx] = outer_H;
+        result.outer_gaussian_curvature_K[idx] = outer_K;
+        result.inner_mean_curvature_H[idx] = inner_H;
+        result.inner_gaussian_curvature_K[idx] = inner_K;
+    }
+
+    const Stage9ScalarStats outer_H_stats = computeStage9ScalarStats(result.outer_mean_curvature_H, result.curvature_valid_mask);
+    result.outer_mean_H = outer_H_stats.mean;
+    result.outer_median_H = outer_H_stats.median;
+    result.outer_stddev_H = outer_H_stats.stddev;
+    result.outer_min_H = outer_H_stats.min;
+    result.outer_max_H = outer_H_stats.max;
+
+    const Stage9ScalarStats outer_K_stats = computeStage9ScalarStats(result.outer_gaussian_curvature_K, result.curvature_valid_mask);
+    result.outer_mean_K = outer_K_stats.mean;
+    result.outer_median_K = outer_K_stats.median;
+    result.outer_stddev_K = outer_K_stats.stddev;
+    result.outer_min_K = outer_K_stats.min;
+    result.outer_max_K = outer_K_stats.max;
+
+    const Stage9ScalarStats inner_H_stats = computeStage9ScalarStats(result.inner_mean_curvature_H, result.curvature_valid_mask);
+    result.inner_mean_H = inner_H_stats.mean;
+    result.inner_median_H = inner_H_stats.median;
+    result.inner_stddev_H = inner_H_stats.stddev;
+    result.inner_min_H = inner_H_stats.min;
+    result.inner_max_H = inner_H_stats.max;
+
+    const Stage9ScalarStats inner_K_stats = computeStage9ScalarStats(result.inner_gaussian_curvature_K, result.curvature_valid_mask);
+    result.inner_mean_K = inner_K_stats.mean;
+    result.inner_median_K = inner_K_stats.median;
+    result.inner_stddev_K = inner_K_stats.stddev;
+    result.inner_min_K = inner_K_stats.min;
+    result.inner_max_K = inner_K_stats.max;
+
+    if (result.metric_domain_node_count > 0) {
+        result.curvature_valid_fraction_of_metric_domain =
+            static_cast<double>(result.curvature_valid_node_count) / static_cast<double>(result.metric_domain_node_count);
+    }
+    if (result.derivative_valid_node_count > 0) {
+        result.curvature_valid_fraction_of_derivative_valid =
+            static_cast<double>(result.curvature_valid_node_count) / static_cast<double>(result.derivative_valid_node_count);
+    }
+
+    if (config.stage9_export_csv) {
+        result.outer_curvature_csv_path = config.output_prefix + "_outer_curvature.csv";
+        result.inner_curvature_csv_path = config.output_prefix + "_inner_curvature.csv";
+        result.curvature_valid_mask_csv_path = config.output_prefix + "_curvature_valid_mask.csv";
+        result.curvature_summary_csv_path = config.output_prefix + "_curvature_summary.csv";
+        if (!writeStage9CurvatureCsv(result,
+                                     result.outer_curvature_csv_path,
+                                     result.outer_mean_curvature_H,
+                                     result.outer_gaussian_curvature_K)) {
+            throw std::runtime_error("Failed to write Stage 9 outer curvature CSV");
+        }
+        if (!writeStage9CurvatureCsv(result,
+                                     result.inner_curvature_csv_path,
+                                     result.inner_mean_curvature_H,
+                                     result.inner_gaussian_curvature_K)) {
+            throw std::runtime_error("Failed to write Stage 9 inner curvature CSV");
+        }
+        if (!writeStage9CurvatureMaskCsv(result, result.curvature_valid_mask_csv_path)) {
+            throw std::runtime_error("Failed to write Stage 9 curvature-valid mask CSV");
+        }
+        if (!writeStage9SummaryCsv(result, result.curvature_summary_csv_path)) {
+            throw std::runtime_error("Failed to write Stage 9 curvature summary CSV");
+        }
+    }
+
+    (void)tolerance;
+    result.messages.push_back("Geometry Stage 9 metric-domain node count: " + std::to_string(result.metric_domain_node_count));
+    result.messages.push_back("Geometry Stage 9 derivative-valid node count: " + std::to_string(result.derivative_valid_node_count));
+    result.messages.push_back("Geometry Stage 9 curvature-valid node count: " + std::to_string(result.curvature_valid_node_count));
+    result.messages.push_back("Geometry Stage 9 invalid nonfinite-input count: " +
+                              std::to_string(result.curvature_invalid_nonfinite_input_count));
+    result.messages.push_back("Geometry Stage 9 invalid nonfinite-output count: " +
+                              std::to_string(result.curvature_invalid_nonfinite_output_count));
+    result.messages.push_back("Geometry Stage 9 curvature-valid fraction of metric domain: " +
+                              std::to_string(result.curvature_valid_fraction_of_metric_domain));
+    result.messages.push_back("Geometry Stage 9 curvature-valid fraction of derivative valid: " +
+                              std::to_string(result.curvature_valid_fraction_of_derivative_valid));
+    result.messages.push_back("Geometry Stage 9 outer H stats (mean/median/std/min/max): " + std::to_string(result.outer_mean_H) +
+                              ", " + std::to_string(result.outer_median_H) + ", " + std::to_string(result.outer_stddev_H) + ", " +
+                              std::to_string(result.outer_min_H) + ", " + std::to_string(result.outer_max_H));
+    result.messages.push_back("Geometry Stage 9 outer K stats (mean/median/std/min/max): " + std::to_string(result.outer_mean_K) +
+                              ", " + std::to_string(result.outer_median_K) + ", " + std::to_string(result.outer_stddev_K) + ", " +
+                              std::to_string(result.outer_min_K) + ", " + std::to_string(result.outer_max_K));
+    result.messages.push_back("Geometry Stage 9 inner H stats (mean/median/std/min/max): " + std::to_string(result.inner_mean_H) +
+                              ", " + std::to_string(result.inner_median_H) + ", " + std::to_string(result.inner_stddev_H) + ", " +
+                              std::to_string(result.inner_min_H) + ", " + std::to_string(result.inner_max_H));
+    result.messages.push_back("Geometry Stage 9 inner K stats (mean/median/std/min/max): " + std::to_string(result.inner_mean_K) +
+                              ", " + std::to_string(result.inner_median_K) + ", " + std::to_string(result.inner_stddev_K) + ", " +
+                              std::to_string(result.inner_min_K) + ", " + std::to_string(result.inner_max_K));
+    if (config.stage9_export_csv) {
+        result.messages.push_back("Geometry Stage 9 outer curvature CSV: " + result.outer_curvature_csv_path);
+        result.messages.push_back("Geometry Stage 9 inner curvature CSV: " + result.inner_curvature_csv_path);
+        result.messages.push_back("Geometry Stage 9 curvature-valid mask CSV: " + result.curvature_valid_mask_csv_path);
+        result.messages.push_back("Geometry Stage 9 summary CSV: " + result.curvature_summary_csv_path);
+    }
+    result.messages.push_back("Geometry analysis: completed Stage 9 curvature computation.");
+    result.success = true;
+    logMessages(result.messages, logger);
+    return result;
+}
+
 GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                                                     const FoldPatchAnalysisConfig& config,
                                                     const ParserConfig& parser_config,
@@ -4068,9 +4395,27 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                                result.stage8_derivatives.messages.begin(),
                                result.stage8_derivatives.messages.end());
     }
+    if (config.stage9_enabled && config.stage8_enabled && stage8_allowed_by_stage7_method) {
+        result.stage9_curvature =
+            runGeometryAnalysisStage9CurvatureComputation(result.stage7_smooth, result.stage8_derivatives, config, logger);
+    } else {
+        result.stage9_curvature.success = true;
+        if (!config.stage9_enabled) {
+            result.stage9_curvature.messages.push_back("Geometry Stage 9 curvature computation disabled by configuration.");
+        } else if (!config.stage8_enabled) {
+            result.stage9_curvature.messages.push_back(
+                "Geometry Stage 9 curvature computation skipped: requires Stage 8 derivative estimation.");
+        } else {
+            result.stage9_curvature.messages.push_back(
+                "Geometry Stage 9 curvature computation skipped: requires Stage 7 thin_plate_grid_fit method.");
+        }
+        result.messages.insert(result.messages.end(),
+                               result.stage9_curvature.messages.begin(),
+                               result.stage9_curvature.messages.end());
+    }
     result.success = result.preparation.success && result.stage2_patch.success && result.stage3_patch.success &&
                      result.stage4_raw.success && result.stage5_prep.success && result.stage6_surfaces.success &&
-                     result.stage7_smooth.success && result.stage8_derivatives.success;
+                     result.stage7_smooth.success && result.stage8_derivatives.success && result.stage9_curvature.success;
     const std::string run_summary_json_path = config.output_prefix + "_run_summary.json";
     if (!writeGeometryRunSummaryJson(config, parser_config, run_summary_json_path)) {
         throw std::runtime_error("Failed to write geometry run summary JSON: " + run_summary_json_path);

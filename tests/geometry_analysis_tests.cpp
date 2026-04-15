@@ -59,6 +59,26 @@ Capsid makeSimpleCapsid() {
     return capsid;
 }
 
+Capsid makeDenseCurvatureCapsid() {
+    Capsid capsid("dense_curvature_constructed");
+    Chain chain(1, 'A');
+    int serial = 1;
+    int residue_seq = 1;
+    for (int jy = -2; jy <= 2; ++jy) {
+        for (int ix = -2; ix <= 2; ++ix) {
+            Residue residue("ALA", residue_seq++, ' ', 'A', 1);
+            const double x = static_cast<double>(ix) * 0.8;
+            const double y = static_cast<double>(jy) * 0.8;
+            const double z = 2.0 + (0.1 * x * x) + (0.05 * y * y);
+            residue.addAtom(Atom(serial++, "CA", ' ', "ALA", 'A', residue_seq, ' ', x, y, z, 1.0, 20.0, "C", "", false));
+            chain.addResidue(residue);
+        }
+    }
+    capsid.addChain(chain);
+    capsid.finalizeCounts();
+    return capsid;
+}
+
 Capsid makeStage2Capsid() {
     Capsid capsid("stage2_constructed");
     Chain chain(1, 'A');
@@ -356,8 +376,8 @@ void testStage4PipelineUsesEnvelopeContactsAndProvenance() {
     config.enabled = true;
     config.fold_type = 2;
     config.fold_index = 0;
-    config.cylinder_radius = 2.0;
-    config.grid_spacing = 1.0;
+    config.cylinder_radius = 3.0;
+    config.grid_spacing = 0.5;
     config.min_atoms_in_patch = 2;
     config.output_prefix = "stage4_envelope_regression";
 
@@ -2114,6 +2134,172 @@ void testStage8CsvExportSmoke() {
     removeIfExists(stage8.derivative_summary_csv_path);
 }
 
+GeometryStage8DerivativeEstimationResult makeSyntheticStage8ResultForStage9(std::size_t nx = 3, std::size_t ny = 3) {
+    GeometryStage8DerivativeEstimationResult stage8;
+    stage8.success = true;
+    stage8.grid.nx = nx;
+    stage8.grid.ny = ny;
+    stage8.grid.spacing = 1.0;
+    stage8.grid.x_min = -1.0;
+    stage8.grid.x_max = 1.0;
+    stage8.grid.y_min = -1.0;
+    stage8.grid.y_max = 1.0;
+    stage8.grid.x_values.resize(nx, 0.0);
+    stage8.grid.y_values.resize(ny, 0.0);
+    for (std::size_t i = 0; i < nx; ++i) {
+        stage8.grid.x_values[i] = static_cast<double>(i) - static_cast<double>(nx / 2);
+    }
+    for (std::size_t j = 0; j < ny; ++j) {
+        stage8.grid.y_values[j] = static_cast<double>(j) - static_cast<double>(ny / 2);
+    }
+    stage8.node_count = nx * ny;
+    stage8.reconstructed_mask.assign(stage8.node_count, 1);
+    stage8.reliable_core_mask.assign(stage8.node_count, 1);
+    stage8.metric_domain_mask.assign(stage8.node_count, 1);
+    stage8.derivative_valid_mask.assign(stage8.node_count, 1);
+    stage8.derivative_valid_node_count = stage8.node_count;
+    stage8.metric_domain_node_count = stage8.node_count;
+
+    stage8.outer_dz_dx.assign(stage8.node_count, 0.0);
+    stage8.outer_dz_dy.assign(stage8.node_count, 0.0);
+    stage8.outer_d2z_dx2.assign(stage8.node_count, 0.0);
+    stage8.outer_d2z_dy2.assign(stage8.node_count, 0.0);
+    stage8.outer_d2z_dxdy.assign(stage8.node_count, 0.0);
+    stage8.inner_dz_dx.assign(stage8.node_count, 0.0);
+    stage8.inner_dz_dy.assign(stage8.node_count, 0.0);
+    stage8.inner_d2z_dx2.assign(stage8.node_count, 0.0);
+    stage8.inner_d2z_dy2.assign(stage8.node_count, 0.0);
+    stage8.inner_d2z_dxdy.assign(stage8.node_count, 0.0);
+    return stage8;
+}
+
+GeometryStage7SmoothedSurfaceResult makeSyntheticStage7ResultForStage9(const GeometryStage8DerivativeEstimationResult& stage8) {
+    GeometryStage7SmoothedSurfaceResult stage7;
+    stage7.success = true;
+    stage7.grid = stage8.grid;
+    stage7.node_count = stage8.node_count;
+    stage7.reconstructed_mask = stage8.reconstructed_mask;
+    stage7.reliable_core_mask = stage8.reliable_core_mask;
+    stage7.metric_domain_mask = stage8.metric_domain_mask;
+    stage7.smooth_valid_mask.assign(stage7.node_count, 1);
+    stage7.z_outer_smooth.assign(stage7.node_count, 0.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, 0.0);
+    return stage7;
+}
+
+void testStage9PlaneCurvature() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    FoldPatchAnalysisConfig config;
+    config.stage9_export_csv = false;
+
+    const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+    assertTrue(stage9.success, "Stage 9 plane computation should succeed");
+    assertTrue(stage9.curvature_valid_node_count == stage8.node_count, "all derivative-valid plane nodes should be curvature-valid");
+    for (std::size_t idx = 0; idx < stage9.node_count; ++idx) {
+        assertTrue(near(stage9.outer_mean_curvature_H[idx], 0.0, 1e-12), "plane outer H should be zero");
+        assertTrue(near(stage9.outer_gaussian_curvature_K[idx], 0.0, 1e-12), "plane outer K should be zero");
+        assertTrue(near(stage9.inner_mean_curvature_H[idx], 0.0, 1e-12), "plane inner H should be zero");
+        assertTrue(near(stage9.inner_gaussian_curvature_K[idx], 0.0, 1e-12), "plane inner K should be zero");
+    }
+}
+
+void testStage9ParaboloidCurvatureAtOrigin() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    const double alpha = 0.3;
+    const double beta = 0.7;
+    for (std::size_t j = 0; j < stage8.grid.ny; ++j) {
+        for (std::size_t i = 0; i < stage8.grid.nx; ++i) {
+            const std::size_t idx = nodeIndex(i, j, stage8.grid.nx);
+            const double x = stage8.grid.x_values[i];
+            const double y = stage8.grid.y_values[j];
+            stage8.outer_dz_dx[idx] = 2.0 * alpha * x;
+            stage8.outer_dz_dy[idx] = 2.0 * beta * y;
+            stage8.outer_d2z_dx2[idx] = 2.0 * alpha;
+            stage8.outer_d2z_dy2[idx] = 2.0 * beta;
+            stage8.outer_d2z_dxdy[idx] = 0.0;
+            stage8.inner_dz_dx[idx] = stage8.outer_dz_dx[idx];
+            stage8.inner_dz_dy[idx] = stage8.outer_dz_dy[idx];
+            stage8.inner_d2z_dx2[idx] = stage8.outer_d2z_dx2[idx];
+            stage8.inner_d2z_dy2[idx] = stage8.outer_d2z_dy2[idx];
+            stage8.inner_d2z_dxdy[idx] = 0.0;
+        }
+    }
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    FoldPatchAnalysisConfig config;
+    config.stage9_export_csv = false;
+    const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+
+    const std::size_t center = nodeIndex(1, 1, stage8.grid.nx);
+    const double expected_H = alpha + beta;
+    const double expected_K = 4.0 * alpha * beta;
+    assertTrue(near(stage9.outer_mean_curvature_H[center], expected_H, 1e-12), "paraboloid outer H at origin should match analytic");
+    assertTrue(near(stage9.outer_gaussian_curvature_K[center], expected_K, 1e-12),
+               "paraboloid outer K at origin should match analytic");
+    assertTrue(near(stage9.inner_mean_curvature_H[center], expected_H, 1e-12), "paraboloid inner H at origin should match analytic");
+    assertTrue(near(stage9.inner_gaussian_curvature_K[center], expected_K, 1e-12),
+               "paraboloid inner K at origin should match analytic");
+}
+
+void testStage9InvalidInputPropagation() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    const std::size_t idx = nodeIndex(0, 0, stage8.grid.nx);
+    stage8.outer_dz_dx[idx] = std::numeric_limits<double>::infinity();
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    FoldPatchAnalysisConfig config;
+    config.stage9_export_csv = false;
+    const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+
+    assertTrue(stage9.curvature_valid_mask[idx] == 0, "non-finite derivative input should invalidate curvature node");
+    assertTrue(stage9.curvature_invalid_nonfinite_input_mask[idx] == 1, "non-finite input mask should be flagged");
+    assertTrue(std::isnan(stage9.outer_mean_curvature_H[idx]), "invalid node outer H should remain NaN");
+    assertTrue(std::isnan(stage9.outer_gaussian_curvature_K[idx]), "invalid node outer K should remain NaN");
+    assertTrue(std::isnan(stage9.inner_mean_curvature_H[idx]), "invalid node inner H should remain NaN");
+    assertTrue(std::isnan(stage9.inner_gaussian_curvature_K[idx]), "invalid node inner K should remain NaN");
+    assertTrue(stage9.curvature_invalid_nonfinite_input_count == 1, "invalid non-finite input count should increment");
+}
+
+void testStage9NonFiniteOutputGuard() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    const std::size_t idx = nodeIndex(0, 1, stage8.grid.nx);
+    stage8.outer_dz_dx[idx] = 1e308;
+    stage8.outer_dz_dy[idx] = 1e308;
+    stage8.outer_d2z_dx2[idx] = 1e308;
+    stage8.outer_d2z_dy2[idx] = 1e308;
+    stage8.outer_d2z_dxdy[idx] = 1e308;
+    stage8.inner_dz_dx[idx] = 1e308;
+    stage8.inner_dz_dy[idx] = 1e308;
+    stage8.inner_d2z_dx2[idx] = 1e308;
+    stage8.inner_d2z_dy2[idx] = 1e308;
+    stage8.inner_d2z_dxdy[idx] = 1e308;
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    FoldPatchAnalysisConfig config;
+    config.stage9_export_csv = false;
+    const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+
+    assertTrue(stage9.curvature_valid_mask[idx] == 0, "overflow-like derivatives should not produce valid curvature");
+    assertTrue(stage9.curvature_invalid_nonfinite_output_mask[idx] == 1, "non-finite output mask should be flagged");
+    assertTrue(stage9.curvature_invalid_nonfinite_output_count == 1, "non-finite output counter should increment");
+}
+
+void testStage9CsvExportSmoke() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    FoldPatchAnalysisConfig config;
+    config.output_prefix = "stage9_smoke";
+    config.stage9_export_csv = true;
+    const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+
+    assertTrue(std::filesystem::exists(stage9.outer_curvature_csv_path), "outer curvature csv should be exported");
+    assertTrue(std::filesystem::exists(stage9.inner_curvature_csv_path), "inner curvature csv should be exported");
+    assertTrue(std::filesystem::exists(stage9.curvature_valid_mask_csv_path), "curvature-valid mask csv should be exported");
+    assertTrue(std::filesystem::exists(stage9.curvature_summary_csv_path), "curvature summary csv should be exported");
+    removeIfExists(stage9.outer_curvature_csv_path);
+    removeIfExists(stage9.inner_curvature_csv_path);
+    removeIfExists(stage9.curvature_valid_mask_csv_path);
+    removeIfExists(stage9.curvature_summary_csv_path);
+}
+
 void testStage1ToStage6Integration() {
     Capsid capsid = makeSimpleCapsid();
     FoldPatchAnalysisConfig config;
@@ -2221,15 +2407,15 @@ void testStage1ToStage7Integration() {
     removeIfExists(result.stage7_smooth.inner_mesh_path);
 }
 
-void testStage1ToStage8ThinPlateIntegration() {
-    Capsid capsid = makeSimpleCapsid();
+void testStage1ToStage9ThinPlateIntegration() {
+    Capsid capsid = makeDenseCurvatureCapsid();
     FoldPatchAnalysisConfig config;
     config.enabled = true;
     config.fold_type = 2;
     config.fold_index = 0;
     config.cylinder_radius = 2.0;
     config.grid_spacing = 1.0;
-    config.min_atoms_in_patch = 2;
+    config.min_atoms_in_patch = 20;
     config.debug = true;
     config.stage6_export_obj_meshes = false;
     config.stage7_export_meshes = true;
@@ -2243,10 +2429,12 @@ void testStage1ToStage8ThinPlateIntegration() {
     config.stage8_max_condition_indicator = 1e12;
     config.stage8_require_centered_support = false;
     config.stage8_min_directional_span = 0.1;
+    config.stage9_enabled = true;
+    config.stage9_export_csv = true;
     config.output_prefix = "stage7_fit_integration";
 
     const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
-    assertTrue(result.success, "Stage 1-8 integration with thin-plate should succeed");
+    assertTrue(result.success, "Stage 1-9 integration with thin-plate should succeed");
     assertTrue(result.stage7_smooth.success, "thin-plate Stage 7 should succeed in full pipeline");
     assertTrue(result.stage8_derivatives.success, "Stage 8 should succeed in full pipeline");
     assertTrue(result.stage7_smooth.stage7_method_label == "thin_plate_grid_fit", "Stage 7 method metadata should be populated");
@@ -2259,6 +2447,11 @@ void testStage1ToStage8ThinPlateIntegration() {
                "Stage 8 outer derivative csv should exist");
     assertTrue(std::filesystem::exists(result.stage8_derivatives.derivative_summary_csv_path),
                "Stage 8 summary csv should exist");
+    assertTrue(result.stage9_curvature.success, "Stage 9 should succeed in full pipeline");
+    assertTrue(std::filesystem::exists(result.stage9_curvature.outer_curvature_csv_path),
+               "Stage 9 outer curvature csv should exist");
+    assertTrue(std::filesystem::exists(result.stage9_curvature.curvature_summary_csv_path),
+               "Stage 9 summary csv should exist");
 
     removeIfExists(result.stage2_patch.export_path);
     removeIfExists(result.stage4_raw.outer_csv_path);
@@ -2297,6 +2490,10 @@ void testStage1ToStage8ThinPlateIntegration() {
     removeIfExists(result.stage8_derivatives.derivative_valid_mask_csv_path);
     removeIfExists(result.stage8_derivatives.derivative_failure_reason_csv_path);
     removeIfExists(result.stage8_derivatives.derivative_summary_csv_path);
+    removeIfExists(result.stage9_curvature.outer_curvature_csv_path);
+    removeIfExists(result.stage9_curvature.inner_curvature_csv_path);
+    removeIfExists(result.stage9_curvature.curvature_valid_mask_csv_path);
+    removeIfExists(result.stage9_curvature.curvature_summary_csv_path);
 }
 
 } // namespace
@@ -2362,9 +2559,14 @@ int main() {
         testStage8BoundarySkewRejection();
         testStage8RankDeficientOrPoorConditioningRejection();
         testStage8CsvExportSmoke();
+        testStage9PlaneCurvature();
+        testStage9ParaboloidCurvatureAtOrigin();
+        testStage9InvalidInputPropagation();
+        testStage9NonFiniteOutputGuard();
+        testStage9CsvExportSmoke();
         testStage1ToStage7Integration();
-        testStage1ToStage8ThinPlateIntegration();
-        std::cout << "All geometry analysis Stage 1/2/3/4/5/6/7/8 tests passed.\n";
+        testStage1ToStage9ThinPlateIntegration();
+        std::cout << "All geometry analysis Stage 1/2/3/4/5/6/7/8/9 tests passed.\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Geometry analysis test failure: " << e.what() << '\n';
