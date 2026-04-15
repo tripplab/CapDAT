@@ -92,6 +92,11 @@ struct FoldPatchAnalysisConfig {
     double stage9_qc_n_spike = 4.0;
     std::size_t stage9_qc_min_neighbors = 3;
     double stage9_qc_abs_scale_floor = 1e-6;
+    bool stage10_enabled = true;
+    bool stage10_export_csv = true;
+    bool stage10_use_curvature_valid_domain_only = false;
+    double stage10_min_thickness = 0.0;
+    double stage10_max_thickness = 0.0;
     MeshExportFormat stage6_mesh_export_format = MeshExportFormat::stl;
     bool stage6_split_in_out_meshes = false;
     bool export_rotated_capsid = false;
@@ -599,6 +604,58 @@ struct GeometryStage9CurvatureComputationResult {
     std::vector<std::string> messages;
 };
 
+struct GeometryStage10ThicknessResult {
+    bool success = false;
+    Stage4GridDescriptor grid;
+
+    std::vector<uint8_t> reconstructed_mask;
+    std::vector<uint8_t> reliable_core_mask;
+    std::vector<uint8_t> metric_domain_mask;
+    std::vector<uint8_t> derivative_valid_mask;
+    std::vector<uint8_t> curvature_valid_mask;
+
+    std::vector<double> thickness_vertical;
+
+    std::vector<uint8_t> thickness_attempted_mask;
+    std::vector<uint8_t> thickness_valid_mask;
+    std::vector<uint8_t> thickness_invalid_outside_domain_mask;
+    std::vector<uint8_t> thickness_invalid_nonfinite_surface_mask;
+    std::vector<uint8_t> thickness_invalid_negative_or_zero_mask;
+    std::vector<uint8_t> thickness_invalid_below_min_threshold_mask;
+    std::vector<uint8_t> thickness_invalid_above_max_threshold_mask;
+    std::vector<uint8_t> thickness_qc_warn_mask;
+
+    std::size_t node_count = 0;
+    std::size_t thickness_attempted_node_count = 0;
+    std::size_t thickness_valid_node_count = 0;
+    std::size_t thickness_invalid_node_count = 0;
+    std::size_t thickness_invalid_outside_domain_count = 0;
+    std::size_t thickness_invalid_nonfinite_surface_count = 0;
+    std::size_t thickness_invalid_negative_or_zero_count = 0;
+    std::size_t thickness_invalid_below_min_threshold_count = 0;
+    std::size_t thickness_invalid_above_max_threshold_count = 0;
+    std::size_t thickness_qc_warn_count = 0;
+
+    double mean_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
+    double median_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
+    double stddev_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
+    double min_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
+    double max_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
+    double thickness_valid_fraction_of_metric_domain = std::numeric_limits<double>::quiet_NaN();
+    double thickness_valid_fraction_of_curvature_valid = std::numeric_limits<double>::quiet_NaN();
+
+    std::string thickness_method_label = "vertical_difference";
+    std::string local_thickness_definition = "z_outer_smooth_minus_z_inner_smooth";
+    std::string thickness_domain_definition = "stage7_metric_domain";
+
+    std::string thickness_vertical_csv_path;
+    std::string thickness_valid_mask_csv_path;
+    std::string thickness_invalid_reason_csv_path;
+    std::string thickness_summary_csv_path;
+
+    std::vector<std::string> messages;
+};
+
 struct GeometryAnalysisResult {
     bool success = false;
     GeometryPreparationResult preparation;
@@ -610,6 +667,7 @@ struct GeometryAnalysisResult {
     GeometryStage7SmoothedSurfaceResult stage7_smooth;
     GeometryStage8DerivativeEstimationResult stage8_derivatives;
     GeometryStage9CurvatureComputationResult stage9_curvature;
+    GeometryStage10ThicknessResult stage10_thickness;
     std::vector<std::string> messages;
 };
 
@@ -691,6 +749,14 @@ GeometryStage8DerivativeEstimationResult runGeometryAnalysisStage8DerivativeEsti
 GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureComputation(
     const GeometryStage7SmoothedSurfaceResult& stage7_result,
     const GeometryStage8DerivativeEstimationResult& stage8_result,
+    const FoldPatchAnalysisConfig& config,
+    Logger* logger,
+    double tolerance = 1e-12);
+
+GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
+    const GeometryStage7SmoothedSurfaceResult& stage7_result,
+    const GeometryStage8DerivativeEstimationResult& stage8_result,
+    const GeometryStage9CurvatureComputationResult& stage9_result,
     const FoldPatchAnalysisConfig& config,
     Logger* logger,
     double tolerance = 1e-12);
