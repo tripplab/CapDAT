@@ -524,9 +524,17 @@ struct GeometryStage9CurvatureComputationResult {
     std::vector<uint8_t> inner_K_confidence_class;
 
     std::vector<double> outer_mean_curvature_H;
+    std::vector<double> outer_oriented_mean_curvature_H;
     std::vector<double> outer_gaussian_curvature_K;
+    std::vector<double> outer_graph_normal_dot_radial;
+    std::vector<uint8_t> outer_outward_normal_alignment_flag;
+    std::vector<uint8_t> outer_orientation_flip_applied_flag;
     std::vector<double> inner_mean_curvature_H;
+    std::vector<double> inner_oriented_mean_curvature_H;
     std::vector<double> inner_gaussian_curvature_K;
+    std::vector<double> inner_graph_normal_dot_radial;
+    std::vector<uint8_t> inner_outward_normal_alignment_flag;
+    std::vector<uint8_t> inner_orientation_flip_applied_flag;
 
     std::size_t node_count = 0;
     std::size_t metric_domain_node_count = 0;
@@ -553,6 +561,11 @@ struct GeometryStage9CurvatureComputationResult {
     double outer_stddev_H = std::numeric_limits<double>::quiet_NaN();
     double outer_min_H = std::numeric_limits<double>::quiet_NaN();
     double outer_max_H = std::numeric_limits<double>::quiet_NaN();
+    double outer_mean_oriented_H = std::numeric_limits<double>::quiet_NaN();
+    double outer_median_oriented_H = std::numeric_limits<double>::quiet_NaN();
+    double outer_stddev_oriented_H = std::numeric_limits<double>::quiet_NaN();
+    double outer_min_oriented_H = std::numeric_limits<double>::quiet_NaN();
+    double outer_max_oriented_H = std::numeric_limits<double>::quiet_NaN();
     double outer_mean_K = std::numeric_limits<double>::quiet_NaN();
     double outer_median_K = std::numeric_limits<double>::quiet_NaN();
     double outer_stddev_K = std::numeric_limits<double>::quiet_NaN();
@@ -564,6 +577,11 @@ struct GeometryStage9CurvatureComputationResult {
     double inner_stddev_H = std::numeric_limits<double>::quiet_NaN();
     double inner_min_H = std::numeric_limits<double>::quiet_NaN();
     double inner_max_H = std::numeric_limits<double>::quiet_NaN();
+    double inner_mean_oriented_H = std::numeric_limits<double>::quiet_NaN();
+    double inner_median_oriented_H = std::numeric_limits<double>::quiet_NaN();
+    double inner_stddev_oriented_H = std::numeric_limits<double>::quiet_NaN();
+    double inner_min_oriented_H = std::numeric_limits<double>::quiet_NaN();
+    double inner_max_oriented_H = std::numeric_limits<double>::quiet_NaN();
     double inner_mean_K = std::numeric_limits<double>::quiet_NaN();
     double inner_median_K = std::numeric_limits<double>::quiet_NaN();
     double inner_stddev_K = std::numeric_limits<double>::quiet_NaN();
