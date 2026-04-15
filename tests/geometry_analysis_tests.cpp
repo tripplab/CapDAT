@@ -2233,6 +2233,16 @@ void testStage10SimpleValidThicknessField() {
     assertTrue(near(stage10.median_thickness_vertical, 3.0, 1e-12), "median thickness should be 3");
     assertTrue(near(stage10.min_thickness_vertical, 3.0, 1e-12), "min thickness should be 3");
     assertTrue(near(stage10.max_thickness_vertical, 3.0, 1e-12), "max thickness should be 3");
+    assertTrue(stage10.thickness_method_label == "stage10_vertical_difference_from_stage7_smooth_surfaces",
+               "Stage 10 method metadata should match v1 contract");
+    assertTrue(stage10.local_thickness_definition == "stage7_z_outer_smooth_minus_stage7_z_inner_smooth",
+               "Stage 10 local thickness definition should explicitly reference Stage 7 smooth surfaces");
+    assertTrue(stage10.thickness_input_surface_definition == "stage7_smoothed_outer_inner_graph_surfaces",
+               "Stage 10 input-surface definition should explicitly reference Stage 7 smooth graph surfaces");
+    assertTrue(stage10.thickness_contract_note.find("stage10_v1") != std::string::npos &&
+                   stage10.thickness_contract_note.find("stage7_smooth_vertical_separation") != std::string::npos &&
+                   stage10.thickness_contract_note.find("repackaged_as_a_dedicated_stage10_field") != std::string::npos,
+               "Stage 10 contract note should explicitly describe the Stage 10 v1 repackaged semantics");
 }
 
 void testStage10OutsideDomainInvalidation() {
@@ -2251,8 +2261,10 @@ void testStage10OutsideDomainInvalidation() {
     assertTrue(stage10.success, "Stage 10 should still succeed when only a subset is in domain");
     assertTrue(stage10.thickness_attempted_node_count == 2, "only metric-domain nodes should be attempted");
     assertTrue(stage10.thickness_valid_node_count == 2, "only in-domain nodes should validate");
-    assertTrue(stage10.thickness_invalid_outside_domain_count == stage10.node_count - 2,
+    assertTrue(stage10.thickness_excluded_outside_domain_count == stage10.node_count - 2,
                "outside-domain count should match excluded nodes");
+    assertTrue(stage10.thickness_attempted_invalid_node_count == 0,
+               "outside-domain exclusions must not increment attempted-invalid count");
     for (std::size_t idx = 0; idx < stage10.node_count; ++idx) {
         if (stage7.metric_domain_mask[idx] == 0) {
             assertTrue(stage10.thickness_attempted_mask[idx] == 0, "outside-domain nodes should not be attempted");
@@ -2278,6 +2290,10 @@ void testStage10NegativeOrZeroInvalidation() {
     assertTrue(stage10.thickness_invalid_negative_or_zero_mask[zero_idx] == 1, "zero thickness should be invalid");
     assertTrue(stage10.thickness_invalid_negative_or_zero_mask[negative_idx] == 1, "negative thickness should be invalid");
     assertTrue(stage10.thickness_invalid_negative_or_zero_count == 2, "negative/zero counter should match");
+    assertTrue(stage10.thickness_attempted_invalid_node_count == 2,
+               "attempted-invalid count should match negative-or-zero invalid nodes");
+    assertTrue(stage10.thickness_excluded_outside_domain_count == 0,
+               "in-domain failed nodes should not be counted as excluded");
     assertTrue(stage10.thickness_valid_mask[zero_idx] == 0 && stage10.thickness_valid_mask[negative_idx] == 0,
                "nonphysical nodes should not be valid");
     assertTrue(stage10.thickness_valid_node_count == stage10.node_count - 2, "valid count should exclude invalid nodes");
@@ -2330,10 +2346,64 @@ void testStage10CurvatureValidRestrictionMode() {
                "unrestricted mode should attempt full metric domain");
     assertTrue(stage10_restricted.thickness_attempted_node_count == 2,
                "restricted mode should attempt only curvature-valid subset");
+    assertTrue(stage10_unrestricted.thickness_valid_and_curvature_valid_node_count == 2,
+               "unrestricted mode should track valid-curvature intersection cardinality");
+    assertTrue(near(stage10_unrestricted.thickness_valid_intersection_fraction_of_metric_domain,
+                    2.0 / static_cast<double>(stage7.node_count),
+                    1e-12),
+               "intersection fraction should be normalized by metric-domain node count");
+    assertTrue(stage10_unrestricted.thickness_valid_intersection_fraction_of_metric_domain <= 1.0,
+               "intersection fraction should always remain in [0,1]");
     assertTrue(stage10_unrestricted.thickness_domain_definition == "stage7_metric_domain",
                "unrestricted label should match contract");
     assertTrue(stage10_restricted.thickness_domain_definition == "stage7_metric_domain_intersect_stage9_curvature_valid",
                "restricted label should match contract");
+}
+
+void testStage10SummaryCsvUsesCorrectedContractFields() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, 7.0);
+    auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    stage9.curvature_valid_mask.assign(stage9.node_count, 0);
+    stage9.curvature_valid_mask[nodeIndex(1, 1, stage7.grid.nx)] = 1;
+    stage9.curvature_valid_mask[nodeIndex(2, 1, stage7.grid.nx)] = 1;
+    stage9.curvature_valid_node_count = 2;
+
+    FoldPatchAnalysisConfig config;
+    config.output_prefix = "stage10_contract_fields_test";
+    config.stage10_export_csv = true;
+    removeIfExists(config.output_prefix + "_thickness_vertical_summary.csv");
+
+    const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
+    assertTrue(stage10.success, "Stage 10 should succeed while exporting summary CSV");
+    const auto rows = readCsvRows(stage10.thickness_summary_csv_path);
+    assertTrue(rows.size() >= 2, "Stage 10 summary CSV should include header and data rows");
+    const std::string header_line = [&]() {
+        std::ifstream in(stage10.thickness_summary_csv_path);
+        std::string line;
+        std::getline(in, line);
+        return line;
+    }();
+    assertTrue(header_line.find("thickness_excluded_outside_domain_count") != std::string::npos,
+               "summary CSV should include excluded outside-domain count");
+    assertTrue(header_line.find("thickness_attempted_invalid_node_count") != std::string::npos,
+               "summary CSV should include attempted-invalid count");
+    assertTrue(header_line.find("thickness_valid_and_curvature_valid_node_count") != std::string::npos,
+               "summary CSV should include valid-curvature intersection count");
+    assertTrue(header_line.find("thickness_valid_intersection_fraction_of_metric_domain") != std::string::npos,
+               "summary CSV should include corrected intersection fraction field");
+    assertTrue(header_line.find("thickness_invalid_node_count") == std::string::npos,
+               "summary CSV should remove legacy aggregate invalid field");
+    assertTrue(header_line.find("thickness_invalid_outside_domain_count") == std::string::npos,
+               "summary CSV should remove legacy outside-domain invalid field");
+    assertTrue(header_line.find("thickness_valid_fraction_of_curvature_valid") == std::string::npos,
+               "summary CSV should remove legacy invalidly-normalized fraction field");
+    removeIfExists(stage10.thickness_vertical_csv_path);
+    removeIfExists(stage10.thickness_valid_mask_csv_path);
+    removeIfExists(stage10.thickness_invalid_reason_csv_path);
+    removeIfExists(stage10.thickness_summary_csv_path);
 }
 
 void testStage10Stage8FailureDoesNotBlockVerticalThickness() {
@@ -2818,6 +2888,7 @@ int main() {
         testStage10NegativeOrZeroInvalidation();
         testStage10ThresholdInvalidation();
         testStage10CurvatureValidRestrictionMode();
+        testStage10SummaryCsvUsesCorrectedContractFields();
         testStage10Stage8FailureDoesNotBlockVerticalThickness();
         testStage1ToStage7Integration();
         testStage1ToStage9ThinPlateIntegration();
