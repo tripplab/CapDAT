@@ -100,10 +100,17 @@ void Logger::debug(const std::string& message) {
  * filtering.
  */
 void Logger::log(LogLevel level, const std::string& message) {
-    const std::string formatted =
-        "[" + currentTimestamp() + "] "
-        "[" + levelToString(level) + "] "
-        + message;
+    const bool include_timestamp =
+        level == LogLevel::INFO && (message == "Starting CapDAT" || message == "Run completed successfully");
+
+    std::string formatted;
+    if (include_timestamp) {
+        formatted = "[" + currentTimestamp() + "] "
+                    "[" + levelToString(level) + "] "
+                    + message;
+    } else {
+        formatted = "[" + levelToString(level) + "] " + message;
+    }
 
     if (static_cast<int>(level) <= static_cast<int>(verbosity_)) {
         if (level == LogLevel::ERROR || level == LogLevel::WARNING) {

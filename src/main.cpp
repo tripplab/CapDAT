@@ -1031,8 +1031,8 @@ int main(int argc, char* argv[]) {
 
             ExportCapsidWriter writer(&logger);
             const ExportCapsidStats write_stats = writer.write(capsid, writer_config, config);
-            logger.info("Final exported atoms written: " + std::to_string(write_stats.atoms_written));
-            logger.info("Final structure exported successfully: " + export_final_output_path);
+            logger.debug("Final exported atoms written: " + std::to_string(write_stats.atoms_written));
+            logger.debug("Final structure exported successfully: " + export_final_output_path);
         }
 
         timer.stop();
