@@ -5429,3 +5429,201 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
 
     return result;
 }
+
+std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
+                                       const FoldPatchAnalysisConfig& config,
+                                       const std::string& input_name) {
+    const auto fmtCount = [](std::size_t value) -> std::string { return std::to_string(value); };
+    const auto fmtFixed = [](double value, int precision = 3) -> std::string {
+        if (!std::isfinite(value)) {
+            return "n/a";
+        }
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(precision) << value;
+        return out.str();
+    };
+    const auto fmtFraction = [](std::size_t numerator, std::size_t denominator) -> std::string {
+        if (denominator == 0) {
+            return "n/a";
+        }
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(3) << (static_cast<double>(numerator) / static_cast<double>(denominator));
+        return out.str();
+    };
+    const auto appendKeyValue = [](std::ostringstream& out, const std::string& key, const std::string& value) {
+        out << std::left << std::setw(18) << (key + ":") << value << '\n';
+    };
+
+    const std::size_t patch_atoms = result.stage3_patch.analytical_patch.atom_count > 0
+                                        ? result.stage3_patch.analytical_patch.atom_count
+                                        : result.stage2_patch.selected_atoms_count;
+    const std::size_t inside_disk_count = result.stage4_raw.inside_disk_count;
+    const std::size_t metric_domain_count = result.stage7_smooth.metric_domain_node_count;
+    const std::size_t derivative_valid_count = result.stage8_derivatives.derivative_valid_node_count;
+    const std::size_t curvature_valid_count = result.stage9_curvature.curvature_valid_node_count;
+    const std::size_t thickness_valid_count = result.stage10_thickness.thickness_valid_node_count;
+
+    std::vector<std::string> notes;
+    notes.reserve(5);
+    const bool radial_method = config.stage10_thickness_method == FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
+    notes.push_back(radial_method
+                        ? "Thickness is reported using the radial method (origin-centered ray from outer to inner surface), which is generally more physically meaningful for capsid shell geometry over larger patches."
+                        : "Thickness is reported using the vertical graph-gap method (outer z minus inner z); this is most reliable for local patches near the aligned fold axis.");
+
+    const double thickness_frac = result.stage10_thickness.thickness_valid_fraction_of_metric_domain;
+    const double curvature_frac = result.stage9_curvature.curvature_valid_fraction_of_metric_domain;
+    const double max_k_warn_frac =
+        std::max(result.stage9_curvature.outer_K_qc_warn_fraction_of_curvature_valid,
+                 result.stage9_curvature.inner_K_qc_warn_fraction_of_curvature_valid);
+
+    if (radial_method && result.stage10_thickness.thickness_radial_invalid_outside_inner_domain_count > 0 &&
+        notes.size() < 3) {
+        notes.push_back(
+            "Some radial-thickness nodes were excluded because the inner surface could not be sampled along the full radial ray near the patch edge.");
+    }
+    if (notes.size() < 3) {
+        if (std::isfinite(thickness_frac) && thickness_frac >= 0.98) {
+            notes.push_back("Thickness coverage is effectively complete over the metric domain.");
+        } else if (std::isfinite(thickness_frac) && thickness_frac >= 0.90) {
+            notes.push_back("Thickness coverage is high, but a small fraction of the metric domain was excluded.");
+        } else if (std::isfinite(thickness_frac)) {
+            notes.push_back(
+                "Thickness coverage is reduced; interpret full-domain thickness summaries cautiously and prefer the trusted core.");
+        }
+    }
+    if (notes.size() < 3) {
+        if (std::isfinite(curvature_frac) && curvature_frac >= 0.95) {
+            notes.push_back("Curvature coverage is high over the metric domain.");
+        } else if (std::isfinite(curvature_frac) && curvature_frac >= 0.85) {
+            notes.push_back("Curvature coverage is good but not complete; edge-region fits are beginning to drop out.");
+        } else if (std::isfinite(curvature_frac)) {
+            notes.push_back(
+                "Curvature coverage is limited; curvature summaries increasingly reflect the trusted interior rather than the full patch.");
+        }
+    }
+    if (notes.size() < 3 && std::isfinite(max_k_warn_frac)) {
+        if (max_k_warn_frac < 0.05) {
+            notes.push_back("Gaussian curvature is in a low-warning regime; K summaries are comparatively stable.");
+        } else if (max_k_warn_frac < 0.15) {
+            notes.push_back("Gaussian curvature shows a moderate warning burden; interpret K tails and local extremes with care.");
+        } else {
+            notes.push_back(
+                "Gaussian curvature is in a high-warning regime; large-|K| values are likely the least robust curvature quantities in this run.");
+        }
+    }
+    if (notes.size() < 3) {
+        if (config.cylinder_radius > 60.0) {
+            notes.push_back(
+                "This is a large patch relative to the fold axis; whole-domain averages combine multiple local geometric regimes rather than a single local cap.");
+        } else if (config.cylinder_radius > 30.0) {
+            notes.push_back(
+                "This patch is no longer purely local; curvature and thickness summarize a broader fold-centered region.");
+        }
+    }
+    if (notes.size() < 5) {
+        notes.push_back(
+            "Mean curvature H is reported with the surface-orientation sign convention used internally; its magnitude is usually more robust than its sign when summarizing broad capsid patches.");
+    }
+    if (notes.size() < 5) {
+        notes.push_back(
+            "Gaussian curvature K distinguishes local shape class: positive K is dome-like, negative K is saddle-like, and values near zero are weakly curved or cylindrical-like.");
+    }
+    while (notes.size() < 2) {
+        static const char* kFallbacks[] = {
+            "Detailed per-node values and masks are available in the exported CSV files.",
+            "Summary statistics are reported over the valid analysis domain, not over excluded nodes.",
+        };
+        notes.push_back(kFallbacks[notes.size()]);
+    }
+
+    std::ostringstream out;
+    out << "==================== Geometry Summary ====================\n";
+    appendKeyValue(out, "Input", input_name);
+    appendKeyValue(out,
+                   "Fold",
+                   result.preparation.resolved_fold_name + " (type=" + std::to_string(config.fold_type) +
+                       ", index=" + std::to_string(config.fold_index) + ")");
+    appendKeyValue(out, "Working frame", result.preparation.final_frame_description);
+    appendKeyValue(out, "Cylinder radius", fmtFixed(config.cylinder_radius) + " \u00C5");
+    appendKeyValue(out, "Grid spacing", fmtFixed(config.grid_spacing) + " \u00C5");
+    appendKeyValue(out, "Patch atoms", fmtCount(patch_atoms));
+    appendKeyValue(out, "Grid", fmtCount(result.stage4_raw.grid.nx) + " x " + fmtCount(result.stage4_raw.grid.ny));
+    appendKeyValue(out, "Metric domain", fmtCount(metric_domain_count) + " nodes");
+    appendKeyValue(out, "Curvature-valid", fmtCount(curvature_valid_count) + " nodes");
+    appendKeyValue(out, "Output prefix", config.output_prefix);
+    out << '\n';
+
+    out << "Coverage / trust\n";
+    out << "---------------------------------------------------------\n";
+    out << std::left << std::setw(38) << "Inside-disk nodes" << fmtCount(inside_disk_count) << '\n';
+    out << std::left << std::setw(38) << "Metric-domain fraction" << fmtFraction(metric_domain_count, inside_disk_count) << '\n';
+    out << std::left << std::setw(38) << "Derivative-valid / metric-domain"
+        << fmtFraction(derivative_valid_count, metric_domain_count) << '\n';
+    out << std::left << std::setw(38) << "Curvature-valid / metric-domain"
+        << (std::isfinite(curvature_frac) ? fmtFixed(curvature_frac) : fmtFraction(curvature_valid_count, metric_domain_count))
+        << '\n';
+    out << std::left << std::setw(38) << "Thickness-valid / metric-domain"
+        << fmtFraction(thickness_valid_count, metric_domain_count) << '\n';
+    out << std::left << std::setw(38) << "Outer K warn / curvature-valid"
+        << fmtFraction(result.stage9_curvature.outer_K_qc_warn_count, curvature_valid_count) << '\n';
+    out << std::left << std::setw(38) << "Inner K warn / curvature-valid"
+        << fmtFraction(result.stage9_curvature.inner_K_qc_warn_count, curvature_valid_count) << '\n';
+    if (radial_method) {
+        out << std::left << std::setw(38) << "Radial outside-inner-domain frac"
+            << fmtFraction(result.stage10_thickness.thickness_radial_invalid_outside_inner_domain_count, metric_domain_count)
+            << '\n';
+    }
+    out << '\n';
+
+    out << "Thickness\n";
+    out << "---------------------------------------------------------\n";
+    out << std::left << std::setw(11) << "Method" << std::setw(9) << "Valid" << std::setw(10) << "Mean" << std::setw(10)
+        << "Median" << std::setw(10) << "StdDev" << std::setw(10) << "Min" << "Max\n";
+    out << std::left << std::setw(11) << (radial_method ? "radial" : "vertical") << std::setw(9)
+        << fmtCount(thickness_valid_count) << std::setw(10) << fmtFixed(result.stage10_thickness.mean_thickness_active)
+        << std::setw(10) << fmtFixed(result.stage10_thickness.median_thickness_active) << std::setw(10)
+        << fmtFixed(result.stage10_thickness.stddev_thickness_active) << std::setw(10)
+        << fmtFixed(result.stage10_thickness.min_thickness_active) << fmtFixed(result.stage10_thickness.max_thickness_active)
+        << '\n';
+    out << '\n';
+
+    out << "Curvature - outer surface\n";
+    out << "---------------------------------------------------------\n";
+    out << std::left << std::setw(8) << "Metric" << std::setw(10) << "Mean" << std::setw(10) << "Median" << std::setw(10)
+        << "StdDev" << std::setw(10) << "Min" << "Max\n";
+    out << std::left << std::setw(8) << "H" << std::setw(10) << fmtFixed(result.stage9_curvature.outer_mean_oriented_H)
+        << std::setw(10) << fmtFixed(result.stage9_curvature.outer_median_oriented_H) << std::setw(10)
+        << fmtFixed(result.stage9_curvature.outer_stddev_oriented_H) << std::setw(10)
+        << fmtFixed(result.stage9_curvature.outer_min_oriented_H) << fmtFixed(result.stage9_curvature.outer_max_oriented_H)
+        << '\n';
+    out << std::left << std::setw(8) << "K" << std::setw(10) << fmtFixed(result.stage9_curvature.outer_mean_K)
+        << std::setw(10) << fmtFixed(result.stage9_curvature.outer_median_K) << std::setw(10)
+        << fmtFixed(result.stage9_curvature.outer_stddev_K) << std::setw(10) << fmtFixed(result.stage9_curvature.outer_min_K)
+        << fmtFixed(result.stage9_curvature.outer_max_K) << '\n';
+    out << "K QC warn fraction: " << fmtFraction(result.stage9_curvature.outer_K_qc_warn_count, curvature_valid_count)
+        << "\n\n";
+
+    out << "Curvature - inner surface\n";
+    out << "---------------------------------------------------------\n";
+    out << std::left << std::setw(8) << "Metric" << std::setw(10) << "Mean" << std::setw(10) << "Median" << std::setw(10)
+        << "StdDev" << std::setw(10) << "Min" << "Max\n";
+    out << std::left << std::setw(8) << "H" << std::setw(10) << fmtFixed(result.stage9_curvature.inner_mean_oriented_H)
+        << std::setw(10) << fmtFixed(result.stage9_curvature.inner_median_oriented_H) << std::setw(10)
+        << fmtFixed(result.stage9_curvature.inner_stddev_oriented_H) << std::setw(10)
+        << fmtFixed(result.stage9_curvature.inner_min_oriented_H) << fmtFixed(result.stage9_curvature.inner_max_oriented_H)
+        << '\n';
+    out << std::left << std::setw(8) << "K" << std::setw(10) << fmtFixed(result.stage9_curvature.inner_mean_K)
+        << std::setw(10) << fmtFixed(result.stage9_curvature.inner_median_K) << std::setw(10)
+        << fmtFixed(result.stage9_curvature.inner_stddev_K) << std::setw(10) << fmtFixed(result.stage9_curvature.inner_min_K)
+        << fmtFixed(result.stage9_curvature.inner_max_K) << '\n';
+    out << "K QC warn fraction: " << fmtFraction(result.stage9_curvature.inner_K_qc_warn_count, curvature_valid_count)
+        << "\n\n";
+
+    out << "Notes\n";
+    out << "---------------------------------------------------------\n";
+    for (const std::string& note : notes) {
+        out << "- " << note << '\n';
+    }
+    out << "==========================================================\n";
+    return out.str();
+}

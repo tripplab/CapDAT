@@ -803,4 +803,8 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                                                     Logger* logger,
                                                     double tolerance = 1e-9);
 
+std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
+                                       const FoldPatchAnalysisConfig& config,
+                                       const std::string& input_name);
+
 #endif // CAPDAT_GEOMETRY_ANALYSIS_HPP

@@ -379,6 +379,7 @@ void testStage4PipelineUsesEnvelopeContactsAndProvenance() {
     config.cylinder_radius = 3.0;
     config.grid_spacing = 0.5;
     config.min_atoms_in_patch = 2;
+    config.stage10_enabled = false;
     config.output_prefix = "stage4_envelope_regression";
 
     const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
@@ -797,6 +798,7 @@ void testStage4DeterministicOutputs() {
     config.grid_spacing = 1.0;
     config.min_atoms_in_patch = 2;
     config.debug = true;
+    config.stage10_enabled = false;
     config.output_prefix = "stage4_deterministic";
 
     const auto first = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
@@ -873,6 +875,7 @@ void testStage1ToStage4Integration() {
     config.grid_spacing = 1.0;
     config.min_atoms_in_patch = 2;
     config.debug = true;
+    config.stage10_enabled = false;
     config.output_prefix = "stage4_integration";
 
     const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);

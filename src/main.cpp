@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <string>
 
 /**
@@ -94,7 +95,7 @@ void printHelp(const std::string& program_name) {
 
   [Geometry thickness]
       --geometry_thickness_enabled <true|false>  Stage 10 vertical thickness enable switch (default: true)
-      --geometry_thickness_method <vertical|radial> Stage 10 thickness method selector (default: vertical)
+      --geometry_thickness_method <vertical|radial> Stage 10 thickness method selector (default: radial)
       --geometry_thickness_export_csv <true|false> Stage 10 CSV artifact export enable switch (default: true)
       --geometry_thickness_use_curvature_valid_domain_only <true|false>  Restrict Stage 10 domain to Stage 9 curvature-valid
       --geometry_thickness_min_thickness <A>   Stage 10 lower acceptance threshold (default: disabled)
@@ -196,7 +197,7 @@ int main(int argc, char* argv[]) {
     double geometry_qc_n_spike = 4.0;
     bool geometry_thickness_enabled = true;
     FoldPatchAnalysisConfig::Stage10ThicknessMethod geometry_thickness_method =
-        FoldPatchAnalysisConfig::Stage10ThicknessMethod::vertical;
+        FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
     bool geometry_thickness_export_csv = true;
     bool geometry_thickness_use_curvature_valid_domain_only = false;
     double geometry_thickness_min_thickness = 0.0;
@@ -1016,6 +1017,8 @@ int main(int argc, char* argv[]) {
         if (!geometry_result.success) {
             throw std::runtime_error("Geometry analysis failed in Stage 1/2/3/4/5 pipeline");
         }
+        const std::string input_name = std::filesystem::path(input_path).filename().string();
+        std::cout << buildGeometrySummaryReport(geometry_result, geometry_config, input_name);
 
         if (!export_final_output_path.empty()) {
             ExportCapsidConfig writer_config;
