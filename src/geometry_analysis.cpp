@@ -28,7 +28,10 @@ std::string geometryArtifactPath(const FoldPatchAnalysisConfig& config, const st
     const std::filesystem::path root_dir(config.output_root_dir);
     std::error_code ec;
     std::filesystem::create_directories(root_dir, ec);
-    return (root_dir / filename).string();
+    const bool joins_without_separator = !filename.empty() && (filename.front() == '_' || filename.front() == '-');
+    const std::string prefixed_filename = joins_without_separator ? (config.output_prefix + filename)
+                                                                  : (config.output_prefix + "_" + filename);
+    return (root_dir / prefixed_filename).string();
 }
 
 void logMessages(const std::vector<std::string>& messages, Logger* logger) {

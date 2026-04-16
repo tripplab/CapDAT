@@ -48,6 +48,31 @@ std::filesystem::path resolveInputPathFromPdbId(const std::string& normalized_pd
     return std::filesystem::path("data") / (normalized_pdb_id + "_full.vdb");
 }
 
+std::string formatOutputPrefixFromRadius(const double radius) {
+    std::string formatted = std::to_string(radius);
+    while (!formatted.empty() && formatted.back() == '0') {
+        formatted.pop_back();
+    }
+    if (!formatted.empty() && formatted.back() == '.') {
+        formatted.pop_back();
+    }
+    if (formatted.empty()) {
+        formatted = "0";
+    }
+    return "R" + formatted;
+}
+
+std::string prefixedBasename(const std::string& output_prefix, const std::filesystem::path& path_like) {
+    const std::string basename = path_like.filename().string();
+    if (basename.empty()) {
+        return output_prefix;
+    }
+    if (!basename.empty() && (basename.front() == '_' || basename.front() == '-')) {
+        return output_prefix + basename;
+    }
+    return output_prefix + "_" + basename;
+}
+
 struct GeometryCanonicalPaths {
     std::filesystem::path results_root_dir;
     std::filesystem::path results_pdb_dir;
@@ -124,6 +149,7 @@ void printHelp(const std::string& program_name) {
   -l, --log <file>                           Write log output to file
   -v, --verbose                              Increase terminal verbosity
       --quiet                                Reduce terminal output
+      --out_prefix <name>                    Prefix applied to generated output filenames
       --include-hetatm                       Include HETATM records
       --export-final <f>                     Export current accepted Capsid coordinates to file
 
@@ -232,6 +258,8 @@ int main(int argc, char* argv[]) {
     std::string resolved_input_path;
     std::string log_path;
     std::string export_final_output_path;
+    std::string output_prefix;
+    bool output_prefix_given = false;
     bool verbose = false;
     bool quiet = false;
     bool include_hetatm = false;
@@ -356,6 +384,15 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "--include-hetatm") {
             include_hetatm = true;
+            continue;
+        }
+        if (arg == "--out_prefix") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --out_prefix\n";
+                return 1;
+            }
+            output_prefix = argv[++i];
+            output_prefix_given = true;
             continue;
         }
         if (arg == "--export-final") {
@@ -1052,6 +1089,13 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: --geometry_thickness_max_thickness must be >= --geometry_thickness_min_thickness when both are > 0\n";
         return 1;
     }
+    if (output_prefix_given && output_prefix.empty()) {
+        std::cerr << "Error: --out_prefix cannot be empty\n";
+        return 1;
+    }
+    if (!output_prefix_given) {
+        output_prefix = geometry_analysis_requested ? formatOutputPrefixFromRadius(geometry_cylinder_radius) : "output";
+    }
 
     geometry_symmetry::FoldDefinition resolved_geometry_fold;
     try {
@@ -1151,6 +1195,7 @@ int main(int argc, char* argv[]) {
         geometry_config.stage5_reliable_radius = geometry_reliable_radius;
         geometry_config.export_rotated_capsid = debug;
         geometry_config.output_root_dir = geometry_results_fold_dir.string();
+        geometry_config.output_prefix = output_prefix;
         geometry_config.stage6_mesh_export_format = mesh_export_format;
         geometry_config.stage6_split_in_out_meshes = split_in_out_mesh;
         geometry_config.stage6_min_separation = surface_min_separation;
@@ -1200,10 +1245,12 @@ int main(int argc, char* argv[]) {
 
         if (!export_final_output_path.empty()) {
             ExportCapsidConfig writer_config;
-            writer_config.output_path = export_final_output_path;
+            const std::filesystem::path requested_export_path(export_final_output_path);
+            const std::filesystem::path prefixed_export_name =
+                prefixedBasename(output_prefix, requested_export_path);
+            writer_config.output_path = (requested_export_path.parent_path() / prefixed_export_name).string();
             if (geometry_analysis_requested) {
-                writer_config.output_path =
-                    (geometry_results_fold_dir / std::filesystem::path(export_final_output_path).filename()).string();
+                writer_config.output_path = (geometry_results_fold_dir / prefixed_export_name).string();
                 logger.info("Geometry mode: --export-final redirected to canonical results root: " + writer_config.output_path);
             }
             writer_config.emit_header_comments = true;
