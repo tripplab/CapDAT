@@ -2214,7 +2214,7 @@ GeometryStage9CurvatureComputationResult makeSyntheticStage9ResultForStage10(
 }
 
 void testStage10SimpleValidThicknessField() {
-    auto stage8 = makeSyntheticStage8ResultForStage9();
+    auto stage8 = makeSyntheticStage8ResultForStage9(5, 5);
     auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
     stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
     stage7.z_inner_smooth.assign(stage7.node_count, 7.0);
@@ -2246,7 +2246,7 @@ void testStage10SimpleValidThicknessField() {
 }
 
 void testStage10OutsideDomainInvalidation() {
-    auto stage8 = makeSyntheticStage8ResultForStage9();
+    auto stage8 = makeSyntheticStage8ResultForStage9(5, 5);
     auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
     stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
     stage7.z_inner_smooth.assign(stage7.node_count, 7.0);
@@ -2425,6 +2425,97 @@ void testStage10Stage8FailureDoesNotBlockVerticalThickness() {
             return msg.find("Stage 8 derivative estimation unavailable") != std::string::npos;
         });
     assertTrue(has_stage8_notice, "Stage 10 should report Stage 8 unavailability in messages");
+}
+
+void testStage10RadialFlatParallelPlanesDiffersFromVerticalOffAxis() {
+    auto stage8 = makeSyntheticStage8ResultForStage9(5, 5);
+    auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, 7.0);
+    const auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    FoldPatchAnalysisConfig config;
+    config.stage10_export_csv = false;
+    config.stage10_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
+
+    const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
+    assertTrue(stage10.success, "Stage 10 radial should succeed for flat parallel surfaces");
+    const std::size_t off_axis = nodeIndex(3, 2, stage7.grid.nx);
+    assertTrue(stage10.thickness_radial[off_axis] > stage10.thickness_vertical[off_axis],
+               "off-axis radial thickness should differ from vertical for flat planes");
+    assertTrue(stage10.thickness_method_label == "stage10_radial_origin_centered_ray_intersection",
+               "radial method label should be explicit");
+}
+
+void testStage10RadialConcentricSphericalCapsApproxConstantGap() {
+    auto stage8 = makeSyntheticStage8ResultForStage9(5, 5);
+    auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    const double r_outer = 10.0;
+    const double r_inner = 8.0;
+    for (std::size_t j = 0; j < stage7.grid.ny; ++j) {
+        for (std::size_t i = 0; i < stage7.grid.nx; ++i) {
+            const std::size_t idx = nodeIndex(i, j, stage7.grid.nx);
+            const double x = stage7.grid.x_values[i];
+            const double y = stage7.grid.y_values[j];
+            const double r2 = x * x + y * y;
+            stage7.z_outer_smooth[idx] = std::sqrt(std::max(0.0, r_outer * r_outer - r2));
+            stage7.z_inner_smooth[idx] = std::sqrt(std::max(0.0, r_inner * r_inner - r2));
+        }
+    }
+    const auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    FoldPatchAnalysisConfig config;
+    config.stage10_export_csv = false;
+    config.stage10_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
+
+    const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
+    assertTrue(stage10.success, "Stage 10 radial should succeed for spherical-cap synthetic case");
+    assertTrue(std::fabs(stage10.mean_thickness_radial - (r_outer - r_inner)) < 0.1,
+               "radial mean thickness should be close to spherical shell gap");
+}
+
+void testStage10RadialNoBracketFailureIsTracked() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, -1.0);
+    const auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    FoldPatchAnalysisConfig config;
+    config.stage10_export_csv = false;
+    config.stage10_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
+
+    const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
+    assertTrue(!stage10.success, "radial no-bracket everywhere should fail overall");
+    assertTrue(stage10.thickness_radial_invalid_no_bracket_count > 0, "no-bracket count should be tracked");
+}
+
+void testStage10RadialPOutInCsvExport() {
+    auto stage8 = makeSyntheticStage8ResultForStage9(5, 5);
+    auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, 7.0);
+    const auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    FoldPatchAnalysisConfig config;
+    config.stage10_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
+    config.stage10_export_csv = true;
+    config.output_prefix = "stage10_radial_points_csv";
+    removeIfExists(config.output_prefix + "_radial_P_out_in.csv");
+
+    const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
+    assertTrue(stage10.success, "radial Stage 10 should succeed for P_out/P_in export test");
+    assertTrue(!stage10.thickness_radial_p_out_in_csv_path.empty(), "radial P_out/P_in CSV path should be populated");
+    assertTrue(std::filesystem::exists(stage10.thickness_radial_p_out_in_csv_path),
+               "radial P_out/P_in CSV should be created");
+    std::ifstream in(stage10.thickness_radial_p_out_in_csv_path);
+    std::string header;
+    std::getline(in, header);
+    assertTrue(header.find("P_out x") != std::string::npos && header.find("P_in z") != std::string::npos &&
+                   header.find("t_radial") != std::string::npos,
+               "radial P_out/P_in CSV header should include required columns");
+
+    removeIfExists(stage10.thickness_vertical_csv_path);
+    removeIfExists(stage10.thickness_valid_mask_csv_path);
+    removeIfExists(stage10.thickness_invalid_reason_csv_path);
+    removeIfExists(stage10.thickness_summary_csv_path);
+    removeIfExists(stage10.thickness_radial_p_out_in_csv_path);
 }
 
 void testStage9PlaneCurvature() {
@@ -2890,6 +2981,10 @@ int main() {
         testStage10CurvatureValidRestrictionMode();
         testStage10SummaryCsvUsesCorrectedContractFields();
         testStage10Stage8FailureDoesNotBlockVerticalThickness();
+        testStage10RadialFlatParallelPlanesDiffersFromVerticalOffAxis();
+        testStage10RadialConcentricSphericalCapsApproxConstantGap();
+        testStage10RadialNoBracketFailureIsTracked();
+        testStage10RadialPOutInCsvExport();
         testStage1ToStage7Integration();
         testStage1ToStage9ThinPlateIntegration();
         std::cout << "All geometry analysis Stage 1/2/3/4/5/6/7/8/9/10 tests passed.\n";

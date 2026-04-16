@@ -39,7 +39,7 @@ struct PatchAtom {
 struct FoldPatchAnalysisConfig {
     enum class Stage7Method : uint8_t { smooth = 0, thin_plate_grid_fit = 1 };
     enum class Stage7BoundaryConditionMode : uint8_t { free = 0, fixed_to_stage6 = 1, soft_to_stage6 = 2 };
-    enum class Stage10ThicknessMethod : uint8_t { vertical = 0 };
+    enum class Stage10ThicknessMethod : uint8_t { vertical = 0, radial = 1 };
     enum class MeshExportFormat : uint8_t { obj = 0, stl = 1 };
 
     bool enabled = false;
@@ -617,6 +617,10 @@ struct GeometryStage10ThicknessResult {
     std::vector<uint8_t> curvature_valid_mask;
 
     std::vector<double> thickness_vertical;
+    std::vector<double> thickness_outer_z_stage7;
+    std::vector<double> thickness_radial;
+    std::vector<double> thickness_radial_s_outer;
+    std::vector<double> thickness_radial_s_inner;
 
     std::vector<uint8_t> thickness_attempted_mask;
     std::vector<uint8_t> thickness_valid_mask;
@@ -626,6 +630,10 @@ struct GeometryStage10ThicknessResult {
     std::vector<uint8_t> thickness_invalid_below_min_threshold_mask;
     std::vector<uint8_t> thickness_invalid_above_max_threshold_mask;
     std::vector<uint8_t> thickness_qc_warn_mask;
+    std::vector<uint8_t> thickness_radial_valid_mask;
+    std::vector<uint8_t> thickness_radial_invalid_no_bracket_mask;
+    std::vector<uint8_t> thickness_radial_invalid_root_failure_mask;
+    std::vector<uint8_t> thickness_radial_invalid_outside_inner_domain_mask;
 
     std::size_t node_count = 0;
     std::size_t thickness_attempted_node_count = 0;
@@ -638,12 +646,22 @@ struct GeometryStage10ThicknessResult {
     std::size_t thickness_invalid_above_max_threshold_count = 0;
     std::size_t thickness_qc_warn_count = 0;
     std::size_t thickness_valid_and_curvature_valid_node_count = 0;
+    std::size_t thickness_radial_attempted_node_count = 0;
+    std::size_t thickness_radial_valid_node_count = 0;
+    std::size_t thickness_radial_invalid_no_bracket_count = 0;
+    std::size_t thickness_radial_invalid_root_failure_count = 0;
+    std::size_t thickness_radial_invalid_outside_inner_domain_count = 0;
 
     double mean_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
     double median_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
     double stddev_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
     double min_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
     double max_thickness_vertical = std::numeric_limits<double>::quiet_NaN();
+    double mean_thickness_radial = std::numeric_limits<double>::quiet_NaN();
+    double median_thickness_radial = std::numeric_limits<double>::quiet_NaN();
+    double stddev_thickness_radial = std::numeric_limits<double>::quiet_NaN();
+    double min_thickness_radial = std::numeric_limits<double>::quiet_NaN();
+    double max_thickness_radial = std::numeric_limits<double>::quiet_NaN();
     double thickness_valid_fraction_of_metric_domain = std::numeric_limits<double>::quiet_NaN();
     double thickness_valid_intersection_fraction_of_metric_domain = std::numeric_limits<double>::quiet_NaN();
 
@@ -658,6 +676,7 @@ struct GeometryStage10ThicknessResult {
     std::string thickness_valid_mask_csv_path;
     std::string thickness_invalid_reason_csv_path;
     std::string thickness_summary_csv_path;
+    std::string thickness_radial_p_out_in_csv_path;
 
     std::vector<std::string> messages;
 };
