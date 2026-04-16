@@ -2377,7 +2377,7 @@ void testStage10SummaryCsvUsesCorrectedContractFields() {
     FoldPatchAnalysisConfig config;
     config.output_root_dir = "stage10_contract_fields_test";
     config.stage10_export_csv = true;
-    removeIfExists(config.output_root_dir + "_thickness_vertical_summary.csv");
+    removeIfExists(config.output_root_dir + "/output_thickness_vertical_summary.csv");
 
     const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
     assertTrue(stage10.success, "Stage 10 should succeed while exporting summary CSV");
@@ -2511,7 +2511,7 @@ void testStage10RadialPOutInCsvExport() {
     config.stage10_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
     config.stage10_export_csv = true;
     config.output_root_dir = "stage10_radial_points_csv";
-    removeIfExists(config.output_root_dir + "_thickness_radial_P_out_P_in_t.csv");
+    removeIfExists(config.output_root_dir + "/output_thickness_radial_P_out_P_in_t.csv");
 
     const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
     assertTrue(stage10.success, "radial Stage 10 should succeed for P_out/P_in export test");
@@ -2619,7 +2619,7 @@ void testStage10RadialSummaryCsvSchemaUsesActiveAndLimitationFields() {
     config.stage10_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
     config.stage10_export_csv = true;
     config.output_root_dir = "stage10_radial_summary_semantics_test";
-    removeIfExists(config.output_root_dir + "_thickness_radial_summary.csv");
+    removeIfExists(config.output_root_dir + "/output_thickness_radial_summary.csv");
 
     const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
     assertTrue(stage10.success, "radial Stage 10 should succeed while exporting summary CSV");

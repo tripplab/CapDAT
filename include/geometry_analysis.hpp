@@ -104,6 +104,7 @@ struct FoldPatchAnalysisConfig {
     bool stage6_split_in_out_meshes = false;
     bool export_rotated_capsid = false;
     std::string output_root_dir = "results/unknown/2_0";
+    std::string output_prefix = "output";
 };
 
 struct GeometryPreparationResult {
