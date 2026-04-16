@@ -232,7 +232,8 @@ A **successful CTest run** should look similar to:
 
 A **successful sample parser run** should look similar to:
 
-`[YYYY-MM-DD HH:MM:SS] [INFO] Starting CapDAT`
+`[YYYY-MM-DD HH:MM:SS]`
+`[INFO] Starting CapDAT`
 `[YYYY-MM-DD HH:MM:SS] [INFO] Opening input file: data/1cwp_full.vdb`
 `[YYYY-MM-DD HH:MM:SS] [INFO] Parsing completed successfully`
 `[YYYY-MM-DD HH:MM:SS] [INFO] Starting extended structural summary geometry`
@@ -253,7 +254,8 @@ A **successful sample parser run** should look similar to:
 `  z: [...]`
 `Axis spans: x=... y=... z=...`
 `Runtime (s):             ...`
-`[YYYY-MM-DD HH:MM:SS] [INFO] Run completed successfully`
+`[INFO] Run completed successfully`
+`[YYYY-MM-DD HH:MM:SS]`
 
 ## Notes for This Branch
 
@@ -273,4 +275,3 @@ The authoritative references for future README updates on this branch should be:
 For more details look into the `docs` directory:
 
 <https://github.com/tripplab/CapDAT/blob/geometry/docs/technical_spec_and_dev_guide.md>
-
