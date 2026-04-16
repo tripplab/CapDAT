@@ -236,23 +236,25 @@ A **successful sample parser run** should look similar to:
 `[INFO] Starting CapDAT [YYYY-MM-DD HH:MM:SS]`
 `[YYYY-MM-DD HH:MM:SS] [INFO] Opening input file: data/1cwp_full.vdb`
 `[YYYY-MM-DD HH:MM:SS] [INFO] Parsing completed successfully`
-`[YYYY-MM-DD HH:MM:SS] [INFO] Starting extended structural summary geometry`
-`Input file:              data/1cwp_full.vdb`
-`Total lines read:        ...`
-`Coordinate records seen: ...`
-`Accepted atoms:          ...`
-`Accepted residues:       ...`
-`Internal subunits:       ...`
-`Accepted HETATM:         ...`
-`Alternate locations:     ...`
-`Malformed records:       ...`
-`Skipped records:         ...`
-`Geometric center (accepted atoms): (...)`
-`Coordinate bounds:`
-`  x: [...]`
-`  y: [...]`
-`  z: [...]`
-`Axis spans: x=... y=... z=...`
+`[YYYY-MM-DD HH:MM:SS] [INFO] Starting Structural Summary`
+`[Structural Summary — Input & Parsing]`
+`  Input file                 : data/1cwp_full.vdb`
+`  Total lines read           : ...`
+`  Coordinate records seen    : ...`
+`  Accepted atoms             : ...`
+`  Accepted residues          : ...`
+`  Internal subunits          : ...`
+`  Accepted HETATM            : ...`
+`  Alternate locations        : ...`
+`  Malformed records          : ...`
+`  Skipped records            : ...`
+`[Structural Summary — Geometry]`
+`  Geometric center (accepted atoms) : (...)`
+`  Coordinate bounds`
+`    x range : [...]`
+`    y range : [...]`
+`    z range : [...]`
+`  Axis spans                     : x=... y=... z=...`
 `Runtime (s):             ...`
 `[INFO] Run completed successfully [YYYY-MM-DD HH:MM:SS]`
 `[YYYY-MM-DD HH:MM:SS]`
