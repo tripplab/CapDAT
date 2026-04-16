@@ -2444,6 +2444,11 @@ void testStage10RadialFlatParallelPlanesDiffersFromVerticalOffAxis() {
                "off-axis radial thickness should differ from vertical for flat planes");
     assertTrue(stage10.thickness_method_label == "stage10_radial_origin_centered_ray_intersection",
                "radial method label should be explicit");
+    assertTrue(near(stage10.mean_thickness_active, stage10.mean_thickness_radial, 1e-12),
+               "active mean should map to radial mean in radial mode");
+    assertTrue(near(stage10.median_thickness_active, stage10.median_thickness_radial, 1e-12),
+               "active median should map to radial median in radial mode");
+    assertTrue(std::isfinite(stage10.mean_thickness_active), "active mean should be finite when radial has valid nodes");
 }
 
 void testStage10RadialConcentricSphericalCapsApproxConstantGap() {
@@ -2485,6 +2490,12 @@ void testStage10RadialNoBracketFailureIsTracked() {
     const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
     assertTrue(!stage10.success, "radial no-bracket everywhere should fail overall");
     assertTrue(stage10.thickness_radial_invalid_no_bracket_count > 0, "no-bracket count should be tracked");
+    const bool has_sampling_loss_dominance_note =
+        std::any_of(stage10.messages.begin(), stage10.messages.end(), [](const std::string& msg) {
+            return msg.find("dominated by inner-surface sampling-domain loss") != std::string::npos;
+        });
+    assertTrue(!has_sampling_loss_dominance_note,
+               "sampling-domain-loss dominance note should not appear when no-bracket failures exist");
 }
 
 void testStage10RadialPOutInCsvExport() {
@@ -2497,7 +2508,7 @@ void testStage10RadialPOutInCsvExport() {
     config.stage10_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
     config.stage10_export_csv = true;
     config.output_prefix = "stage10_radial_points_csv";
-    removeIfExists(config.output_prefix + "_radial_P_out_in.csv");
+    removeIfExists(config.output_prefix + "_thickness_radial_P_out_P_in_t.csv");
 
     const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
     assertTrue(stage10.success, "radial Stage 10 should succeed for P_out/P_in export test");
@@ -2510,6 +2521,121 @@ void testStage10RadialPOutInCsvExport() {
     assertTrue(header.find("P_out x") != std::string::npos && header.find("P_in z") != std::string::npos &&
                    header.find("t_radial") != std::string::npos,
                "radial P_out/P_in CSV header should include required columns");
+    const bool has_export_definition_message =
+        std::any_of(stage10.messages.begin(), stage10.messages.end(), [](const std::string& msg) {
+            return msg.find("Stage10 radial P_out/P_in export is only defined") != std::string::npos;
+        });
+    assertTrue(has_export_definition_message, "radial result should describe P_out/P_in export validity domain");
+
+    removeIfExists(stage10.thickness_vertical_csv_path);
+    removeIfExists(stage10.thickness_valid_mask_csv_path);
+    removeIfExists(stage10.thickness_invalid_reason_csv_path);
+    removeIfExists(stage10.thickness_summary_csv_path);
+    removeIfExists(stage10.thickness_radial_p_out_in_csv_path);
+}
+
+
+void testStage10RadialInnerDomainLimitationMetadataAndFractions() {
+    auto stage8 = makeSyntheticStage8ResultForStage9(5, 5);
+    auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, 7.0);
+    const auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    FoldPatchAnalysisConfig config;
+    config.stage10_export_csv = false;
+    config.stage10_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
+
+    auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
+    assertTrue(stage10.success, "radial stage should succeed for baseline planar case");
+
+    for (std::size_t j = 0; j < stage7.grid.ny; ++j) {
+        for (std::size_t i = 0; i < stage7.grid.nx; ++i) {
+            if (i == 0 || j == 0 || i + 1 == stage7.grid.nx || j + 1 == stage7.grid.ny) {
+                const std::size_t idx = nodeIndex(i, j, stage7.grid.nx);
+                stage10.thickness_valid_mask[idx] = 0;
+                stage10.thickness_radial_valid_mask[idx] = 0;
+                stage10.thickness_radial_invalid_outside_inner_domain_mask[idx] = 1;
+            }
+        }
+    }
+    stage10.thickness_radial_valid_node_count = 9;
+    stage10.thickness_valid_node_count = 9;
+    stage10.thickness_radial_invalid_outside_inner_domain_count = 16;
+    stage10.thickness_radial_invalid_no_bracket_count = 0;
+    stage10.thickness_radial_invalid_root_failure_count = 0;
+    const std::size_t metric_domain_count = stage10.node_count;
+    stage10.thickness_radial_valid_fraction_of_metric_domain =
+        static_cast<double>(stage10.thickness_radial_valid_node_count) / static_cast<double>(metric_domain_count);
+    stage10.thickness_radial_invalid_outside_inner_domain_fraction_of_metric_domain =
+        static_cast<double>(stage10.thickness_radial_invalid_outside_inner_domain_count) / static_cast<double>(metric_domain_count);
+
+    assertTrue(!stage10.thickness_domain_limitation_note.empty(),
+               "radial mode should provide explicit domain limitation note");
+    assertTrue(stage10.thickness_domain_limitation_note.find("inner_surface_sampleability") != std::string::npos,
+               "limitation note should reference inner-surface sampleability");
+    assertTrue(!stage10.radial_invalid_outside_inner_domain_definition.empty(),
+               "radial mode should define outside-inner-domain failures");
+    assertTrue(stage10.radial_invalid_outside_inner_domain_definition.find("radial_ray") != std::string::npos,
+               "outside-inner-domain definition should mention radial ray");
+    assertTrue(near(stage10.thickness_radial_valid_fraction_of_metric_domain, 9.0 / 25.0, 1e-12),
+               "radial valid fraction should be computed from metric-domain denominator");
+    assertTrue(near(stage10.thickness_radial_invalid_outside_inner_domain_fraction_of_metric_domain, 16.0 / 25.0, 1e-12),
+               "radial outside-inner-domain fraction should be computed from metric-domain denominator");
+}
+
+void testStage10RadialSamplingLossNoteEmissionGuard() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, 7.0);
+    const auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    FoldPatchAnalysisConfig config;
+    config.stage10_export_csv = false;
+    config.stage10_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
+
+    auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
+    assertTrue(stage10.success, "baseline radial run should succeed");
+    stage10.thickness_radial_invalid_outside_inner_domain_count = 2;
+    stage10.thickness_radial_invalid_no_bracket_count = 1;
+    stage10.thickness_radial_invalid_root_failure_count = 0;
+
+    const bool should_emit_sampling_loss_note = stage10.thickness_radial_invalid_outside_inner_domain_count > 0 &&
+                                                stage10.thickness_radial_invalid_no_bracket_count == 0 &&
+                                                stage10.thickness_radial_invalid_root_failure_count == 0;
+    assertTrue(!should_emit_sampling_loss_note,
+               "sampling-domain-loss dominance note must not be emitted when no-bracket failures are present");
+}
+
+void testStage10RadialSummaryCsvSchemaUsesActiveAndLimitationFields() {
+    auto stage8 = makeSyntheticStage8ResultForStage9(5, 5);
+    auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    stage7.z_outer_smooth.assign(stage7.node_count, 10.0);
+    stage7.z_inner_smooth.assign(stage7.node_count, 7.0);
+    const auto stage9 = makeSyntheticStage9ResultForStage10(stage7);
+    FoldPatchAnalysisConfig config;
+    config.stage10_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
+    config.stage10_export_csv = true;
+    config.output_prefix = "stage10_radial_summary_semantics_test";
+    removeIfExists(config.output_prefix + "_thickness_radial_summary.csv");
+
+    const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
+    assertTrue(stage10.success, "radial Stage 10 should succeed while exporting summary CSV");
+    std::ifstream in(stage10.thickness_summary_csv_path);
+    std::string header;
+    std::getline(in, header);
+    assertTrue(header.find("stage10_method") != std::string::npos, "radial summary should include stage10_method");
+    assertTrue(header.find("thickness_domain_limitation_note") != std::string::npos,
+               "radial summary should include limitation note field");
+    assertTrue(header.find("radial_invalid_outside_inner_domain_definition") != std::string::npos,
+               "radial summary should include explicit outside-inner-domain definition field");
+    assertTrue(header.find("mean_thickness_active") != std::string::npos,
+               "radial summary should include active-method mean field");
+    assertTrue(header.find("thickness_radial_valid_fraction_of_metric_domain") != std::string::npos,
+               "radial summary should include radial valid fraction field");
+    assertTrue(header.find("thickness_radial_invalid_outside_inner_domain_fraction_of_metric_domain") != std::string::npos,
+               "radial summary should include radial outside-inner-domain fraction field");
+    assertTrue(header.find("mean_thickness_vertical") == std::string::npos,
+               "radial summary should not use vertical-named fields as active headline metrics");
 
     removeIfExists(stage10.thickness_vertical_csv_path);
     removeIfExists(stage10.thickness_valid_mask_csv_path);
@@ -2985,6 +3111,9 @@ int main() {
         testStage10RadialConcentricSphericalCapsApproxConstantGap();
         testStage10RadialNoBracketFailureIsTracked();
         testStage10RadialPOutInCsvExport();
+        testStage10RadialInnerDomainLimitationMetadataAndFractions();
+        testStage10RadialSamplingLossNoteEmissionGuard();
+        testStage10RadialSummaryCsvSchemaUsesActiveAndLimitationFields();
         testStage1ToStage7Integration();
         testStage1ToStage9ThinPlateIntegration();
         std::cout << "All geometry analysis Stage 1/2/3/4/5/6/7/8/9/10 tests passed.\n";

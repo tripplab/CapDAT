@@ -662,15 +662,26 @@ struct GeometryStage10ThicknessResult {
     double stddev_thickness_radial = std::numeric_limits<double>::quiet_NaN();
     double min_thickness_radial = std::numeric_limits<double>::quiet_NaN();
     double max_thickness_radial = std::numeric_limits<double>::quiet_NaN();
+    double mean_thickness_active = std::numeric_limits<double>::quiet_NaN();
+    double median_thickness_active = std::numeric_limits<double>::quiet_NaN();
+    double stddev_thickness_active = std::numeric_limits<double>::quiet_NaN();
+    double min_thickness_active = std::numeric_limits<double>::quiet_NaN();
+    double max_thickness_active = std::numeric_limits<double>::quiet_NaN();
     double thickness_valid_fraction_of_metric_domain = std::numeric_limits<double>::quiet_NaN();
     double thickness_valid_intersection_fraction_of_metric_domain = std::numeric_limits<double>::quiet_NaN();
+    double thickness_radial_valid_fraction_of_metric_domain = std::numeric_limits<double>::quiet_NaN();
+    double thickness_radial_invalid_outside_inner_domain_fraction_of_metric_domain =
+        std::numeric_limits<double>::quiet_NaN();
 
+    std::string stage10_method = "vertical";
     std::string thickness_method_label = "stage10_vertical_difference_from_stage7_smooth_surfaces";
     std::string local_thickness_definition = "stage7_z_outer_smooth_minus_stage7_z_inner_smooth";
     std::string thickness_input_surface_definition = "stage7_smoothed_outer_inner_graph_surfaces";
     std::string thickness_contract_note =
         "stage10_v1_vertical_thickness_is_stage7_smooth_vertical_separation_repackaged_as_a_dedicated_stage10_field";
     std::string thickness_domain_definition = "stage7_metric_domain";
+    std::string thickness_domain_limitation_note;
+    std::string radial_invalid_outside_inner_domain_definition;
 
     std::string thickness_vertical_csv_path;
     std::string thickness_valid_mask_csv_path;
