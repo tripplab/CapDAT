@@ -15,6 +15,40 @@
 #include <filesystem>
 #include <string>
 
+namespace {
+
+std::string normalizePdbIdOrThrow(const std::string& raw_input) {
+    const auto first = raw_input.find_first_not_of(" \t\n\r");
+    const auto last = raw_input.find_last_not_of(" \t\n\r");
+    const std::string trimmed =
+        (first == std::string::npos) ? std::string() : raw_input.substr(first, last - first + 1);
+
+    std::string normalized = trimmed;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+
+    if (normalized.empty()) {
+        throw std::runtime_error(
+            "Error: --input expects a PDB identifier token (for example: 1cwp), but received an empty value.");
+    }
+
+    if (normalized.find('/') != std::string::npos || normalized.find('\\') != std::string::npos ||
+        normalized.find("..") != std::string::npos || normalized.find('.') != std::string::npos ||
+        normalized.find("_full") != std::string::npos || normalized.find(".vdb") != std::string::npos) {
+        throw std::runtime_error(
+            "Error: --input expects a PDB identifier only (for example: 1cwp), not a path or filename.");
+    }
+
+    return normalized;
+}
+
+std::filesystem::path resolveInputPathFromPdbId(const std::string& normalized_pdb_id) {
+    return std::filesystem::path("data") / (normalized_pdb_id + "_full.vdb");
+}
+
+}  // namespace
+
 /**
  * @brief Print the CapDAT help message to standard output.
  */
@@ -22,9 +56,9 @@ void printHelp(const std::string& program_name) {
     std::cout << "CapDAT v0.1.0\n"
               << "Capsid Data Analysis Toolkit - v01 foundation release\n\n"
               << "Usage:\n"
-              << "  " << program_name << " --input <file> [options]\n\n"
+              << "  " << program_name << " --input <pdbid> [options]\n\n"
               << "Required options:\n"
-              << "  -i, --input <file>      Input PDB file\n\n"
+              << "  -i, --input <pdbid>     PDB identifier (expects data/[PDBID]_full.vdb)\n\n"
               << R"(Optional options:
 
   [General]
@@ -106,9 +140,10 @@ void printHelp(const std::string& program_name) {
 
 )"
               << "Examples:\n"
-              << "  " << program_name << " --input capsid.pdb --export-final accepted.pdb\n"
+              << "  " << program_name << " -i 1cwp\n"
+              << "  " << program_name << " -i 1cwp --export-final accepted.pdb\n"
               << "  " << program_name
-              << " -i capsid.pdb --reorient --align-fold 5_0 --align-axis x --export-final aligned.pdb\n";
+              << " -i 1cwp --reorient --align-fold 5_0 --align-axis x --export-final aligned.pdb\n";
 }
 
 void printVersion() {
@@ -132,7 +167,8 @@ void printSummary(const Capsid& capsid,
 }
 
 int main(int argc, char* argv[]) {
-    std::string input_path;
+    std::string input_pdb_id;
+    std::string resolved_input_path;
     std::string log_path;
     std::string export_final_output_path;
     bool verbose = false;
@@ -234,7 +270,7 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Error: missing value for " << arg << '\n';
                 return 1;
             }
-            input_path = argv[++i];
+            input_pdb_id = argv[++i];
             continue;
         }
         if (arg == "-l" || arg == "--log") {
@@ -808,8 +844,32 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (input_path.empty()) {
-        std::cerr << "Error: input file is required. Use --input <file>.\n";
+    if (input_pdb_id.empty()) {
+        std::cerr << "Error: input PDB identifier is required. Use --input <pdbid>.\n";
+        return 1;
+    }
+
+    std::string normalized_pdb_id;
+    try {
+        normalized_pdb_id = normalizePdbIdOrThrow(input_pdb_id);
+    } catch (const std::runtime_error& ex) {
+        std::cerr << ex.what() << '\n';
+        return 1;
+    }
+
+    const std::filesystem::path data_dir("data");
+    if (!std::filesystem::exists(data_dir) || !std::filesystem::is_directory(data_dir)) {
+        std::cerr << "Error: required data directory not found: data/\n"
+                  << "CapDAT expects input coordinate files in data/[PDBID]_full.vdb format.\n";
+        return 1;
+    }
+
+    const std::filesystem::path resolved_input_path_fs = resolveInputPathFromPdbId(normalized_pdb_id);
+    resolved_input_path = resolved_input_path_fs.string();
+    if (!std::filesystem::exists(resolved_input_path_fs) || !std::filesystem::is_regular_file(resolved_input_path_fs)) {
+        std::cerr << "Error: input file not found for PDBID '" << normalized_pdb_id << "': "
+                  << resolved_input_path_fs.string() << '\n'
+                  << "CapDAT expects VIPERdb-style coordinate files named [PDBID]_full.vdb inside the data/ directory.\n";
         return 1;
     }
 
@@ -934,9 +994,11 @@ int main(int argc, char* argv[]) {
 
     try {
         logger.info("Starting CapDAT");
+        logger.info(std::string("Resolved input PDBID '") + normalized_pdb_id + "' to " + resolved_input_path);
+        logger.info(std::string("Opening input file: ") + resolved_input_path);
 
         PdbParser parser(config, &logger);
-        Capsid capsid = parser.parseFile(input_path);
+        Capsid capsid = parser.parseFile(resolved_input_path);
 
         logger.info("Starting extended structural summary geometry");
         StructuralSummary structural_summary = computeStructuralSummary(capsid);
@@ -1017,7 +1079,7 @@ int main(int argc, char* argv[]) {
         if (!geometry_result.success) {
             throw std::runtime_error("Geometry analysis failed in Stage 1/2/3/4/5 pipeline");
         }
-        const std::string input_name = std::filesystem::path(input_path).filename().string();
+        const std::string input_name = std::filesystem::path(resolved_input_path).filename().string();
         std::cout << buildGeometrySummaryReport(geometry_result, geometry_config, input_name);
 
         if (!export_final_output_path.empty()) {
