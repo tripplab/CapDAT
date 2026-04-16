@@ -1,88 +1,27 @@
-# CapDAT Geometry Branch — Updated Technical Specification Report
+# CapDAT `geometry` Branch — Detailed Technical Specification
 
-## Scope and basis
+## 2. What the repository is
 
-This report is based on direct inspection of the **`geometry` branch** codebase of `tripplab/CapDAT`, not on `main`, and not on the repository documentation alone. The in-repo technical guide is already partially stale relative to the current headers and CLI wiring, so this report is normalized against the actual source files.
+CapDAT is a C++17 command-line toolkit for parsing and analyzing large viral capsid coordinate files in fixed-column PDB-like format, including VIPERdb-style `.vdb` inputs. The `geometry` branch is a **post-parse fold-centered local shell geometry pipeline** built on top of a structural core, with explicit frame handling, deterministic icosahedral fold math, in-place reorientation, canonical export, and a staged numerical analysis path from patch extraction through curvature and thickness estimation.
 
-Primary files inspected:
+In plain terms, the repo does three big things:
 
-- `CMakeLists.txt`
-- `src/main.cpp`
-- `include/capsid.hpp`
-- `include/geometry_symmetry.hpp`
-- `include/reorientation_workflow.hpp`
-- `include/export_capsid.hpp`
-- `include/geometry_analysis.hpp`
+1. It reconstructs an internal structural model of an icosahedral capsid from raw coordinate records.
+2. It can reorient that model in place into a fold-aligned working frame.
+3. It can derive a local geometric patch around a chosen fold and run a staged analysis on that patch to reconstruct surfaces, estimate derivatives, compute curvature, and compute thickness.
 
-This document is meant to be a **developer-facing technical map** of the current branch so new functionality can be designed against the real architecture instead of assumptions.
+## 3. Build and executable structure
 
----
+The build is CMake-based, uses C++17, and produces a single main executable named `capsid_analyzer` plus dedicated test executables. The main source list includes the structural domain, parser, symmetry module, export module, reorientation workflow, summary/reporting, infrastructure, and the full geometry pipeline through `src/geometry_analysis.cpp`.
 
-## 1. Executive technical state
+The build graph makes several architectural facts obvious:
 
-The `geometry` branch is no longer just a parser plus a simple reorientation/export layer. It is now a **staged local shell-geometry analysis pipeline** for icosahedral capsids, organized around a fold-centered cylindrical patch extracted after canonical frame alignment.
+- geometry is first-class, not optional dead code
+- the geometry pipeline is linked into the main executable
+- tests are modularized by subsystem
+- the expected development workflow includes CTest, not only manual runs
 
-The current pipeline is implemented through `runFoldPatchGeometryAnalysis(...)` and, as exposed by `include/geometry_analysis.hpp`, now spans **nine stages**:
-
-1. **Stage 1** — preparation and fold alignment to `+Z`
-2. **Stage 2** — cylindrical patch selection
-3. **Stage 3** — analytical patch normalization with vdW assignment
-4. **Stage 4** — raw inner/outer sheet detection by vertical line–sphere contact
-5. **Stage 5** — surface-preparation masks, seeds, and trust domain setup
-6. **Stage 6** — surface reconstruction
-7. **Stage 7** — smoothing / regularization
-8. **Stage 8** — local derivative estimation
-9. **Stage 9** — curvature computation plus QC flagging
-
-That matters because the geometry branch has already crossed from “preparation infrastructure” into a real numerical analysis subsystem. Any new work should treat it that way.
-
----
-
-## 2. Build, executable, and test layout
-
-## 2.1 Build system
-
-The repository remains a **CMake-based C++17** project.
-
-- project name: `CapDAT`
-- version: `0.1.0`
-- primary executable: `capsid_analyzer`
-- tests controlled by `CAPDAT_BUILD_TESTS`
-- warnings controlled by `CAPDAT_ENABLE_WARNINGS`
-
-The geometry subsystem is first-class in the build graph: `src/geometry_analysis.cpp` is part of the main executable, not a side experiment.
-
-## 2.2 Compiled source composition
-
-The main executable is built from:
-
-- orchestration:
-  - `src/main.cpp`
-- domain:
-  - `src/atom.cpp`
-  - `src/residue.cpp`
-  - `src/chain.cpp`
-  - `src/capsid.cpp`
-- parsing:
-  - `src/pdb_parser.cpp`
-- symmetry / geometry foundation:
-  - `src/geometry_symmetry.cpp`
-- workflow:
-  - `src/reorientation_workflow.cpp`
-- export:
-  - `src/export_capsid.cpp`
-- reporting:
-  - `src/structural_summary.cpp`
-  - `src/summary_reporter.cpp`
-- infrastructure:
-  - `src/logger.cpp`
-  - `src/timer.cpp`
-- geometry pipeline:
-  - `src/geometry_analysis.cpp`
-
-## 2.3 Test targets visible in build
-
-The branch defines dedicated test executables for:
+The test executables explicitly include:
 
 - `capdat_structural_summary_tests`
 - `capdat_geometry_symmetry_tests`
@@ -90,131 +29,89 @@ The branch defines dedicated test executables for:
 - `capdat_geometry_analysis_tests`
 - `capdat_export_capsid_tests`
 
-There are also CLI-level tests for export and reorientation combinations.
+and CLI-level tests for export and reorientation combinations :contentReference[oaicite:18]{index=18}.
 
-The implication is clear: the intended development style is **modular, feature-local testing**, not only giant end-to-end runs.
+## 4. High-level architecture
 
----
+The repo is best understood as six interacting layers.
 
-## 3. High-level architecture
+### 4.1 CLI orchestration layer
 
-The branch is easiest to understand as six interacting layers.
+`src/main.cpp` is the coordinator. It does argument parsing, top-level mode validation, parser configuration, parse execution, structural summary printing, optional reorientation, optional geometry analysis, and optional final export :contentReference[oaicite:19]{index=19}.
 
-## 3.1 CLI/orchestration layer
+It is intentionally not the place where scientific kernels live. The CLI layer maps user intent into structured configs and workflow calls.
 
-`src/main.cpp` is responsible for:
+### 4.2 Persistent structural domain layer
 
-- parsing CLI arguments
-- validating top-level mode combinations
-- configuring parser behavior
-- parsing the input file
-- computing and printing structural summary
-- optionally invoking standalone reorientation
-- optionally invoking geometry analysis
-- optionally exporting the final current capsid state
+The persistent biological/structural hierarchy is:
 
-It is a coordinator, not the scientific core.
+**Atom → Residue → Chain → Capsid**
 
-## 3.2 Persistent structural domain
+This is the authoritative owner of accepted coordinates. Geometry code does not create a second full structural model. It consumes the `Capsid` and derived stage outputs built from it :contentReference[oaicite:20]{index=20} :contentReference[oaicite:21]{index=21} :contentReference[oaicite:22]{index=22}.
 
-The persistent biological structure remains the `Atom -> Residue -> Chain -> Capsid` hierarchy.
+Important nuance: `Chain` is only the implementation class name. Conceptually it represents an internally reconstructed subunit, not a unique raw one-letter PDB chain identity. This matters because large capsids can reuse raw chain IDs across multiple proteins, so the code assigns its own internal subunit identity and only preserves the original chain label as metadata :contentReference[oaicite:23]{index=23}.
 
-This is still the authoritative owner of accepted coordinates.
+### 4.3 Parsing and acceptance-policy layer
 
-Important current rule: **geometry stages operate on the coordinates already stored in `Capsid`**, and Stage 1 may rotate them **in place**.
+`PdbParser` is the only layer that should understand the raw fixed-column layout. It owns record extraction, temporary record validation, accept/reject policy, and hierarchical reconstruction into `Capsid` :contentReference[oaicite:24]{index=24}.
 
-## 3.3 Canonical geometry/symmetry layer
+The parser configuration already encodes an important domain policy: `protein_only = true` by default, meaning the analysis basis excludes non-protein components unless policy changes :contentReference[oaicite:25]{index=25}.
 
-`geometry_symmetry` is the repository’s reusable icosahedral math layer. It is parser-independent and should remain the only authoritative place for:
+### 4.4 Canonical geometry/symmetry layer
 
-- canonical fold definitions
-- fold lookup by name or `(type,index)`
-- vector and matrix primitives
-- direction alignment and rotation construction
-- IAU boundary logic
-- proper-rotation validation
+`geometry_symmetry` is the repository’s canonical icosahedral math module. It is parser-independent and exposes fold definitions, normalized fold vectors, vector algebra, distance and angle helpers, direction-alignment rotations, IAU classification, and proper-rotation checks :contentReference[oaicite:26]{index=26}.
 
-## 3.4 Workflow mutation layer
+This module is the single source of truth for fold-axis math.
 
-`reorientation_workflow` handles user-facing coordinate reorientation as an explicit workflow with request/result models. It owns:
+### 4.5 Workflow mutation layer
 
-- source resolution
-- target axis mapping
-- transform computation
-- in-place coordinate mutation
-- orientation-state update semantics
+`reorientation_workflow` owns the semantics of applying a user-requested transform to the current capsid frame. It translates a structured request into source resolution, axis mapping, rotation calculation, in-place coordinate updates, and workflow result reporting :contentReference[oaicite:27]{index=27}.
 
-The geometry pipeline reuses this workflow instead of duplicating rotation logic.
+### 4.6 Export and artifact layer
 
-## 3.5 Export/serialization layer
+`export_capsid` writes the **current in-memory accepted structure state**, not the original file as text. If the capsid has been reoriented in place, export writes those transformed coordinates. It also supports subset export through `atom_subset`, which is crucial for patch- and contact-level debug artifacts :contentReference[oaicite:28]{index=28}.
 
-`export_capsid` writes the **current in-memory accepted structure state**, not a verbatim copy of the source file. If the capsid was reoriented in place, export writes the transformed coordinates.
+### 4.7 Derived geometry-analysis layer
 
-The writer also supports subset export through `atom_subset`, which is critical for patch- and contact-level geometry artifacts.
+`geometry_analysis` is a staged derived-analysis subsystem built on top of the persistent capsid. It does not mutate topology. It constructs stage outputs, scalar fields, masks, metrics, artifacts, and reportable summaries from the current accepted coordinates :contentReference[oaicite:29]{index=29}.
 
-## 3.6 Derived geometry-analysis layer
+## 5. Core persistent model semantics
 
-`geometry_analysis` is the staged derived-analysis subsystem. It does not redefine the biological structure. Instead, it builds analysis-layer objects and result structs on top of the persistent capsid.
+### 5.1 Atom
 
----
+`Atom` is intentionally lightweight. It stores parsed PDB-derived identity and coordinate information and supports only a small mutator, `setPosition(...)`, for post-parse coordinate transforms like reorientation :contentReference[oaicite:30]{index=30}.
 
-## 4. Core domain model relevant to geometry development
+### 5.2 Chain
 
-## 4.1 `Capsid` is the authoritative coordinate owner
+`Chain` caches atom counts, stores a unique internal subunit ID plus the original PDB chain label, owns residues, and supports controlled mutation through append-oriented methods plus mutable residue access for post-parse transformations :contentReference[oaicite:31]{index=31}.
 
-`Capsid` owns the accepted parsed structure. Geometry stages traverse it directly. The branch does **not** create a second full capsid representation for rotated or analyzed states.
+### 5.3 Capsid
 
-That is an intentional design choice and should be preserved unless there is an overwhelming reason to change it.
+`Capsid` is the authoritative structure owner. It stores source metadata, owns all reconstructed subunits, stores summary counters, and now also stores an explicit `OrientationState` that records whether the in-memory coordinates are still in the original parsed frame or have been reoriented in place :contentReference[oaicite:32]{index=32}.
 
-## 4.2 Explicit orientation/frame state exists and is central
+This orientation state is architecturally central. Downstream code is not supposed to assume the frame.
 
-`Capsid` now includes an embedded `OrientationState` with fields such as:
+## 6. Frame and orientation semantics
 
-- `in_original_parsed_frame`
-- `reoriented_in_place`
-- `already_aligned_identity`
-- `applied_rotation_matrix`
-- `rotation_axis`
-- `rotation_angle_radians`
-- `source_mode`
-- `source_description`
-- `source_direction`
-- `requested_target_axis`
-- `target_direction`
+A major strength of this branch is that frame identity is explicit instead of implicit.
 
-This is one of the branch’s most important architectural safeguards. Any new feature that depends on frame semantics must respect it.
+`Capsid::OrientationState` tracks, among other things:
 
-## 4.3 Persistent vs derived data is cleanly separated
+- whether the structure is still in the original parsed frame
+- whether a reorientation was applied in place
+- whether the transform was identity because the requested fold was already aligned
+- the applied rotation matrix
+- rotation axis and angle
+- source mode and source description
+- source direction
+- requested target axis
+- target direction
 
-The geometry pipeline introduces analysis-only structs instead of polluting `Atom` or `Capsid`:
+This means frame-aware features have an authoritative state object to consult instead of guessing from workflow history :contentReference[oaicite:33]{index=33}.
 
-- `CylinderMembership`
-- `PatchAtom`
-- `AnalyticalPatch`
-- stage-specific result structs
-- `GeometryAnalysisResult`
+## 7. Canonical symmetry and fold model
 
-That separation is correct. Derived numerical state belongs in analysis-layer result models, not in the persistent biology objects.
-
----
-
-## 5. `geometry_symmetry` as the canonical mathematical source
-
-## 5.1 Public types
-
-The module exposes:
-
-- `Vector3`
-- `Matrix3`
-- `FoldDefinition`
-- `RotationDefinition`
-- `IauDefinition`
-
-It also defines `RotationStatus` and `IauClassification`.
-
-## 5.2 Canonical fold vocabulary
-
-The geometry branch relies on the following canonical fold names:
+The `geometry_symmetry` module defines lightweight geometry primitives and canonical fold definitions. The canonical fold vocabulary visible in the public API is:
 
 - `2_0`
 - `2_1`
@@ -222,111 +119,55 @@ The geometry branch relies on the following canonical fold names:
 - `3_1`
 - `5_0`
 
-They are exposed through stable lookup functions and should be treated as the canonical branch vocabulary.
+The module exposes lookup by exact name and by `(fold_type, fold_index)`, plus helpers for normalized directions, nearest-fold identification, distances to axes, alignment to arbitrary target directions, alignment to `+Z`, and IAU classification functions :contentReference[oaicite:34]{index=34}.
 
-## 5.3 Functional scope
+Architecturally, this means that custom fold hardcoding elsewhere is a design violation.
 
-The module covers:
+## 8. Reorientation workflow contract
 
-- fold lookup by exact name
-- fold lookup by `(fold_type, fold_index)`
-- exact reference vectors and normalized unit vectors
-- norm, normalize, dot, cross
-- angular relations and cosine similarity
-- nearest-fold lookup
-- Euclidean and point-to-axis distances
-- direction-to-direction alignment
-- alignment to `+Z`
-- rotation of directions and points
-- canonical IAU boundary margin logic
-- proper-rotation validation
-
-## 5.4 Development consequence
-
-Do not hardcode fold vectors, axis logic, or custom direction-alignment math anywhere else. If a new feature needs reusable icosahedral math, it belongs here.
-
----
-
-## 6. Reorientation workflow contract
-
-## 6.1 Request model
-
-`ReorientationRequest` contains:
+The reorientation layer is driven by `ReorientationRequest`, which contains:
 
 - `request_reorientation`
-- `source_mode`
+- `source_mode` as fold or custom vector
 - `fold_name`
 - `custom_vector_text`
 - `target_axis`
-- `request_export`
-- `export_path`
-- `verbose`
+- optional export request fields
+- verbosity flag
 
-## 6.2 Result model
+It returns `ReorientationResult`, which contains:
 
-`ReorientationResult` returns:
+- status
+- resolved source description
+- source direction
+- target direction
+- rotation matrix
+- rotation axis
+- rotation angle
+- whether coordinates were modified in place
+- export state
+- messages
 
-- `status`
-- `resolved_source_description`
-- `source_direction`
-- `requested_target_axis`
-- `target_direction`
-- `rotation_matrix`
-- `rotation_axis`
-- `rotation_angle_radians`
-- `coordinates_modified_in_place`
-- `export_requested`
-- `export_path`
-- `messages`
+This is important because `main.cpp` does not perform deep source resolution itself. It only wires CLI state into this request model and delegates the real semantics to the workflow layer :contentReference[oaicite:35]{index=35} :contentReference[oaicite:36]{index=36}.
 
-## 6.3 Architectural role
+## 9. Export subsystem contract
 
-This workflow owns the semantics of “take this user request and mutate the capsid frame accordingly.” The geometry-analysis layer should continue reusing it instead of re-implementing frame mutation.
+The export writer is not a parser reverse-dumper. It serializes the current accepted in-memory coordinates and can also export subsets of atoms. The config includes:
 
----
+- output path
+- header/comment emission
+- TER/END record control
+- whether to preserve serial numbers
+- coordinate-record-only mode
+- optional explicit atom subset pointer
 
-## 7. Export subsystem contract
+This is what makes Stage 2 patch exports and Stage 4 contact-atom exports possible without creating ad hoc writers :contentReference[oaicite:37]{index=37}.
 
-## 7.1 Export semantics
+## 10. Actual CLI surface on the `geometry` branch
 
-`ExportCapsidWriter` writes the **current accepted capsid coordinates** exactly as stored in memory.
+The real CLI surface is broader than older branch descriptions imply.
 
-That means:
-
-- original parsed coordinates if no in-place transform was applied
-- transformed coordinates if reorientation or geometry Stage 1 changed them
-
-## 7.2 Configuration
-
-`ExportCapsidConfig` includes:
-
-- `output_path`
-- `emit_header_comments`
-- `emit_ter_records`
-- `emit_end_record`
-- `preserve_atom_serial_numbers`
-- `coordinate_records_only`
-- `atom_subset`
-
-## 7.3 Why this matters
-
-The branch already has the right foundation for exporting:
-
-- full current capsid
-- Stage 2 patch subsets
-- Stage 4 contact-atom subsets
-- future derived subsets
-
-New functionality should reuse this path instead of building ad hoc PDB writers.
-
----
-
-## 8. CLI surface as actually implemented
-
-The real CLI is broader than the older geometry documentation suggests.
-
-## 8.1 General options
-
+### General
 - `--input`
 - `--log`
 - `--verbose`
@@ -334,15 +175,13 @@ The real CLI is broader than the older geometry documentation suggests.
 - `--include-hetatm`
 - `--export-final`
 
-## 8.2 Reorientation options
-
+### Reorientation
 - `--reorient`
 - `--align-fold`
 - `--align-vector`
 - `--align-axis`
 
-## 8.3 Geometry enablement and Stage 1–6 controls
-
+### Geometry analysis enablement and early-stage controls
 - `--geometry-analysis`
 - `--debug`
 - `--geometry_fold_type`
@@ -360,8 +199,7 @@ The real CLI is broader than the older geometry documentation suggests.
 - `--split_in_out_mesh`
 - `--surf_min_separation`
 
-## 8.4 Stage 7 controls
-
+### Stage 7 smoothing / regularization
 - `--geometry_smooth_enabled`
 - `--geometry_smooth_weight`
 - `--geometry_smooth_max_iterations`
@@ -380,8 +218,7 @@ The real CLI is broader than the older geometry documentation suggests.
 - `--geometry_s7_solver_tolerance`
 - `--geometry_s7s6_deltas`
 
-## 8.5 Stage 8 controls
-
+### Stage 8 derivative estimation
 - `--geometry_s8_enabled`
 - `--geometry_s8_fit_radius`
 - `--geometry_s8_min_points`
@@ -393,119 +230,38 @@ The real CLI is broader than the older geometry documentation suggests.
 - `--geometry_s8_min_directional_span`
 - `--geometry_s8_export_csv`
 
-## 8.6 Stage 9 / curvature QC controls
-
+### Stage 9 curvature QC
 - `--qc_n_tail`
 - `--qc_n_spike`
 
-## 8.7 Important top-level invariants enforced in `main.cpp`
+### Stage 10 thickness
+- `--geometry_thickness_enabled`
+- `--geometry_thickness_method`
+- `--geometry_thickness_export_csv`
+- `--geometry_thickness_use_curvature_valid_domain_only`
+- `--geometry_thickness_min_thickness`
+- `--geometry_thickness_max_thickness`
 
-The CLI rejects:
+All of that is visible directly in `printHelp(...)` and the argument parser in `main.cpp` :contentReference[oaicite:38]{index=38}.
 
-- missing `--input`
-- simultaneous `--align-fold` and `--align-vector`
-- `--reorient` without exactly one source
-- source flags without `--reorient`
-- simultaneous `--geometry-analysis` and `--reorient`
-- invalid Stage 7 weights and solver settings
-- invalid Stage 8 fit controls
-- nonpositive Stage 9 QC thresholds
+## 11. Top-level CLI invariants and execution rules
 
-The design implication is good: `main.cpp` performs **mode consistency** and basic parameter sanity, while deeper stage-specific logic remains inside the geometry subsystem.
+`main.cpp` enforces several important invariants before execution:
 
----
+- `--input` is mandatory
+- `--align-fold` and `--align-vector` are mutually exclusive
+- `--reorient` requires exactly one source
+- source flags cannot appear without `--reorient`
+- `--geometry-analysis` cannot be combined with `--reorient`
+- various Stage 7, 8, 9, and 10 numerical parameters must satisfy positivity or ordering constraints
 
-## 9. Geometry configuration model
+That split is good engineering. High-level mode consistency lives in `main.cpp`; deeper stage semantics belong in the geometry subsystem :contentReference[oaicite:39]{index=39}.
 
-The entire geometry workflow is driven by `FoldPatchAnalysisConfig`.
+## 12. Geometry pipeline: public API and staged contract
 
-This struct is now more advanced than older documentation suggests.
+`include/geometry_analysis.hpp` exposes a formal staged API. This is the real contract for geometry development.
 
-## 9.1 Global / shared controls
-
-- `enabled`
-- `debug`
-- `fold_type`
-- `fold_index`
-- `cylinder_radius`
-- `delta_vdw`
-- `grid_spacing`
-- `min_atoms_in_patch`
-- `output_prefix`
-- `export_rotated_capsid`
-
-## 9.2 Stage 5 controls
-
-- `stage5_boundary_margin`
-- `stage5_support_radius`
-- `stage5_min_support_nodes`
-- `stage5_reliable_radius`
-
-## 9.3 Stage 6 controls
-
-- `stage6_smoothing_weight`
-- `stage6_max_iterations`
-- `stage6_convergence_tolerance`
-- `stage6_enforce_non_crossing`
-- `stage6_min_separation`
-- `stage6_export_obj_meshes`
-- `stage6_mesh_export_format`
-- `stage6_split_in_out_meshes`
-
-## 9.4 Stage 7 controls
-
-- `stage7_enabled`
-- `stage7_method`
-- `stage7_smoothing_weight`
-- `stage7_max_iterations`
-- `stage7_convergence_tolerance`
-- `stage7_preserve_seed_values`
-- `stage7_lambda`
-- `stage7_data_weight_seed`
-- `stage7_data_weight_interp`
-- `stage7_use_reliable_core_only_for_fit`
-- `stage7_boundary_condition_mode`
-- `stage7_solver_max_iterations`
-- `stage7_solver_tolerance`
-- `stage7_export_s7s6_deltas`
-- `stage7_enforce_non_crossing`
-- `stage7_min_separation`
-- `stage7_export_meshes`
-
-## 9.5 Stage 8 controls
-
-- `stage8_enabled`
-- `stage8_fit_radius`
-- `stage8_min_points`
-- `stage8_max_points`
-- `stage8_max_rms_residual`
-- `stage8_max_abs_residual`
-- `stage8_max_condition_indicator`
-- `stage8_require_centered_support`
-- `stage8_min_directional_span`
-- `stage8_export_csv`
-
-## 9.6 Stage 9 controls
-
-- `stage9_enabled`
-- `stage9_export_csv`
-- `stage9_qc_n_tail`
-- `stage9_qc_n_spike`
-- `stage9_qc_min_neighbors`
-- `stage9_qc_abs_scale_floor`
-
-## 9.7 Design consequence
-
-Any new behavior that materially changes the geometry pipeline should be surfaced through structured config, not buried in hidden constants.
-
----
-
-## 10. Public geometry-analysis API surface
-
-The header exposes both stage entry points and reusable kernels.
-
-## 10.1 Reusable helpers and kernels
-
+### Helper/kernel API
 - `classifyPatchCylinder(...)`
 - `normalizeElementSymbol(...)`
 - `vdwRadius(...)`
@@ -514,8 +270,7 @@ The header exposes both stage entry points and reusable kernels.
 - `detectRawFirstContactAtNode(...)`
 - `buildStage4RegularGrid(...)`
 
-## 10.2 Stage entry points
-
+### Stage entry points
 - `prepareGeometryAnalysisStage1(...)`
 - `runGeometryAnalysisStage2PatchSelection(...)`
 - `runGeometryAnalysisStage3PatchNormalization(...)`
@@ -525,379 +280,119 @@ The header exposes both stage entry points and reusable kernels.
 - `runGeometryAnalysisStage7SurfaceSmoothing(...)`
 - `runGeometryAnalysisStage8DerivativeEstimation(...)`
 - `runGeometryAnalysisStage9CurvatureComputation(...)`
+- `runGeometryAnalysisStage10ThicknessComputation(...)`
 - `runFoldPatchGeometryAnalysis(...)`
+- `buildGeometrySummaryReport(...)`
 
-This is the real contract surface future development must respect.
+The pipeline is therefore a formalized sequence, not an informal script :contentReference[oaicite:40]{index=40}.
 
----
+## 13. Stage-by-stage technical meaning
 
-## 11. Stage-by-stage current technical specification
+### Stage 1 — preparation and fold alignment
 
-## 11.1 Stage 1 — preparation and fold alignment
+This stage resolves the requested canonical fold, aligns it to `+Z`, mutates the `Capsid` in place when necessary, and records the resulting frame semantics. Its result includes the fold name, reference vector, unit vector, rotation matrix, axis, angle, whether identity rotation was used, whether coordinates were modified, final frame description, and nested reorientation workflow result :contentReference[oaicite:41]{index=41}.
 
-### Purpose
+Tests show that identity alignment for `2_0` is treated explicitly and recorded semantically rather than being silently ignored, while non-identity alignments such as `3_0` do change coordinates in place :contentReference[oaicite:42]{index=42}.
 
-- resolve the requested canonical fold
-- align it to `+Z`
-- mutate the current `Capsid` coordinates in place
-- capture the new frame state
+### Stage 2 — cylindrical patch selection
 
-### Inputs
+This stage selects the local patch in the working frame. It evaluates each accepted atom by:
 
-- mutable `Capsid&`
-- `FoldPatchAnalysisConfig`
-- `ParserConfig`
-- `Logger*`
+- radial distance in the XY plane
+- positivity of `z`
+- inclusion within the cylinder radius
 
-### Outputs
+The result preserves both `PatchAtom` records and stable original atom pointers, plus counters for rejected atoms and the patch export path :contentReference[oaicite:43]{index=43}.
 
-`GeometryPreparationResult` includes:
+Tests confirm that `z > 0` and `radial_xy <= cylinder_radius` are the selection rule, that edge inclusion is deterministic, and that min-patch-size thresholds are enforced as hard failures :contentReference[oaicite:44]{index=44}.
 
-- requested fold type/index
-- resolved fold name
-- resolved reference vector
-- resolved unit vector
-- identity-rotation flag
-- rotation matrix
-- rotation axis
-- rotation angle
-- in-place mutation flag
-- final frame description
-- export path
-- nested `ReorientationResult`
-- messages
+### Stage 3 — analytical patch normalization
 
-### Architectural meaning
+Stage 3 turns the selected subset into an `AnalyticalPatch`. For each selected atom it normalizes element identity, assigns vdW radius, applies global `delta_vdw`, preserves membership facts, and keeps original atom provenance. Counts are tracked for explicit, inferred, and fallback vdW assignments :contentReference[oaicite:45]{index=45}.
 
-This stage establishes the working frame for all downstream local geometry. New stages should not silently rotate the capsid again.
+Tests confirm explicit lookup for common elements, inference from atom names when the element field is blank, and fallback behavior when the element remains unsupported :contentReference[oaicite:46]{index=46}.
 
----
+### Stage 4 — raw inner/outer sheet detection
 
-## 11.2 Stage 2 — cylindrical patch selection
+Stage 4 introduces the first real geometric envelope construction. It builds a regular XY grid over the patch disk, then at each node intersects the vertical line with all patch-atom spheres. It selects:
 
-### Purpose
+- outer raw contact from the winning upper intersection
+- inner raw contact from the winning lower intersection
 
-Select the fold-centered local patch from the working-frame capsid.
+The result includes raw scalar fields, inside-disk and valid masks, provenance arrays for winning atoms, contact roles, CSV paths, a contact-atom PDB path, timestamps, and runtime metadata :contentReference[oaicite:47]{index=47}.
 
-### Selection logic
+Tests show that the selection is based on the winning envelope intersections, not on naive atom-center heuristics, and that provenance is preserved deterministically :contentReference[oaicite:48]{index=48}.
 
-For each accepted atom in current coordinates:
+### Stage 5 — surface preparation and trust-domain setup
 
-- compute `radial_xy`
-- require `z > 0`
-- require `radial_xy <= cylinder_radius`
+Stage 5 converts raw Stage 4 evidence into seeds, interpolation-allowed masks, exclusion masks, hard-invalid masks, and a reliable-core mask. It is effectively the pipeline’s trust-domain definition stage. It also derives or accepts parameters like boundary margin, support radius, and reliable radius :contentReference[oaicite:49]{index=49}.
 
-Selection facts are encoded in `CylinderMembership`.
+Tests show that this stage explicitly distinguishes seed nodes, interpolation-eligible nodes, boundary-excluded nodes, hard-invalid nodes, and reliable-core nodes, and that provenance from Stage 4 paired seeds is propagated and deduplicated carefully :contentReference[oaicite:50]{index=50}.
 
-### Outputs
+### Stage 6 — surface reconstruction
 
-`GeometryPatchSelectionResult` stores:
+Stage 6 reconstructs continuous outer and inner scalar surfaces over the grid as `z_outer_reconstructed` and `z_inner_reconstructed`. It tracks reconstructed nodes, seed and interpolation counts, final valid analysis mask, non-crossing adjustments, separation statistics, and mesh export metadata :contentReference[oaicite:51]{index=51}.
 
-- total atoms examined
-- selected atom count
-- rejection counters
-- cylinder radius
-- min-atoms threshold
-- export path
-- `patch_atoms`
-- `selected_atom_refs`
-- messages
+Tests show that seed values remain fixed, interpolation nodes are solved, hard-invalid nodes remain invalid, non-crossing constraints can be enforced, and deterministic mesh/CSV exports are expected :contentReference[oaicite:52]{index=52}.
 
-### Important feature
+### Stage 7 — smoothing / regularization
 
-The stage preserves stable pointers to original atoms. That is essential for provenance and export fidelity.
-
----
-
-## 11.3 Stage 3 — analytical patch normalization
-
-### Purpose
-
-Transform the selected patch into a normalized analysis-layer representation.
-
-### Main actions
-
-For each Stage 2 selected atom:
-
-- build a normalized `PatchAtom`
-- normalize the element symbol
-- assign vdW radius
-- apply `delta_vdw`
-- preserve selection membership facts
-- preserve pointer to original atom
-
-### vdW policy
-
-The code supports element-based vdW resolution with a fallback strategy. The lookup table includes common elements and uses a fallback radius when needed.
-
-### Outputs
-
-`GeometryPatchNormalizationResult` contains an `AnalyticalPatch` with:
-
-- normalized atoms
-- original atom refs
-- cylinder radius
-- atom count
-- explicit / inferred / fallback vdW counts
-- export path
-
-### Meaning
-
-This is the true boundary between raw structural subset and analytically usable local geometry input.
-
----
-
-## 11.4 Stage 4 — raw sheet detection
-
-### Purpose
-
-Generate raw outer and inner envelope evidence over a regular XY grid by intersecting vertical lines with patch-atom spheres.
-
-### Grid model
-
-`buildStage4RegularGrid(...)` builds a regular grid over the patch disk using `grid_spacing`.
-
-### Node-level contact logic
-
-At each grid node `(x,y)`:
-
-- test vertical line–sphere intersections against all patch atoms
-- outer raw contact is selected from the upper intersection side
-- inner raw contact is selected from the lower intersection side
-- validity depends on having a consistent inner/outer pair
-
-### Outputs
-
-`GeometryStage4RawSheetResult` includes:
-
-- grid descriptor
-- raw outer field
-- raw inner field
-- inside-disk mask
-- valid mask
-- candidate counts
-- inner/outer contact serial numbers
-- contact patch-atom indices
-- per-atom contact roles
-- raw contact records
-- counts for valid, invalid, outer-only, inner-only, both-hit, zero-thickness, negative-thickness nodes
-- unique-contact provenance counts
-- CSV artifact paths
-- contact-atoms PDB path
-- timing metadata
-- messages
-
-### Why it matters
-
-This is where the pipeline first turns the atom cloud into structured geometric evidence.
-
----
-
-## 11.5 Stage 5 — surface preparation and trust-domain definition
-
-### Purpose
-
-Convert Stage 4 raw evidence into seeds, interpolation masks, exclusion masks, and the reliable core used later for smooth analysis.
-
-### Main constructs
-
-The stage produces:
-
-- `z_outer_seed`
-- `z_inner_seed`
-- `inside_disk_mask`
-- `raw_valid_mask`
-- `outer_seed_mask`
-- `inner_seed_mask`
-- `paired_seed_mask`
-- `boundary_exclusion_mask`
-- `interp_allowed_outer_mask`
-- `interp_allowed_inner_mask`
-- `paired_interp_allowed_mask`
-- `hard_invalid_mask`
-- `reliable_core_mask`
-
-### Derived parameters
-
-If not explicitly set, the stage derives sensible geometry-dependent defaults such as boundary margin, support radius, and reliable radius.
-
-### Outputs
-
-`GeometryStage5SurfacePrepResult` includes all masks, seed fields, provenance sets, derived radii, artifact paths, and messages.
-
-### Meaning
-
-This stage defines the branch’s practical quality-control geometry. It is the trust boundary for later smoothing, derivatives, and curvature.
-
----
-
-## 11.6 Stage 6 — surface reconstruction
-
-### Purpose
-
-Reconstruct continuous outer and inner scalar surfaces over the patch grid from Stage 5 seeds and interpolation-allowed nodes.
-
-### Representation
-
-The shell is represented as two scalar fields over XY:
-
-- `z_outer_reconstructed`
-- `z_inner_reconstructed`
-
-### Outputs
-
-`GeometryStage6SurfaceReconstructionResult` includes:
-
-- reconstructed outer/inner fields
-- masks for seeds, interpolation, hard-invalid, reconstructed, final-valid-analysis, non-crossing adjustment, and OBJ vertex usage
-- counts for reconstructed, seed, interpolation, valid, adjusted, and unresolved nodes
-- iteration statistics
-- reconstructed separation statistics
-- mesh counts
-- CSV paths
-- mesh paths
-- messages
-
-### Important limitation
-
-This is still a regular-grid scalar-surface formulation, not a native manifold shell model.
-
----
-
-## 11.7 Stage 7 — smoothing / regularization
-
-### Purpose
-
-Regularize the reconstructed Stage 6 surfaces into smoother, analysis-ready fields.
-
-### Supported methods
-
-The code currently supports:
+Stage 7 regularizes Stage 6 surfaces. The config exposes two methods:
 
 - `smooth`
 - `thin_plate_grid_fit`
 
-### Outputs
+The result includes smoothed outer/inner fields, masks, fit metadata, solver iteration metadata, Stage 7 vs Stage 6 delta summaries, smooth separation summaries, mesh paths, and semantic labels such as normal orientation, thickness-definition label, and metric-surface definition :contentReference[oaicite:53]{index=53}.
 
-`GeometryStage7SmoothedSurfaceResult` includes:
+Tests demonstrate that Stage 7 supports seed-pinning or non-pinning behavior, reliable-core-restricted metric domains, boundary-condition modes, deterministic fitting, optional delta-map export, and both legacy smoothing and thin-plate grid fitting modes :contentReference[oaicite:54]{index=54}.
 
-- smoothed outer/inner fields
-- reconstructed/reliable-core/smooth-valid/metric-domain masks
-- non-crossing adjustment mask
-- counts for smooth-valid and metric-domain nodes
-- iteration and solver statistics
-- method labels and parameter echoes
-- residual and bending-energy summaries
-- Stage 7 vs Stage 6 delta summaries
-- separation statistics
-- semantic metadata such as:
-  - outer normal orientation label
-  - inner normal orientation label
-  - thickness definition label
-  - metric surface definition label
-- CSV paths
-- mesh paths and counts
-- messages
+### Stage 8 — derivative estimation
 
-### Critical observation
+Stage 8 estimates first and second derivatives for both outer and inner smoothed surfaces and tracks fit diagnostics and explicit failure reasons. The result includes derivative fields, RMS and absolute residuals, condition indicators, neighbor counts, and a family of masks indicating why a node failed, such as insufficient support, rank deficiency, poor conditioning, high residual, or bad boundary geometry :contentReference[oaicite:55]{index=55}.
 
-The result explicitly labels local thickness as `vertical_z_difference`. That is honest, but it also means physically rigorous thickness is still not fully solved here.
+Tests show exact recovery on synthetic quadratics, deterministic invalidation on pathological neighborhoods, and explicit export of derivative CSV artifacts :contentReference[oaicite:56]{index=56}.
 
----
+### Stage 9 — curvature computation and QC
 
-## 11.8 Stage 8 — derivative estimation
+Stage 9 computes mean curvature, oriented mean curvature, Gaussian curvature, graph-normal-versus-radial alignment metrics, orientation-flip flags, and QC layers such as global-tail and local-spike flags plus confidence classes. Summary statistics are stored directly in the result object :contentReference[oaicite:57]{index=57}.
 
-### Purpose
+Tests show correct plane and paraboloid behavior, invalid-input and non-finite-output guards, QC flags, and CSV export schema including QC columns :contentReference[oaicite:58]{index=58}.
 
-Estimate first and second derivatives of the Stage 7 smoothed surfaces on the metric domain.
+### Stage 10 — thickness computation
 
-### What the stage computes
+This is the newest and most important correction relative to older documentation. Stage 10 computes thickness using configurable methods:
 
-For both outer and inner surfaces it stores:
+- `vertical`
+- `radial`
 
-- `dz/dx`
-- `dz/dy`
-- `d2z/dx2`
-- `d2z/dy2`
-- `d2z/dxdy`
+Its result stores both vertical and radial thickness-related fields, domain masks, invalid-reason masks, active-method summaries, domain-fraction summaries, semantic metadata, and CSV artifact paths :contentReference[oaicite:59]{index=59}.
 
-It also tracks fit-quality metadata such as:
+The public API and tests reveal several important semantic decisions:
 
-- RMS residual
-- maximum absolute residual
-- condition indicator
-- neighbor count
-- max support radius
+- vertical thickness is still explicitly defined from Stage 7 smooth surfaces as an outer-minus-inner graph-surface separation
+- radial thickness is treated as a separate explicit mode, not as a silent reinterpretation
+- Stage 10 can optionally restrict its domain to the Stage 9 curvature-valid subset
+- radial mode tracks special failure reasons such as no bracket, root failure, and outside-inner-domain loss
+- Stage 10 is allowed to run even when Stage 8 failed, because vertical thickness fundamentally depends on Stage 7 surfaces, not on derivatives
 
-### Validation masks
+All of that is exercised in tests, so it is not speculative :contentReference[oaicite:60]{index=60}.
 
-The stage explicitly distinguishes failure reasons through masks such as:
+## 14. Geometry config model
 
-- insufficient points
-- rank deficiency
-- poor conditioning
-- high residual
-- bad boundary-neighbor geometry
+The entire geometry pipeline is driven by `FoldPatchAnalysisConfig`. This config is broad and stage-aware. It includes:
 
-### Outputs
+- top-level enable/debug/fold/radius/grid controls
+- Stage 5 boundary/support/reliable-domain controls
+- Stage 6 reconstruction and mesh export controls
+- Stage 7 method and regularization controls
+- Stage 8 derivative-fit controls
+- Stage 9 curvature QC controls
+- Stage 10 thickness controls
+- output prefix and rotated-capsid export flag
 
-`GeometryStage8DerivativeEstimationResult` includes derivative fields, fit diagnostics, validity masks, counts, CSV paths, and messages.
+This matters because the branch favors explicit structured config over hidden constants :contentReference[oaicite:61]{index=61}.
 
-### Why this is a big deal
-
-This means the branch now already has a real numerical differential-geometry bridge. It is no longer just reconstructing surfaces.
-
----
-
-## 11.9 Stage 9 — curvature computation and QC
-
-### Purpose
-
-Compute curvature fields from Stage 8 derivatives and attach quality-control flags.
-
-### Fields computed
-
-For both outer and inner surfaces the stage stores:
-
-- mean curvature
-- oriented mean curvature
-- Gaussian curvature
-- graph-normal vs radial alignment metrics
-- outward-normal alignment flags
-- orientation-flip-applied flags
-
-### QC outputs
-
-The stage also produces QC masks and counts including:
-
-- invalid nonfinite input/output
-- global tail flags for Gaussian curvature
-- local spike flags
-- QC warning flags
-- confidence classes
-
-### Summaries
-
-The result includes domain-level summaries such as:
-
-- mean / median / stddev / min / max for `H`
-- mean / median / stddev / min / max for oriented `H`
-- mean / median / stddev / min / max for `K`
-- curvature-valid fraction of metric domain
-- curvature-valid fraction of derivative-valid nodes
-- QC fractions
-
-### Outputs
-
-`GeometryStage9CurvatureComputationResult` includes curvature fields, QC flags, summary statistics, CSV paths, and messages.
-
-### Consequence
-
-Older branch narratives that say “curvature is not implemented yet” are now false. Curvature is present. What is still missing is a broader post-curvature scientific metric/reporting layer.
-
----
-
-## 12. Result aggregation model
+## 15. Geometry result aggregation model
 
 The top-level `GeometryAnalysisResult` aggregates:
 
@@ -910,861 +405,113 @@ The top-level `GeometryAnalysisResult` aggregates:
 - `stage7_smooth`
 - `stage8_derivatives`
 - `stage9_curvature`
+- `stage10_thickness`
+- `run_summary_json_path`
 - `messages`
 
-This is the branch’s true high-level analysis contract.
+This is the top-level analysis contract that downstream reporting and future features should consume :contentReference[oaicite:62]{index=62}.
 
----
+## 16. Output and artifact model
 
-## 13. Artifact/export model of the geometry pipeline
+The branch is artifact-rich by design.
 
-The geometry branch is artifact-heavy by design, which is a strength for debugging numerical work.
-
-## 13.1 PDB artifacts
-
-The branch can emit:
-
+### PDB-like artifacts
+- final full capsid export
 - rotated capsid export
-- Stage 2 patch-atom subset PDB
-- Stage 4 contact-atom subset PDB
-- final current capsid export via `--export-final`
+- Stage 2 patch subset export
+- Stage 4 contact-atom export
 
-## 13.2 CSV artifacts
+### CSV artifacts
+- Stage 3 normalized atom tables
+- Stage 4 raw sheet and mask CSVs
+- Stage 5 seed/mask summaries
+- Stage 6 reconstructed field CSVs
+- Stage 7 smoothed fields and delta maps
+- Stage 8 derivative CSVs
+- Stage 9 curvature CSVs
+- Stage 10 thickness CSVs
 
-The stage results expose paths for many CSV outputs, including:
+### Mesh artifacts
+- Stage 6 reconstructed meshes
+- Stage 7 smoothed meshes
+- selectable OBJ or STL export
+- split or combined inner/outer output modes
 
-- normalized atoms
-- raw outer/inner sheets
-- seed fields
-- masks
-- reconstructed fields
-- smoothed fields
-- delta maps
-- derivative fields
-- curvature fields
-- stage-level summaries
+Tests repeatedly enforce existence, determinism, and schema expectations for these artifacts :contentReference[oaicite:63]{index=63}.
 
-## 13.3 Mesh artifacts
+## 17. Numerical design character of the branch
 
-The branch supports mesh export for reconstructed and smoothed surfaces, with format control and split inner/outer options.
+The real numerical character of the branch, based on the API and tests, is this:
 
-## 13.4 Design meaning
+- it is **grid-first**
+- it represents the local shell as two graph surfaces over XY
+- it is strongly **fold-aligned** and local, not a global shell manifold framework
+- it explicitly separates raw contact evidence, trust-domain construction, reconstruction, smoothing, derivatives, curvature, and thickness
+- it relies heavily on explicit masks and deterministic artifact generation for debuggability
 
-The branch is built around inspectable intermediate state. That is exactly what you want in a geometry-analysis codebase.
+This is a practical and inspectable architecture, but it is still graph-surface based rather than a general mesh-native shell geometry framework.
 
----
+## 18. What is strong in the current design
 
-## 14. Current numerical design characteristics
+The strongest parts of the branch are:
 
-## 14.1 The pipeline is still grid-first
+- explicit frame/orientation semantics
+- centralized symmetry math
+- clean separation between persistent structure and derived analysis state
+- formal stage boundaries with rich result structs
+- strong provenance preservation
+- explicit invalid-reason masks instead of undifferentiated failure
+- artifact-oriented debugging
+- modular tests with synthetic fixtures and integration runs
 
-The local shell is analyzed on a regular XY grid aligned to the selected fold axis after Stage 1.
+Those are real strengths visible directly in the current contracts and tests :contentReference[oaicite:64]{index=64} :contentReference[oaicite:65]{index=65}.
 
-## 14.2 The shell representation is two scalar sheets
+## 19. Limitations and technical debt visible from the inspected surface
 
-The shell is represented as:
+Several limitations are also clear.
 
-- outer height map
-- inner height map
+First, the older internal docs lag the code. The public API and tests already include Stage 10, while the stale technical guide still frames Stage 9 as the end of the implemented numerical path :contentReference[oaicite:66]{index=66} :contentReference[oaicite:67]{index=67} :contentReference[oaicite:68]{index=68}.
 
-This is simple and practical, but it is not a general-purpose shell manifold representation.
+Second, the build links only one large geometry pipeline source file, `src/geometry_analysis.cpp`, for a very wide set of responsibilities. That strongly suggests implementation concentration in a single compilation unit, which is survivable now and likely to become maintenance debt as the pipeline keeps expanding :contentReference[oaicite:69]{index=69}.
 
-## 14.3 Derivatives and curvature are local grid-based numerical estimates
+Third, the geometric representation remains a local graph-surface model aligned to a selected fold axis. That is excellent for the intended patch analysis and naturally limiting for more general shell representations.
 
-Stage 8 and Stage 9 show that the branch has moved into differential geometry, but still in the context of local polynomial/grid-based estimation, not a more general mesh-native DG framework.
+Fourth, some semantics remain explicitly limited even when honestly labeled. For example, vertical thickness is still graph-surface separation, and radial thickness carries explicit domain-loss limitations in its own API/tests rather than pretending to solve the problem universally :contentReference[oaicite:70]{index=70} :contentReference[oaicite:71]{index=71}.
 
-## 14.4 Thickness remains semantically limited
+## 20. Bottom-line technical conclusion
 
-Even with Stage 9 present, the Stage 7 metadata still says the local thickness definition is vertical Z difference. That remains a conceptual limitation.
+The `geometry` branch should be understood as a **fold-aligned local shell reconstruction and differential-geometry analysis pipeline** on top of a C++17 structural capsid core.
 
-## 14.5 QC is explicit but heuristic
+It already includes:
 
-The branch now has explicit masks and thresholds for trust-domain construction, derivative validity, and curvature outlier/spike detection. That is good engineering, but it is still heuristic QC, not uncertainty propagation.
-
----
-
-## 15. What is structurally strong right now
-
-The following parts are strong enough to build on directly:
-
-## 15.1 Frame handling is explicit
-
-The combination of `Capsid::OrientationState`, `geometry_symmetry`, and `reorientation_workflow` is solid and should be reused.
-
-## 15.2 Stage boundaries are real
-
-The staged result structs are explicit, data-rich, and suitable as extension points.
-
-## 15.3 Provenance is treated seriously
-
-The code preserves atom pointers, contact provenance, and validity masks instead of collapsing everything into anonymous numeric fields.
-
-## 15.4 The pipeline already reaches curvature
-
-The branch is further along than earlier specs implied. It already reconstructs surfaces, regularizes them, estimates derivatives, and computes curvature with QC.
-
-## 15.5 Artifact-oriented debugging is built in
-
-That is one of the most valuable architectural features for future numerical development.
-
----
-
-## 16. Current limitations and technical debt
-
-Here is the blunt version.
-
-## 16.1 `geometry_analysis.cpp` is doing too much
-
-The geometry subsystem is still concentrated in one very large implementation file. That file now likely mixes:
-
-- stage orchestration
-- numerical kernels
-- validation
-- mesh writing
-- CSV writing
-- provenance logic
-- summary serialization
-
-That is survivable in the short term and a liability in the medium term.
-
-## 16.2 Final scientific metric synthesis is still incomplete
-
-The branch now has curvature, but it still lacks a cleaner top-level post-analysis layer for results such as:
-
-- thickness summaries beyond vertical gap semantics
-- patch area metrics
-- consolidated QC reports
-- one coherent final analysis summary object for publication-facing outputs
-
-## 16.3 The shell model is still local and graph-based
-
-Everything assumes a local height-field representation relative to the selected axis. That is fine for small, well-behaved patches and limiting for more general geometry.
-
-## 16.4 Mesh export is downstream utility, not geometric truth
-
-The mesh outputs are useful artifacts, but the underlying truth representation remains the scalar grid fields.
-
-## 16.5 Stage naming in external docs is behind the code
-
-The repository docs lag the actual implementation. Future development should trust the headers and code first.
-
----
-
-## 17. Natural extension points for new functionality
-
-## 17.1 Post-Stage-9 reporting layer
-
-The cleanest next addition is a dedicated module that consumes Stage 7/8/9 outputs and produces a final scientific summary:
-
-- thickness summaries
-- area estimates
-- reliability summaries
-- consolidated geometry reports
-
-## 17.2 Better thickness definitions
-
-A high-value next step is to add:
-
-- normal-projected thickness
-- explicit distinction between vertical and normal-based thickness
-- summary comparison between both
-
-## 17.3 Additional metric-domain QC
-
-The branch already contains the ingredients for stronger confidence measures:
-
-- interpolation fraction
-- derivative-valid fraction
-- curvature-valid fraction
-- outlier/spike burden
-- non-crossing adjustment burden
-
-## 17.4 Solver and representation upgrades
-
-Possible future directions include:
-
-- better Stage 6/7 solvers
-- extracted sparse-system backends
-- anisotropic smoothing
-- confidence-weighted fitting
-- eventually mesh-native analysis
-
----
-
-## 18. Recommended refactor boundaries before major expansion
-
-If this branch will keep growing, the following split is worth doing early:
-
-- `geometry_patch_selection.*`
-- `geometry_patch_normalization.*`
-- `geometry_raw_sheet.*`
-- `geometry_surface_prep.*`
-- `geometry_surface_reconstruction.*`
-- `geometry_surface_smoothing.*`
-- `geometry_derivatives.*`
-- `geometry_curvature.*`
-- `geometry_surface_io.*`
-- `geometry_mesh_export.*`
-
-The main problem is not that the current code is conceptually wrong. The problem is that continued growth in one implementation file will make correctness harder to maintain.
-
----
-
-## 19. Bottom-line technical conclusion
-
-The current `geometry` branch is best described as a **fold-aligned local shell reconstruction and differential-geometry analysis pipeline** on top of the CapDAT structural core.
-
-It already has:
-
-- canonical fold math
-- explicit frame mutation semantics
-- cylindrical patch extraction
+- parser and structural hierarchy
+- protein-only structural acceptance policy
+- internal subunit reconstruction beyond raw PDB chain semantics
+- explicit in-place frame mutation semantics
+- canonical icosahedral fold math
+- deterministic fold-centered patch extraction
 - vdW-normalized analytical patch representation
-- raw sheet detection
+- raw envelope detection
 - trust-domain preparation
 - surface reconstruction
-- surface regularization
+- optional smoothing and thin-plate fitting
 - derivative estimation
 - curvature computation with QC
-- artifact exports across multiple stages
+- thickness computation with vertical and radial modes
+- heavy intermediate artifact export
+- broad geometry-focused tests
 
-It still lacks:
+So the honest state is this: this branch is not “early scaffolding” anymore. It is already a substantial scientific-numerical subsystem. The next development work should treat it with that level of seriousness.
 
-- a cleaner final scientific metric/report layer
-- stronger thickness definitions
-- cleaner module decomposition
-- a less monolithic geometry implementation layout
 
-That is the honest state. The branch is already substantial and usable as a development base, but it is also far enough along that sloppy extension work will create avoidable architecture debt fast.
 
 
 
 
 
-# CapDAT Geometry Branch — Synthesized Development Guide for Implementing New Functionality
 
-## 1. Start by classifying the feature correctly
 
-Most bad implementations begin with putting the feature in the wrong layer.
 
-## Put it in the parser only if
-
-- the new information comes directly from raw file records
-- the acceptance policy changes
-- structural reconstruction rules change
-- the data belongs to the persistent biological model itself
-
-## Put it in `Capsid` or the persistent domain only if
-
-- the state is authoritative and long-lived
-- multiple workflows need it as structural truth
-- it is not merely temporary analysis output
-
-## Put it in `geometry_symmetry` if
-
-- it is reusable icosahedral math
-- it involves fold lookup, axis geometry, direction comparison, IAU logic, or generic rotations
-- more than one future module could need it
-
-## Put it in `reorientation_workflow` if
-
-- it is a coordinate-transform workflow
-- it mutates the current frame
-- it needs request/result semantics
-- it must update `Capsid::OrientationState`
-
-## Put it in geometry analysis or a sibling geometry module if
-
-- it operates on accepted coordinates after parsing
-- it is patch logic, surface logic, derivative logic, curvature logic, or metric logic
-- it is derived analysis rather than parsing
-
-## Put it in export code only if
-
-- the logic is pure serialization
-- it writes already-computed state to files
-- it should not decide the scientific algorithm
-
-That classification step is not optional. If you skip it, you will place logic incorrectly and spend the rest of the work compensating for that mistake.
-
----
-
-## 2. Respect the current workflow instead of inventing a parallel one
-
-The branch already has a real staged analysis pipeline. Reuse it.
-
-## Current geometry workflow
-
-1. parse input file into `Capsid`
-2. compute structural summary
-3. optionally run standalone reorientation
-4. or run geometry analysis:
-   1. Stage 1 align requested fold to `+Z`
-   2. Stage 2 select cylindrical patch
-   3. Stage 3 normalize analytical patch
-   4. Stage 4 detect raw inner/outer sheets
-   5. Stage 5 prepare seeds, masks, and reliable core
-   6. Stage 6 reconstruct surfaces
-   7. Stage 7 smooth / regularize
-   8. Stage 8 estimate derivatives
-   9. Stage 9 compute curvature and QC
-5. optionally export current full capsid state
-
-## Non-negotiable rule
-
-If your feature depends on fold-centered local geometry, do **not** rebuild preprocessing from scratch. Start from the existing stage outputs unless there is a hard technical reason not to.
-
----
-
-## 3. Know the safest extension points
-
-## 3.1 Best place for new scientific metrics
-
-The cleanest current insertion point is **after Stage 9**.
-
-Why:
-
-- Stage 7 already gives smoothed surfaces
-- Stage 8 gives derivatives
-- Stage 9 gives curvature and QC masks
-- Stage 5 still provides the reliable-core and trust-domain semantics
-
-That means a new scientific metrics layer should usually consume:
-
-- `GeometryStage7SmoothedSurfaceResult`
-- `GeometryStage8DerivativeEstimationResult`
-- `GeometryStage9CurvatureComputationResult`
-- possibly `GeometryStage5SurfacePrepResult`
-
-## Best module shape
-
-- `include/geometry_metrics.hpp`
-- `src/geometry_metrics.cpp`
-- `tests/geometry_metrics_tests.cpp`
-
-## Why this is the best next move
-
-Because it adds real scientific value without destabilizing the established Stage 1–9 pipeline.
-
----
-
-## 3.2 Best place for new smoothing / regularization methods
-
-Add them to Stage 7 only if they still conceptually belong to “surface regularization over the existing grid fields.”
-
-Current Stage 7 already supports:
-
-- `smooth`
-- `thin_plate_grid_fit`
-
-If the new method still produces the same kind of outer/inner smoothed scalar fields, extend Stage 7.
-
-If the method changes representation too much, do not force it into Stage 7. Create a sibling module.
-
----
-
-## 3.3 Best place for new differential-geometry refinements
-
-If the change affects:
-
-- local derivative fitting
-- support geometry for derivatives
-- derivative quality filters
-- derivative-confidence logic
-
-then it belongs in Stage 8 or a dedicated sibling derivative module.
-
-If the change affects:
-
-- curvature formulas
-- orientation conventions
-- curvature QC logic
-- confidence labeling for curvature
-
-then it belongs in Stage 9 or a curvature sibling module.
-
----
-
-## 4. Never ignore frame semantics
-
-This branch already solved one major class of bugs by making frame state explicit. Do not reintroduce them.
-
-## Always know which frame your feature assumes
-
-Possible assumptions are:
-
-- original parsed frame
-- current arbitrary in-memory frame
-- fold-aligned Stage 1 working frame
-- downstream geometry-analysis frame after Stage 1
-
-## The authoritative source
-
-Use `Capsid::orientationState()`.
-
-## Rule
-
-If your feature assumes the selected fold is aligned to `+Z`, make that precondition explicit. Do not silently assume it.
-
-## Practical pattern
-
-For new local geometry work, require one of:
-
-- successful Stage 1 result
-- or later stage results that already guarantee the working frame
-
-Anything else is asking for garbage geometry.
-
----
-
-## 5. Reuse existing result contracts instead of inventing new containers
-
-The branch already gives you the main data boundaries you need.
-
-## Existing useful contracts
-
-- `PatchAtom`
-- `AnalyticalPatch`
-- `GeometryPreparationResult`
-- `GeometryPatchSelectionResult`
-- `GeometryPatchNormalizationResult`
-- `GeometryStage4RawSheetResult`
-- `GeometryStage5SurfacePrepResult`
-- `GeometryStage6SurfaceReconstructionResult`
-- `GeometryStage7SmoothedSurfaceResult`
-- `GeometryStage8DerivativeEstimationResult`
-- `GeometryStage9CurvatureComputationResult`
-- `GeometryAnalysisResult`
-
-## Do not do this
-
-Do not create random parallel containers for:
-
-- patch atoms
-- masks
-- derivative maps
-- curvature maps
-- reliable-domain logic
-- provenance data
-
-unless the existing result objects truly cannot support the feature.
-
-Most duplicate containers are just unacknowledged design drift.
-
----
-
-## 6. Physical placement of new code
-
-## Good pattern for a new read-only analysis feature
-
-Use:
-
-- `include/<feature>.hpp`
-- `src/<feature>.cpp`
-- `tests/<feature>_tests.cpp`
-
-Example:
-
-- `include/geometry_metrics.hpp`
-- `src/geometry_metrics.cpp`
-- `tests/geometry_metrics_tests.cpp`
-
-## Good pattern for helper extraction
-
-If repeated logic appears across geometry stages, extract helpers into focused internal modules such as:
-
-- `geometry_grid_utils.*`
-- `geometry_surface_io.*`
-- `geometry_mesh_export.*`
-- `geometry_derivative_utils.*`
-- `geometry_curvature_utils.*`
-
-## Bad pattern
-
-Do not keep adding unrelated blocks to `geometry_analysis.cpp` forever. That file is already a future maintenance trap.
-
----
-
-## 7. Coding style the branch clearly prefers
-
-Match the branch style or your code will feel bolted on.
-
-## The visible style is
-
-- plain config structs
-- plain result structs
-- explicit stage entry functions
-- explicit validation
-- deterministic control flow
-- logger-based runtime messaging
-- artifact paths carried in result objects
-- provenance preserved where possible
-
-## That means
-
-Good additions look like:
-
-- `FeatureConfig`
-- `FeatureResult`
-- `runFeature(...)`
-
-Bad additions look like:
-
-- hidden state in constructors
-- giant side effects
-- implicit global behavior
-- algorithm logic embedded directly in CLI parsing
-- undocumented mutations to persistent domain objects
-
-The codebase is not built around OO cleverness. It is built around explicit structured workflow.
-
----
-
-## 8. Correct design pattern for a new metrics module
-
-This is likely the next high-value extension area, so do it cleanly.
-
-## 8.1 Inputs
-
-Take only the upstream data you really need.
-
-Typical read-only input set:
-
-- `const GeometryStage7SmoothedSurfaceResult& stage7`
-- `const GeometryStage8DerivativeEstimationResult& stage8`
-- `const GeometryStage9CurvatureComputationResult& stage9`
-- `const GeometryStage5SurfacePrepResult& stage5`
-- `const FoldPatchAnalysisConfig& config`
-- `Logger* logger`
-
-## 8.2 Config
-
-Create a dedicated config if the feature needs its own knobs.
-
-Do **not** automatically stuff every new parameter into `FoldPatchAnalysisConfig`.
-
-Add new options to `FoldPatchAnalysisConfig` only when:
-
-- the parameter is core to the geometry-analysis pipeline itself
-- it must be controlled directly at the top-level geometry CLI
-
-Otherwise, a feature-local config is cleaner.
-
-## 8.3 Result
-
-Return a plain result struct containing:
-
-- success flag
-- scalar summaries
-- optional per-node fields
-- optional QC summaries
-- optional artifact paths
-- messages
-
-## 8.4 Export strategy
-
-If the feature writes CSVs or summaries, keep the computational logic separate from the file formatting logic as much as possible.
-
-Do not mix formulas and serialization into one giant untestable block.
-
----
-
-## 9. Specific advice for likely next features
-
-## 9.1 Better thickness metrics
-
-This is the most obvious remaining scientific gap.
-
-## Wrong move
-
-Treat `z_outer - z_inner` as the final thickness definition for everything.
-
-That is easy and incomplete.
-
-## Better move
-
-Implement both:
-
-- `vertical_thickness`
-- `normal_projected_thickness` or an explicitly improved shell-thickness estimate
-
-Then report them separately and say exactly what each means.
-
-## Good first deliverable
-
-A read-only metrics module that computes over the metric domain:
-
-- mean vertical thickness
-- median thickness
-- min/max thickness
-- robust spread
-- valid coverage fraction
-- interpolation burden
-- non-crossing-adjustment burden
-
-That is useful immediately and does not require a representation rewrite.
-
----
-
-## 9.2 Patch area metrics
-
-This is another clean addition.
-
-Useful distinctions:
-
-- projected XY patch area
-- reconstructed outer surface area
-- reconstructed inner surface area
-- maybe mean-surface area if defined later
-
-Do not conflate them. A projected disk area is not the same thing as reconstructed shell area.
-
----
-
-## 9.3 Final QC synthesis
-
-The branch already computes many partial QC signals. A good next feature is to consolidate them.
-
-Good candidates:
-
-- metric-domain fraction of inside-disk nodes
-- derivative-valid fraction
-- curvature-valid fraction
-- Stage 7 non-crossing adjustment fraction
-- Stage 8 fit-failure reason burden
-- Stage 9 tail/spike burden
-
-That gives users a practical “can I trust this patch?” summary instead of making them inspect many CSVs manually.
-
----
-
-## 9.4 New Stage 7 methods
-
-If you add a new Stage 7 method:
-
-1. extend `FoldPatchAnalysisConfig::Stage7Method`
-2. add CLI parsing in `main.cpp`
-3. keep the same Stage 7 result contract
-4. implement a dedicated internal solver function
-5. wire it through `runGeometryAnalysisStage7SurfaceSmoothing(...)`
-6. add targeted tests
-
-## Non-negotiable rule
-
-Do not invent a method-specific ad hoc output shape if it still belongs to Stage 7. Keep the stage contract stable.
-
----
-
-## 9.5 New derivative estimation logic
-
-If you improve Stage 8:
-
-- preserve the explicit failure masks
-- preserve fit diagnostics
-- preserve nodewise validity semantics
-
-The current Stage 8 contract is already good because it distinguishes why a node failed. Do not collapse that into one generic “invalid” flag.
-
----
-
-## 9.6 New curvature logic
-
-If you improve Stage 9:
-
-- keep outward/inward normal semantics explicit
-- keep orientation-flip tracking explicit
-- preserve QC flag layers
-- preserve summary statistics
-
-Do not silently change curvature sign conventions without exposing that clearly in result metadata.
-
----
-
-## 10. Use `geometry_symmetry` aggressively
-
-Whenever you need:
-
-- fold lookup
-- fold direction
-- angle to fold
-- point-to-axis distance
-- direction alignment
-- IAU logic
-- proper-rotation checks
-
-use `geometry_symmetry`.
-
-## Rule
-
-If you are hardcoding fold vectors or writing custom fold-axis math in a new feature, you are almost certainly doing it wrong.
-
----
-
-## 11. How to wire a new CLI-controlled feature cleanly
-
-Follow the existing `main.cpp` pattern.
-
-## Correct steps
-
-1. add local CLI variables near related options
-2. parse the new flag in the argument loop
-3. validate only high-level invariants in `main.cpp`
-4. map CLI values into config structs
-5. keep all real feature logic out of `main.cpp`
-6. call a dedicated module function after prerequisites are ready
-
-## Wrong steps
-
-Do not:
-
-- put numerical kernels inside `main.cpp`
-- build one-off ad hoc execution branches with hidden semantics
-- bypass the stage pipeline because it seems faster
-
-That shortcut becomes permanent technical debt.
-
----
-
-## 12. Testing strategy for new features
-
-The branch already tells you the preferred testing model.
-
-## Use three layers
-
-### Layer 1 — small deterministic unit tests
-
-Best for:
-
-- formulas
-- mask logic
-- derivative kernels
-- curvature sign conventions
-- solver invariants
-
-### Layer 2 — small synthetic geometry tests
-
-Best for:
-
-- stage behavior
-- provenance preservation
-- failure masks
-- support-geometry logic
-
-### Layer 3 — integration tests on realistic input
-
-Best for:
-
-- artifact generation
-- CLI wiring
-- end-to-end sanity
-- nonzero result checks
-
-## What not to do
-
-Do not rely only on one giant real-capsid test. It is slow, opaque, and terrible for debugging numerical regressions.
-
----
-
-## 13. When to refactor before extending
-
-Be honest about this. Sometimes adding the feature “directly” is the wrong move.
-
-## Refactor first if
-
-- you need to touch the same helper logic in multiple stages
-- you are adding another large writer block to `geometry_analysis.cpp`
-- you cannot test the new logic without running huge orchestration
-- Stage 7 or Stage 8 branching is getting crowded
-- you are about to add a second or third related feature into the same giant file section
-
-## Blunt truth
-
-The branch is already beyond the point where “just one more block in `geometry_analysis.cpp`” is a healthy long-term habit.
-
----
-
-## 14. Practical roadmap for the next useful development cycle
-
-If the goal is to add value fast without damaging the architecture, do this:
-
-## Step 1
-
-Create a dedicated post-Stage-9 metrics module.
-
-## Step 2
-
-Implement final scalar summary outputs such as:
-
-- vertical thickness summaries
-- patch area summaries
-- derivative-valid fraction
-- curvature-valid fraction
-- QC burden summaries
-
-## Step 3
-
-Export:
-
-- metrics summary CSV
-- metrics summary JSON
-- optional per-node thickness or QC maps
-
-## Step 4
-
-Only then add improved thickness definitions based on normals.
-
-## Step 5
-
-After that, consider deeper solver upgrades if they are still necessary.
-
-Why this order matters: it gives scientifically useful outputs sooner and avoids getting trapped in solver perfectionism before the branch exposes the final metrics users actually need.
-
----
-
-## 15. Minimal checklist before writing code
-
-Use this every time.
-
-1. What layer does this feature belong to?
-2. What frame assumptions does it make?
-3. Can it consume an existing stage result instead of rebuilding state?
-4. Should it reuse `geometry_symmetry`?
-5. Does it need its own config struct?
-6. Does it need its own result struct?
-7. Does it need artifact export?
-8. Does it need CLI wiring?
-9. Does it need a dedicated test target?
-10. Is `geometry_analysis.cpp` really the right home, or should this be a new module?
-
-If you cannot answer those clearly, you are not ready to implement the feature cleanly.
-
----
-
-## 16. Bottom-line implementation advice
-
-## Do this
-
-- build on the existing stage outputs
-- keep frame semantics explicit
-- preserve provenance
-- return plain result structs
-- separate algorithm logic from CLI glue
-- keep exports structured and inspectable
-- add deterministic tests
-- extract modules once a helper category repeats
-
-## Do not do this
-
-- duplicate fold math
-- parse raw coordinate text inside geometry features
-- assume the working frame silently
-- hide scientific semantics in export code
-- stuff real algorithm logic into `main.cpp`
-- keep inflating `geometry_analysis.cpp` without restraint
-
-## Best immediate next move
-
-Build a **read-only post-Stage-9 metrics/reporting module**. It is the highest-value extension that matches the current architecture, uses the existing Stage 1–9 pipeline correctly, and closes the biggest remaining gap between numerical geometry and user-facing scientific output.
 
 
 
