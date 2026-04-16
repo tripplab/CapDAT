@@ -20,6 +20,15 @@ namespace {
 constexpr double kVdwRadiusFallbackAngstrom = 1.70;
 constexpr std::string_view kWarningMessagePrefix = "[[WARNING]] ";
 constexpr std::string_view kNoteMessagePrefix = "[[NOTE]] ";
+constexpr std::string_view kInfoMessagePrefix = "[[INFO]] ";
+constexpr std::string_view kAlwaysInfoPrefixGeometryRunSummary = "Geometry run summary JSON:";
+
+bool shouldAlwaysLogGeometryInfo(const std::string& message) {
+    if (message.rfind(kAlwaysInfoPrefixGeometryRunSummary, 0) == 0) {
+        return true;
+    }
+    return false;
+}
 
 void logMessages(const std::vector<std::string>& messages, Logger* logger) {
     if (logger == nullptr) {
@@ -34,7 +43,15 @@ void logMessages(const std::vector<std::string>& messages, Logger* logger) {
             logger->note(message.substr(kNoteMessagePrefix.size()));
             continue;
         }
-        logger->info(message);
+        if (message.rfind(kInfoMessagePrefix, 0) == 0) {
+            logger->info(message.substr(kInfoMessagePrefix.size()));
+            continue;
+        }
+        if (shouldAlwaysLogGeometryInfo(message)) {
+            logger->info(message);
+            continue;
+        }
+        logger->debug(message);
     }
 }
 

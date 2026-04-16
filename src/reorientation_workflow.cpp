@@ -144,7 +144,7 @@ ReorientationResult applyReorientationWorkflow(Capsid& capsid,
 
     if (logger != nullptr) {
         for (const std::string& message : result.messages) {
-            logger->info(message);
+            logger->debug(message);
         }
     }
 
