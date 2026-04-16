@@ -209,16 +209,42 @@ if(CAPDAT_BUILD_TESTS)
     add_test(NAME capdat_export_capsid_tests COMMAND capdat_export_capsid_tests)
 
     add_test(NAME capdat_cli_export_only
-             COMMAND capsid_analyzer --input ${PROJECT_SOURCE_DIR}/data/1cwp_full.vdb --export-final cli_export_only.pdb)
+             COMMAND ${CMAKE_COMMAND} -E chdir ${PROJECT_SOURCE_DIR}
+                     $<TARGET_FILE:capsid_analyzer> --input 1cwp --export-final cli_export_only.pdb)
     add_test(NAME capdat_cli_fold_to_z_export
-             COMMAND capsid_analyzer --input ${PROJECT_SOURCE_DIR}/data/1cwp_full.vdb --reorient --align-fold 5_0 --align-axis z --export-final cli_fold_z.pdb)
+             COMMAND ${CMAKE_COMMAND} -E chdir ${PROJECT_SOURCE_DIR}
+                     $<TARGET_FILE:capsid_analyzer> --input 1cwp --reorient --align-fold 5_0 --align-axis z --export-final cli_fold_z.pdb)
     add_test(NAME capdat_cli_fold_to_x_export
-             COMMAND capsid_analyzer --input ${PROJECT_SOURCE_DIR}/data/1cwp_full.vdb --reorient --align-fold 5_0 --align-axis x --export-final cli_fold_x.pdb)
+             COMMAND ${CMAKE_COMMAND} -E chdir ${PROJECT_SOURCE_DIR}
+                     $<TARGET_FILE:capsid_analyzer> --input 1cwp --reorient --align-fold 5_0 --align-axis x --export-final cli_fold_x.pdb)
     add_test(NAME capdat_cli_vector_to_y_export
-             COMMAND capsid_analyzer --input ${PROJECT_SOURCE_DIR}/data/1cwp_full.vdb --reorient --align-vector 1,1,1 --align-axis y --export-final cli_vec_y.pdb)
+             COMMAND ${CMAKE_COMMAND} -E chdir ${PROJECT_SOURCE_DIR}
+                     $<TARGET_FILE:capsid_analyzer> --input 1cwp --reorient --align-vector 1,1,1 --align-axis y --export-final cli_vec_y.pdb)
     add_test(NAME capdat_cli_invalid_combo
-             COMMAND capsid_analyzer --input ${PROJECT_SOURCE_DIR}/data/1cwp_full.vdb --align-fold 5_0)
+             COMMAND ${CMAKE_COMMAND} -E chdir ${PROJECT_SOURCE_DIR}
+                     $<TARGET_FILE:capsid_analyzer> --input 1cwp --align-fold 5_0)
     set_tests_properties(capdat_cli_invalid_combo PROPERTIES WILL_FAIL TRUE)
+    add_test(NAME capdat_cli_resolve_input_success
+             COMMAND ${CMAKE_COMMAND} -E chdir ${PROJECT_SOURCE_DIR}
+                     $<TARGET_FILE:capsid_analyzer> --input 1cwp)
+    set_tests_properties(capdat_cli_resolve_input_success PROPERTIES
+                         PASS_REGULAR_EXPRESSION "data/1cwp_full\\.vdb")
+
+    add_test(NAME capdat_cli_missing_data_dir
+             COMMAND bash -lc "cd '${PROJECT_BINARY_DIR}' && output=$('$<TARGET_FILE:capsid_analyzer>' --input 1cwp 2>&1); status=$?; [ $status -ne 0 ] && grep -Fq \"required data directory not found: data/\" <<< \"$output\"")
+
+    add_test(NAME capdat_cli_missing_pdb_file
+             COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && output=$('$<TARGET_FILE:capsid_analyzer>' --input 9zzz 2>&1); status=$?; [ $status -ne 0 ] && grep -Fq \"input file not found for PDBID '9zzz': data/9zzz_full.vdb\" <<< \"$output\"")
+
+    add_test(NAME capdat_cli_reject_path_input
+             COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && output=$('$<TARGET_FILE:capsid_analyzer>' --input data/1cwp_full.vdb 2>&1); status=$?; [ $status -ne 0 ] && grep -Fq -- \"--input expects a PDB identifier only\" <<< \"$output\"")
+
+    add_test(NAME capdat_cli_reject_filename_input
+             COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && output=$('$<TARGET_FILE:capsid_analyzer>' --input 1cwp.vdb 2>&1); status=$?; [ $status -ne 0 ] && grep -Fq -- \"--input expects a PDB identifier only\" <<< \"$output\"")
+
+    add_test(NAME capdat_cli_reject_malformed_input
+             COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && output=$('$<TARGET_FILE:capsid_analyzer>' --input .vdb 2>&1); status=$?; [ $status -ne 0 ] && grep -Fq -- \"--input expects a PDB identifier only\" <<< \"$output\"")
+
 endif()
 
 # ------------------------------------------------------------------------------
