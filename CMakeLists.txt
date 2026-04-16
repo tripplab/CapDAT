@@ -245,6 +245,19 @@ if(CAPDAT_BUILD_TESTS)
     add_test(NAME capdat_cli_reject_malformed_input
              COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && output=$('$<TARGET_FILE:capsid_analyzer>' --input .vdb 2>&1); status=$?; [ $status -ne 0 ] && grep -Fq -- \"--input expects a PDB identifier only\" <<< \"$output\"")
 
+    add_test(NAME capdat_cli_geometry_canonical_root
+             COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && rm -rf results/1cwp/2_0 && '$<TARGET_FILE:capsid_analyzer>' --input 1cwp --geometry-analysis >/tmp/capdat_geom_root.log 2>&1 && test -d results && test -d results/1cwp && test -d results/1cwp/2_0 && test -f results/1cwp/2_0/stage_run_summary.json")
+    add_test(NAME capdat_cli_geometry_fold_name_success
+             COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && rm -rf results/1cwp/5_0 && '$<TARGET_FILE:capsid_analyzer>' --input 1cwp --geometry-analysis --geometry_fold_name 5_0 >/tmp/capdat_geom_foldname.log 2>&1 && test -d results/1cwp/5_0 && test -f results/1cwp/5_0/stage_run_summary.json")
+    add_test(NAME capdat_cli_geometry_fold_name_invalid
+             COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && output=$('$<TARGET_FILE:capsid_analyzer>' --input 1cwp --geometry-analysis --geometry_fold_name bad_fold 2>&1); status=$?; [ $status -ne 0 ] && grep -Fq \"Invalid canonical fold name\" <<< \"$output\"")
+    add_test(NAME capdat_cli_geometry_fold_name_mutual_exclusion
+             COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && output=$('$<TARGET_FILE:capsid_analyzer>' --input 1cwp --geometry-analysis --geometry_fold_name 5_0 --geometry_fold_type 5 --geometry_fold_index 0 2>&1); status=$?; [ $status -ne 0 ] && grep -Fq \"mutually exclusive\" <<< \"$output\"")
+    add_test(NAME capdat_cli_geometry_clean_results_false
+             COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && mkdir -p results/1cwp/5_0 && echo keep > results/1cwp/5_0/keep.txt && '$<TARGET_FILE:capsid_analyzer>' --input 1cwp --geometry-analysis --geometry_fold_name 5_0 --clean-results-dir false >/tmp/capdat_geom_clean_false.log 2>&1 && test -f results/1cwp/5_0/keep.txt")
+    add_test(NAME capdat_cli_geometry_clean_results_true
+             COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && mkdir -p results/1cwp/5_0/old/nested && echo stale > results/1cwp/5_0/old/nested/stale.txt && '$<TARGET_FILE:capsid_analyzer>' --input 1cwp --geometry-analysis --geometry_fold_name 5_0 --clean-results-dir true >/tmp/capdat_geom_clean_true.log 2>&1 && test -d results && test -d results/1cwp && test ! -e results/1cwp/5_0/old && test -f results/1cwp/5_0/stage_run_summary.json")
+
 endif()
 
 # ------------------------------------------------------------------------------
