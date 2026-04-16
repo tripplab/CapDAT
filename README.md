@@ -233,7 +233,7 @@ A **successful CTest run** should look similar to:
 A **successful sample parser run** should look similar to:
 
 `[YYYY-MM-DD HH:MM:SS]`
-`[INFO] Starting CapDAT`
+`[INFO] Starting CapDAT [YYYY-MM-DD HH:MM:SS]`
 `[YYYY-MM-DD HH:MM:SS] [INFO] Opening input file: data/1cwp_full.vdb`
 `[YYYY-MM-DD HH:MM:SS] [INFO] Parsing completed successfully`
 `[YYYY-MM-DD HH:MM:SS] [INFO] Starting extended structural summary geometry`
@@ -254,7 +254,7 @@ A **successful sample parser run** should look similar to:
 `  z: [...]`
 `Axis spans: x=... y=... z=...`
 `Runtime (s):             ...`
-`[INFO] Run completed successfully`
+`[INFO] Run completed successfully [YYYY-MM-DD HH:MM:SS]`
 `[YYYY-MM-DD HH:MM:SS]`
 
 ## Notes for This Branch
