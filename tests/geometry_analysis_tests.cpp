@@ -380,7 +380,7 @@ void testStage4PipelineUsesEnvelopeContactsAndProvenance() {
     config.grid_spacing = 0.5;
     config.min_atoms_in_patch = 2;
     config.stage10_enabled = false;
-    config.output_prefix = "stage4_envelope_regression";
+    config.output_root_dir = "stage4_envelope_regression";
 
     const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
     assertTrue(result.success, "Stage 1-7 pipeline should succeed for Stage 4 envelope regression fixture");
@@ -519,7 +519,7 @@ void testStage2PatchSelectionAndTraceability() {
     config.enabled = true;
     config.cylinder_radius = 2.0;
     config.min_atoms_in_patch = 2;
-    config.output_prefix = "stage2_patch_traceability";
+    config.output_root_dir = "stage2_patch_traceability";
 
     GeometryPreparationResult stage1;
     stage1.success = true;
@@ -635,7 +635,7 @@ void testStage2ToStage3Integration() {
     config.enabled = true;
     config.cylinder_radius = 2.0;
     config.min_atoms_in_patch = 2;
-    config.output_prefix = "stage3_integration";
+    config.output_root_dir = "stage3_integration";
 
     GeometryPreparationResult stage1;
     stage1.success = true;
@@ -667,7 +667,7 @@ void testStage3InfersAndFallsBackWhenElementMissing() {
     config.enabled = true;
     config.cylinder_radius = 2.0;
     config.min_atoms_in_patch = 2;
-    config.output_prefix = "stage3_unknown";
+    config.output_root_dir = "stage3_unknown";
 
     GeometryPreparationResult stage1;
     stage1.success = true;
@@ -694,7 +694,7 @@ void testStage4RoleClassificationAndCsvAndPdb() {
     config.grid_spacing = 2.0;
     config.min_atoms_in_patch = 2;
     config.debug = true;
-    config.output_prefix = "stage4_contacts";
+    config.output_root_dir = "stage4_contacts";
 
     GeometryPreparationResult stage1;
     stage1.success = true;
@@ -799,7 +799,7 @@ void testStage4DeterministicOutputs() {
     config.min_atoms_in_patch = 2;
     config.debug = true;
     config.stage10_enabled = false;
-    config.output_prefix = "stage4_deterministic";
+    config.output_root_dir = "stage4_deterministic";
 
     const auto first = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
     assertTrue(first.success, "first Stage 1-4 run should succeed");
@@ -876,7 +876,7 @@ void testStage1ToStage4Integration() {
     config.min_atoms_in_patch = 2;
     config.debug = true;
     config.stage10_enabled = false;
-    config.output_prefix = "stage4_integration";
+    config.output_root_dir = "stage4_integration";
 
     const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
     assertTrue(result.success, "Stage 1-4 integration should succeed");
@@ -1021,7 +1021,7 @@ void testStage4SummaryCsvIncludesExplicitPatchAndSerialProvenanceColumns() {
     config.cylinder_radius = 2.0;
     config.grid_spacing = 1.0;
     config.min_atoms_in_patch = 2;
-    config.output_prefix = "test_stage4_provenance_columns";
+    config.output_root_dir = "test_stage4_provenance_columns";
 
     const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
     assertTrue(result.success, "Stage 1-5 pipeline should succeed");
@@ -1150,7 +1150,7 @@ void testStage5DebugCsvExportAndDeterminism() {
     const GeometryStage4RawSheetResult stage4 = makeSyntheticStage4ResultForStage5();
     FoldPatchAnalysisConfig config;
     config.debug = true;
-    config.output_prefix = "stage5_debug";
+    config.output_root_dir = "stage5_debug";
     config.cylinder_radius = 2.0;
     config.grid_spacing = 1.0;
     config.stage5_support_radius = 1.5;
@@ -1200,7 +1200,7 @@ void testStage1ToStage5Integration() {
     config.grid_spacing = 1.0;
     config.min_atoms_in_patch = 2;
     config.debug = true;
-    config.output_prefix = "stage5_integration";
+    config.output_root_dir = "stage5_integration";
 
     const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
     assertTrue(result.success, "Stage 1-5 integration should succeed");
@@ -1402,7 +1402,7 @@ void testStage6DebugCsvArtifactsAndObjExportAndDeterminism() {
 
     FoldPatchAnalysisConfig config;
     config.debug = true;
-    config.output_prefix = "stage6_debug";
+    config.output_root_dir = "stage6_debug";
     config.stage6_export_obj_meshes = true;
     config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::obj;
     config.stage6_split_in_out_meshes = true;
@@ -1496,7 +1496,7 @@ void testStage6StlExport() {
     ++stage5.paired_seed_node_count;
 
     FoldPatchAnalysisConfig config;
-    config.output_prefix = "stage6_stl";
+    config.output_root_dir = "stage6_stl";
     config.stage6_export_obj_meshes = true;
     config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::stl;
     config.stage6_split_in_out_meshes = true;
@@ -1518,7 +1518,7 @@ void testStage6StlExport() {
 void testStage6CombinedExportDefault() {
     GeometryStage5SurfacePrepResult stage5 = makeSyntheticStage5ResultForStage6();
     FoldPatchAnalysisConfig config;
-    config.output_prefix = "stage6_combined";
+    config.output_root_dir = "stage6_combined";
     config.stage6_export_obj_meshes = true;
     config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::obj;
 
@@ -1630,7 +1630,7 @@ void testStage7MeshExportAndDeterminism() {
     SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
     FoldPatchAnalysisConfig config;
     config.debug = true;
-    config.output_prefix = "stage7_debug";
+    config.output_root_dir = "stage7_debug";
     config.stage7_export_meshes = true;
     config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::obj;
     config.stage6_split_in_out_meshes = true;
@@ -1789,7 +1789,7 @@ void testStage7ThinPlateDeterminism() {
     SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
     FoldPatchAnalysisConfig config;
     config.debug = true;
-    config.output_prefix = "stage7_fit_debug";
+    config.output_root_dir = "stage7_fit_debug";
     config.stage7_export_meshes = false;
     config.stage7_method = FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit;
 
@@ -1815,7 +1815,7 @@ void testStage7S7S6DeltaCsvsThinPlate() {
     SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
     FoldPatchAnalysisConfig config;
     config.debug = true;
-    config.output_prefix = "stage7_s7s6_fit";
+    config.output_root_dir = "stage7_s7s6_fit";
     config.stage7_export_meshes = false;
     config.stage7_method = FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit;
     config.stage7_export_s7s6_deltas = true;
@@ -1927,7 +1927,7 @@ void testStage7S7S6DeltaCsvsLegacySmooth() {
     SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
     FoldPatchAnalysisConfig config;
     config.debug = true;
-    config.output_prefix = "stage7_s7s6_smooth";
+    config.output_root_dir = "stage7_s7s6_smooth";
     config.stage7_export_meshes = false;
     config.stage7_method = FoldPatchAnalysisConfig::Stage7Method::smooth;
     config.stage7_export_s7s6_deltas = true;
@@ -1953,7 +1953,7 @@ void testStage7S7S6DeltasDisabledByDefault() {
     SyntheticStage7Inputs inputs = makeSyntheticStage7Inputs();
     FoldPatchAnalysisConfig config;
     config.debug = true;
-    config.output_prefix = "stage7_s7s6_disabled";
+    config.output_root_dir = "stage7_s7s6_disabled";
     config.stage7_export_meshes = false;
     // default should remain disabled unless explicitly requested.
     assertTrue(!config.stage7_export_s7s6_deltas, "s7s6 delta export flag should default to false");
@@ -2126,7 +2126,7 @@ void testStage8RankDeficientOrPoorConditioningRejection() {
 void testStage8CsvExportSmoke() {
     const SyntheticStage8Inputs inputs = makeSyntheticStage8QuadraticInputs();
     FoldPatchAnalysisConfig config;
-    config.output_prefix = "stage8_smoke";
+    config.output_root_dir = "stage8_smoke";
     config.stage8_export_csv = true;
     config.stage8_fit_radius = 2.5;
     config.stage8_min_points = 9;
@@ -2375,9 +2375,9 @@ void testStage10SummaryCsvUsesCorrectedContractFields() {
     stage9.curvature_valid_node_count = 2;
 
     FoldPatchAnalysisConfig config;
-    config.output_prefix = "stage10_contract_fields_test";
+    config.output_root_dir = "stage10_contract_fields_test";
     config.stage10_export_csv = true;
-    removeIfExists(config.output_prefix + "_thickness_vertical_summary.csv");
+    removeIfExists(config.output_root_dir + "_thickness_vertical_summary.csv");
 
     const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
     assertTrue(stage10.success, "Stage 10 should succeed while exporting summary CSV");
@@ -2510,8 +2510,8 @@ void testStage10RadialPOutInCsvExport() {
     FoldPatchAnalysisConfig config;
     config.stage10_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
     config.stage10_export_csv = true;
-    config.output_prefix = "stage10_radial_points_csv";
-    removeIfExists(config.output_prefix + "_thickness_radial_P_out_P_in_t.csv");
+    config.output_root_dir = "stage10_radial_points_csv";
+    removeIfExists(config.output_root_dir + "_thickness_radial_P_out_P_in_t.csv");
 
     const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
     assertTrue(stage10.success, "radial Stage 10 should succeed for P_out/P_in export test");
@@ -2618,8 +2618,8 @@ void testStage10RadialSummaryCsvSchemaUsesActiveAndLimitationFields() {
     FoldPatchAnalysisConfig config;
     config.stage10_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
     config.stage10_export_csv = true;
-    config.output_prefix = "stage10_radial_summary_semantics_test";
-    removeIfExists(config.output_prefix + "_thickness_radial_summary.csv");
+    config.output_root_dir = "stage10_radial_summary_semantics_test";
+    removeIfExists(config.output_root_dir + "_thickness_radial_summary.csv");
 
     const auto stage10 = runGeometryAnalysisStage10ThicknessComputation(stage7, stage8, stage9, config, nullptr);
     assertTrue(stage10.success, "radial Stage 10 should succeed while exporting summary CSV");
@@ -2762,7 +2762,7 @@ void testStage9CsvExportSmoke() {
     auto stage8 = makeSyntheticStage8ResultForStage9();
     const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
     FoldPatchAnalysisConfig config;
-    config.output_prefix = "stage9_smoke";
+    config.output_root_dir = "stage9_smoke";
     config.stage9_export_csv = true;
     const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
 
@@ -2810,7 +2810,7 @@ void testStage9CsvExportIncludesQcColumns() {
     auto stage8 = makeSyntheticStage8ResultForStage9();
     const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
     FoldPatchAnalysisConfig config;
-    config.output_prefix = "stage9_qc_columns";
+    config.output_root_dir = "stage9_qc_columns";
     config.stage9_export_csv = true;
 
     const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
@@ -2848,7 +2848,7 @@ void testStage1ToStage6Integration() {
     config.min_atoms_in_patch = 2;
     config.debug = true;
     config.stage6_export_obj_meshes = true;
-    config.output_prefix = "stage6_integration";
+    config.output_root_dir = "stage6_integration";
 
     const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
     assertTrue(result.success, "Stage 1-6 integration should succeed");
@@ -2900,7 +2900,7 @@ void testStage1ToStage7Integration() {
     config.debug = true;
     config.stage6_export_obj_meshes = false;
     config.stage7_export_meshes = true;
-    config.output_prefix = "stage7_integration";
+    config.output_root_dir = "stage7_integration";
 
     const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
     assertTrue(result.success, "Stage 1-7 integration should succeed");
@@ -2968,7 +2968,7 @@ void testStage1ToStage9ThinPlateIntegration() {
     config.stage8_min_directional_span = 0.1;
     config.stage9_enabled = true;
     config.stage9_export_csv = true;
-    config.output_prefix = "stage7_fit_integration";
+    config.output_root_dir = "stage7_fit_integration";
 
     const auto result = runFoldPatchGeometryAnalysis(capsid, config, makeParserConfig(), nullptr);
     assertTrue(result.success, "Stage 1-9 integration with thin-plate should succeed");

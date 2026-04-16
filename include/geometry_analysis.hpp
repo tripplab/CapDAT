@@ -46,6 +46,7 @@ struct FoldPatchAnalysisConfig {
     bool debug = false;
     int fold_type = 2;
     int fold_index = 0;
+    std::string fold_name = "2_0";
     double cylinder_radius = 12.0;
     double delta_vdw = 0.0;
     double grid_spacing = 2.0;
@@ -102,7 +103,7 @@ struct FoldPatchAnalysisConfig {
     MeshExportFormat stage6_mesh_export_format = MeshExportFormat::stl;
     bool stage6_split_in_out_meshes = false;
     bool export_rotated_capsid = false;
-    std::string output_prefix = "geometry";
+    std::string output_root_dir = "results/unknown/2_0";
 };
 
 struct GeometryPreparationResult {

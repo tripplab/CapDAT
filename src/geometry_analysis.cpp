@@ -4,6 +4,7 @@
 #include "timer.hpp"
 
 #include <cmath>
+#include <filesystem>
 #include <cctype>
 #include <chrono>
 #include <fstream>
@@ -21,6 +22,14 @@ constexpr double kVdwRadiusFallbackAngstrom = 1.70;
 constexpr std::string_view kWarningMessagePrefix = "[[WARNING]] ";
 constexpr std::string_view kNoteMessagePrefix = "[[NOTE]] ";
 constexpr std::string_view kInfoMessagePrefix = "[[INFO]] ";
+
+
+std::string geometryArtifactPath(const FoldPatchAnalysisConfig& config, const std::string& filename) {
+    const std::filesystem::path root_dir(config.output_root_dir);
+    std::error_code ec;
+    std::filesystem::create_directories(root_dir, ec);
+    return (root_dir / filename).string();
+}
 
 void logMessages(const std::vector<std::string>& messages, Logger* logger) {
     if (logger == nullptr) {
@@ -140,7 +149,8 @@ bool writeGeometryRunSummaryJson(const FoldPatchAnalysisConfig& config,
     out << "    \"delta_vdw\": " << config.delta_vdw << ",\n";
     out << "    \"grid_spacing\": " << config.grid_spacing << ",\n";
     out << "    \"min_atoms_in_patch\": " << config.min_atoms_in_patch << ",\n";
-    out << "    \"output_prefix\": \"" << jsonEscape(config.output_prefix) << "\"\n";
+    out << "    \"output_root_dir\": \"" << jsonEscape(config.output_root_dir) << "\",\n";
+    out << "    \"fold_name\": \"" << jsonEscape(config.fold_name) << "\"\n";
     out << "  },\n";
     out << "  \"stage5\": {\n";
     out << "    \"boundary_margin\": " << config.stage5_boundary_margin << ",\n";
@@ -1880,7 +1890,7 @@ GeometryPreparationResult prepareGeometryAnalysisStage1(Capsid& capsid,
 
     if (config.export_rotated_capsid) {
         ExportCapsidConfig writer_config;
-        writer_config.output_path = config.output_prefix + "_rotated_capsid.pdb";
+        writer_config.output_path = geometryArtifactPath(config, "_rotated_capsid.pdb");
         writer_config.emit_header_comments = true;
         writer_config.emit_ter_records = true;
         writer_config.emit_end_record = true;
@@ -1953,7 +1963,7 @@ GeometryPatchSelectionResult runGeometryAnalysisStage2PatchSelection(
     }
 
     ExportCapsidConfig writer_config;
-    writer_config.output_path = config.output_prefix + "_patch_atoms.pdb";
+    writer_config.output_path = geometryArtifactPath(config, "_patch_atoms.pdb");
     writer_config.emit_header_comments = true;
     writer_config.emit_ter_records = true;
     writer_config.emit_end_record = true;
@@ -2108,7 +2118,7 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.messages.push_back("Geometry Stage 4 grid spacing: " + std::to_string(config.grid_spacing));
     result.messages.push_back("Geometry Stage 4 cylinder radius: " + std::to_string(config.cylinder_radius));
     if (config.debug) {
-        result.stage3_normalized_atoms_csv_path = config.output_prefix + "_stage3_normalized_atoms.csv";
+        result.stage3_normalized_atoms_csv_path = geometryArtifactPath(config, "_stage3_normalized_atoms.csv");
         if (!writeStage3NormalizedAtomsCsv(result.stage3_normalized_atoms_csv_path, stage3_result)) {
             throw std::runtime_error("Failed to write Stage 3 normalized atoms CSV for Stage 4 input traceability");
         }
@@ -2289,15 +2299,15 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.unique_contact_serial_union_count = result.unique_contact_serial_union.size();
 
     if (config.debug) {
-        result.outer_csv_path = config.output_prefix + "_outer_raw.csv";
-        result.inner_csv_path = config.output_prefix + "_inner_raw.csv";
-        result.valid_mask_csv_path = config.output_prefix + "_valid_mask_raw.csv";
-        result.outer_only_mask_csv_path = config.output_prefix + "_outer_only_mask_raw.csv";
-        result.inner_only_mask_csv_path = config.output_prefix + "_inner_only_mask_raw.csv";
-        result.negative_thickness_mask_csv_path = config.output_prefix + "_negative_thickness_mask_raw.csv";
-        result.summary_csv_path = config.output_prefix + "_stage4_summary.csv";
+        result.outer_csv_path = geometryArtifactPath(config, "_outer_raw.csv");
+        result.inner_csv_path = geometryArtifactPath(config, "_inner_raw.csv");
+        result.valid_mask_csv_path = geometryArtifactPath(config, "_valid_mask_raw.csv");
+        result.outer_only_mask_csv_path = geometryArtifactPath(config, "_outer_only_mask_raw.csv");
+        result.inner_only_mask_csv_path = geometryArtifactPath(config, "_inner_only_mask_raw.csv");
+        result.negative_thickness_mask_csv_path = geometryArtifactPath(config, "_negative_thickness_mask_raw.csv");
+        result.summary_csv_path = geometryArtifactPath(config, "_stage4_summary.csv");
     }
-    result.contact_atoms_pdb_path = config.output_prefix + "_raw_contact_atoms.pdb";
+    result.contact_atoms_pdb_path = geometryArtifactPath(config, "_raw_contact_atoms.pdb");
 
     if (config.debug) {
         if (!writeStage4CsvOuter(result)) {
@@ -2662,14 +2672,14 @@ GeometryStage5SurfacePrepResult runGeometryAnalysisStage5SurfacePreparation(
     }
 
     if (config.debug) {
-        result.outer_seed_csv_path = config.output_prefix + "_outer_seed.csv";
-        result.inner_seed_csv_path = config.output_prefix + "_inner_seed.csv";
-        result.paired_seed_mask_csv_path = config.output_prefix + "_paired_seed_mask.csv";
-        result.boundary_exclusion_mask_csv_path = config.output_prefix + "_boundary_exclusion_mask.csv";
-        result.interp_allowed_mask_csv_path = config.output_prefix + "_interp_allowed_mask.csv";
-        result.hard_invalid_mask_csv_path = config.output_prefix + "_hard_invalid_mask.csv";
-        result.reliable_core_mask_csv_path = config.output_prefix + "_reliable_core_mask.csv";
-        result.summary_csv_path = config.output_prefix + "_stage5_summary.csv";
+        result.outer_seed_csv_path = geometryArtifactPath(config, "_outer_seed.csv");
+        result.inner_seed_csv_path = geometryArtifactPath(config, "_inner_seed.csv");
+        result.paired_seed_mask_csv_path = geometryArtifactPath(config, "_paired_seed_mask.csv");
+        result.boundary_exclusion_mask_csv_path = geometryArtifactPath(config, "_boundary_exclusion_mask.csv");
+        result.interp_allowed_mask_csv_path = geometryArtifactPath(config, "_interp_allowed_mask.csv");
+        result.hard_invalid_mask_csv_path = geometryArtifactPath(config, "_hard_invalid_mask.csv");
+        result.reliable_core_mask_csv_path = geometryArtifactPath(config, "_reliable_core_mask.csv");
+        result.summary_csv_path = geometryArtifactPath(config, "_stage5_summary.csv");
 
         if (!writeStage5SeedCsv(result, result.outer_seed_csv_path, "z_outer_seed", result.z_outer_seed)) {
             throw std::runtime_error("Failed to write Stage 5 outer seed CSV");
@@ -2872,12 +2882,12 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
     result.mean_reconstructed_separation = separation_sum / static_cast<double>(separation_count);
 
     if (config.debug) {
-        result.outer_reconstructed_csv_path = config.output_prefix + "_outer_reconstructed.csv";
-        result.inner_reconstructed_csv_path = config.output_prefix + "_inner_reconstructed.csv";
-        result.reconstructed_mask_csv_path = config.output_prefix + "_reconstructed_mask.csv";
-        result.final_valid_analysis_mask_csv_path = config.output_prefix + "_final_valid_analysis_mask.csv";
-        result.non_crossing_adjustment_mask_csv_path = config.output_prefix + "_non_crossing_adjustment_mask.csv";
-        result.summary_csv_path = config.output_prefix + "_stage6_summary.csv";
+        result.outer_reconstructed_csv_path = geometryArtifactPath(config, "_outer_reconstructed.csv");
+        result.inner_reconstructed_csv_path = geometryArtifactPath(config, "_inner_reconstructed.csv");
+        result.reconstructed_mask_csv_path = geometryArtifactPath(config, "_reconstructed_mask.csv");
+        result.final_valid_analysis_mask_csv_path = geometryArtifactPath(config, "_final_valid_analysis_mask.csv");
+        result.non_crossing_adjustment_mask_csv_path = geometryArtifactPath(config, "_non_crossing_adjustment_mask.csv");
+        result.summary_csv_path = geometryArtifactPath(config, "_stage6_summary.csv");
 
         if (!writeStage6FieldCsv(
                 result, result.outer_reconstructed_csv_path, "z_outer_reconstructed", result.z_outer_reconstructed)) {
@@ -2911,8 +2921,8 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
         const bool use_stl = config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl;
         const std::string extension = use_stl ? ".stl" : ".obj";
         if (config.stage6_split_in_out_meshes) {
-            result.outer_obj_path = config.output_prefix + "_outer_surface" + extension;
-            result.inner_obj_path = config.output_prefix + "_inner_surface" + extension;
+            result.outer_obj_path = geometryArtifactPath(config, "_outer_surface") + extension;
+            result.inner_obj_path = geometryArtifactPath(config, "_inner_surface") + extension;
             if (use_stl) {
                 const Stage6StlExportResult outer_mesh =
                     writeStage6StlMesh(result.grid, result.obj_vertex_mask, result.z_outer_reconstructed, result.outer_obj_path);
@@ -2933,7 +2943,7 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
                 result.inner_obj_face_count = inner_obj.face_count;
             }
         } else {
-            result.outer_obj_path = config.output_prefix + "_surface" + extension;
+            result.outer_obj_path = geometryArtifactPath(config, "_surface") + extension;
             result.inner_obj_path = result.outer_obj_path;
             if (use_stl) {
                 const Stage6DualMeshExportResult combined =
@@ -3272,9 +3282,9 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     }
 
     if (config.stage7_export_s7s6_deltas) {
-        result.outer_delta_csv_path = config.output_prefix + "_s7s6_outer_delta.csv";
-        result.inner_delta_csv_path = config.output_prefix + "_s7s6_inner_delta.csv";
-        result.thickness_delta_csv_path = config.output_prefix + "_s7s6_thickness_delta.csv";
+        result.outer_delta_csv_path = geometryArtifactPath(config, "_s7s6_outer_delta.csv");
+        result.inner_delta_csv_path = geometryArtifactPath(config, "_s7s6_inner_delta.csv");
+        result.thickness_delta_csv_path = geometryArtifactPath(config, "_s7s6_thickness_delta.csv");
         if (!writeStage7DeltaCsv(result.grid,
                                  stage5_result.inside_disk_mask,
                                  stage5_result,
@@ -3311,13 +3321,13 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     }
 
     if (config.debug) {
-        result.outer_smooth_csv_path = config.output_prefix + "_outer_smooth.csv";
-        result.inner_smooth_csv_path = config.output_prefix + "_inner_smooth.csv";
-        result.smooth_valid_mask_csv_path = config.output_prefix + "_smooth_valid_mask.csv";
-        result.metric_domain_mask_csv_path = config.output_prefix + "_smooth_metric_domain_mask.csv";
+        result.outer_smooth_csv_path = geometryArtifactPath(config, "_outer_smooth.csv");
+        result.inner_smooth_csv_path = geometryArtifactPath(config, "_inner_smooth.csv");
+        result.smooth_valid_mask_csv_path = geometryArtifactPath(config, "_smooth_valid_mask.csv");
+        result.metric_domain_mask_csv_path = geometryArtifactPath(config, "_smooth_metric_domain_mask.csv");
         result.smooth_non_crossing_adjustment_mask_csv_path =
-            config.output_prefix + "_smooth_non_crossing_adjustment_mask.csv";
-        result.summary_csv_path = config.output_prefix + "_stage7_summary.csv";
+            geometryArtifactPath(config, "_smooth_non_crossing_adjustment_mask.csv");
+        result.summary_csv_path = geometryArtifactPath(config, "_stage7_summary.csv");
         if (!writeStage7FieldCsv(result, result.outer_smooth_csv_path, "z_outer_smooth", result.z_outer_smooth)) {
             throw std::runtime_error("Failed to write Stage 7 outer smooth CSV");
         }
@@ -3349,8 +3359,8 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
                                             ? "_thin_plate"
                                             : "_smooth";
         if (config.stage6_split_in_out_meshes) {
-            result.outer_mesh_path = config.output_prefix + mesh_prefix + "_outer_surface" + extension;
-            result.inner_mesh_path = config.output_prefix + mesh_prefix + "_inner_surface" + extension;
+            result.outer_mesh_path = geometryArtifactPath(config, "stage7" + mesh_prefix + "_outer_surface" + extension);
+            result.inner_mesh_path = geometryArtifactPath(config, "stage7" + mesh_prefix + "_inner_surface" + extension);
             if (use_stl) {
                 const Stage6StlExportResult outer_mesh =
                     writeStage6StlMesh(result.grid, result.metric_domain_mask, result.z_outer_smooth, result.outer_mesh_path);
@@ -3371,7 +3381,7 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
                 result.inner_mesh_face_count = inner_mesh.face_count;
             }
         } else {
-            result.outer_mesh_path = config.output_prefix + mesh_prefix + "_surface" + extension;
+            result.outer_mesh_path = geometryArtifactPath(config, "stage7" + mesh_prefix + "_surface" + extension);
             result.inner_mesh_path = result.outer_mesh_path;
             if (use_stl) {
                 const Stage6DualMeshExportResult combined = writeStage6StlMeshesCombined(
@@ -4523,11 +4533,11 @@ GeometryStage8DerivativeEstimationResult runGeometryAnalysisStage8DerivativeEsti
     }
 
     if (config.stage8_export_csv) {
-        result.outer_derivatives_csv_path = config.output_prefix + "_outer_derivatives.csv";
-        result.inner_derivatives_csv_path = config.output_prefix + "_inner_derivatives.csv";
-        result.derivative_valid_mask_csv_path = config.output_prefix + "_derivative_valid_mask.csv";
-        result.derivative_failure_reason_csv_path = config.output_prefix + "_derivative_failure_reasons.csv";
-        result.derivative_summary_csv_path = config.output_prefix + "_stage8_summary.csv";
+        result.outer_derivatives_csv_path = geometryArtifactPath(config, "_outer_derivatives.csv");
+        result.inner_derivatives_csv_path = geometryArtifactPath(config, "_inner_derivatives.csv");
+        result.derivative_valid_mask_csv_path = geometryArtifactPath(config, "_derivative_valid_mask.csv");
+        result.derivative_failure_reason_csv_path = geometryArtifactPath(config, "_derivative_failure_reasons.csv");
+        result.derivative_summary_csv_path = geometryArtifactPath(config, "_stage8_summary.csv");
         if (!writeStage8DerivativeCsv(result,
                                       result.outer_derivatives_csv_path,
                                       result.outer_dz_dx,
@@ -4946,10 +4956,10 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
     }
 
     if (config.stage9_export_csv) {
-        result.outer_curvature_csv_path = config.output_prefix + "_outer_curvature.csv";
-        result.inner_curvature_csv_path = config.output_prefix + "_inner_curvature.csv";
-        result.curvature_valid_mask_csv_path = config.output_prefix + "_curvature_valid_mask.csv";
-        result.curvature_summary_csv_path = config.output_prefix + "_curvature_summary.csv";
+        result.outer_curvature_csv_path = geometryArtifactPath(config, "_outer_curvature.csv");
+        result.inner_curvature_csv_path = geometryArtifactPath(config, "_inner_curvature.csv");
+        result.curvature_valid_mask_csv_path = geometryArtifactPath(config, "_curvature_valid_mask.csv");
+        result.curvature_summary_csv_path = geometryArtifactPath(config, "_curvature_summary.csv");
         if (!writeStage9CurvatureCsv(result,
                                      result.outer_curvature_csv_path,
                                      result.outer_mean_curvature_H,
@@ -5262,10 +5272,10 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
     if (config.stage10_export_csv) {
         const std::string method_suffix =
             config.stage10_thickness_method == FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial ? "radial" : "vertical";
-        result.thickness_vertical_csv_path = config.output_prefix + "_thickness_" + method_suffix + ".csv";
-        result.thickness_valid_mask_csv_path = config.output_prefix + "_thickness_" + method_suffix + "_valid_mask.csv";
-        result.thickness_invalid_reason_csv_path = config.output_prefix + "_thickness_" + method_suffix + "_invalid_reason.csv";
-        result.thickness_summary_csv_path = config.output_prefix + "_thickness_" + method_suffix + "_summary.csv";
+        result.thickness_vertical_csv_path = geometryArtifactPath(config, "_thickness_") + method_suffix + ".csv";
+        result.thickness_valid_mask_csv_path = geometryArtifactPath(config, "_thickness_") + method_suffix + "_valid_mask.csv";
+        result.thickness_invalid_reason_csv_path = geometryArtifactPath(config, "_thickness_") + method_suffix + "_invalid_reason.csv";
+        result.thickness_summary_csv_path = geometryArtifactPath(config, "_thickness_") + method_suffix + "_summary.csv";
         if (!writeStage10ThicknessCsv(result, result.thickness_vertical_csv_path)) {
             throw std::runtime_error("Failed to write Stage 10 thickness CSV");
         }
@@ -5279,7 +5289,7 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
             throw std::runtime_error("Failed to write Stage 10 thickness summary CSV");
         }
         if (config.stage10_thickness_method == FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial) {
-            result.thickness_radial_p_out_in_csv_path = config.output_prefix + "_thickness_radial_P_out_P_in_t.csv";
+            result.thickness_radial_p_out_in_csv_path = geometryArtifactPath(config, "_thickness_radial_P_out_P_in_t.csv");
             if (!writeStage10RadialPOutInCsv(result, result.thickness_radial_p_out_in_csv_path)) {
                 throw std::runtime_error("Failed to write Stage 10 radial P_out/P_in CSV");
             }
@@ -5414,7 +5424,7 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                      result.stage4_raw.success && result.stage5_prep.success && result.stage6_surfaces.success &&
                      result.stage7_smooth.success && result.stage8_derivatives.success && result.stage9_curvature.success &&
                      (!config.stage10_enabled || result.stage10_thickness.success);
-    const std::string run_summary_json_path = config.output_prefix + "_run_summary.json";
+    const std::string run_summary_json_path = geometryArtifactPath(config, "stage_run_summary.json");
     if (!writeGeometryRunSummaryJson(config, parser_config, run_summary_json_path)) {
         throw std::runtime_error("Failed to write geometry run summary JSON: " + run_summary_json_path);
     }
@@ -5556,7 +5566,7 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
     appendKeyValue(out,
                    "Run summary JSON",
                    result.run_summary_json_path.empty() ? "n/a" : result.run_summary_json_path);
-    appendKeyValue(out, "Output prefix", config.output_prefix);
+    appendKeyValue(out, "Output root", config.output_root_dir);
     out << '\n';
 
     out << "Coverage / trust\n";

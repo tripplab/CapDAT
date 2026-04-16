@@ -14,6 +14,7 @@
 #include <cctype>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -47,6 +48,64 @@ std::filesystem::path resolveInputPathFromPdbId(const std::string& normalized_pd
     return std::filesystem::path("data") / (normalized_pdb_id + "_full.vdb");
 }
 
+struct GeometryCanonicalPaths {
+    std::filesystem::path results_root_dir;
+    std::filesystem::path results_pdb_dir;
+    std::filesystem::path results_fold_dir;
+};
+
+void ensureDirectoryExistsOrThrow(const std::filesystem::path& dir_path, const std::string& label) {
+    std::error_code ec;
+    std::filesystem::create_directories(dir_path, ec);
+    if (ec) {
+        throw std::runtime_error("Error: failed to create " + label + " directory '" + dir_path.string() +
+                                 "': " + ec.message());
+    }
+}
+
+GeometryCanonicalPaths prepareCanonicalGeometryResultsRoot(const std::string& normalized_pdb_id,
+                                                           const std::string& resolved_fold_name,
+                                                           bool clean_results_dir) {
+    GeometryCanonicalPaths paths;
+    paths.results_root_dir = std::filesystem::path("results");
+    paths.results_pdb_dir = paths.results_root_dir / normalized_pdb_id;
+    paths.results_fold_dir = paths.results_pdb_dir / resolved_fold_name;
+
+    ensureDirectoryExistsOrThrow(paths.results_root_dir, "results root");
+    ensureDirectoryExistsOrThrow(paths.results_pdb_dir, "PDB");
+    ensureDirectoryExistsOrThrow(paths.results_fold_dir, "fold");
+
+    if (!clean_results_dir) {
+        return paths;
+    }
+
+    const std::filesystem::path canonical_results_root = std::filesystem::weakly_canonical(paths.results_root_dir);
+    const std::filesystem::path canonical_results_pdb = std::filesystem::weakly_canonical(paths.results_pdb_dir);
+    const std::filesystem::path canonical_results_fold = std::filesystem::weakly_canonical(paths.results_fold_dir);
+
+    if (canonical_results_fold == canonical_results_root || canonical_results_fold == canonical_results_pdb) {
+        throw std::runtime_error("Error: internal cleanup guard rejected non-fold cleanup target '" +
+                                 canonical_results_fold.string() + "'");
+    }
+
+    const std::string root_prefix = canonical_results_root.string();
+    const std::string fold_target = canonical_results_fold.string();
+    if (fold_target.size() <= root_prefix.size() || fold_target.compare(0, root_prefix.size(), root_prefix) != 0) {
+        throw std::runtime_error("Error: internal cleanup guard rejected cleanup target outside results root: '" +
+                                 canonical_results_fold.string() + "'");
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(canonical_results_fold)) {
+        std::error_code remove_ec;
+        std::filesystem::remove_all(entry.path(), remove_ec);
+        if (remove_ec) {
+            throw std::runtime_error("Error: failed to clean geometry fold directory entry '" + entry.path().string() +
+                                     "': " + remove_ec.message());
+        }
+    }
+    return paths;
+}
+
 }  // namespace
 
 /**
@@ -76,9 +135,12 @@ void printHelp(const std::string& program_name) {
 
   [Geometry]
       --geometry-analysis                    Run geometry analysis Stage 1 preparation
+                                            Geometry outputs are written under results/[PDBID]/[fold_name]/
       --debug                                Enable geometry debug artifact exports
       --geometry_fold_type <n>               Geometry fold type 2|3|5 (default: 2)
       --geometry_fold_index <n>              Geometry fold index for selected type (default: 0)
+      --geometry_fold_name <name>            Canonical fold name (2_0,2_1,3_0,3_1,5_0); mutually exclusive with type/index
+      --clean-results-dir <true|false>       If true, delete contents of results/[PDBID]/[fold_name]/ before writing outputs
       --geometry_cylinder_radius <A>         Geometry cylinder radius in angstroms (default: 12.0)
       --dvdW <A>                             Delta added to all assigned vdW radii in angstroms (default: 0.0)
       --geometry_grid_spacing <A>            Geometry Stage 4 XY grid spacing in angstroms (default: 2.0)
@@ -87,7 +149,6 @@ void printHelp(const std::string& program_name) {
       --geometry_support_radius <A>          Stage 5 interpolation support radius (default: auto)
       --geometry_min_support_nodes <n>       Stage 5 minimum nearby support seeds (default: 4)
       --geometry_reliable_radius <A>         Stage 5 reliable core radius (default: auto)
-      --geometry_out_prefix <path>           Prefix for geometry analysis outputs (default: geometry)
       --export_mesh_format <name>            Stage 6 mesh export format: obj|stl (default: stl)
       --split_in_out_mesh                    Export Stage 6 inner and outer meshes as separate files
       --surf_min_separation <A>              Stage 6 minimum outer-inner separation in angstroms (default: 0.0)
@@ -187,6 +248,11 @@ int main(int argc, char* argv[]) {
     bool debug = false;
     int geometry_fold_type = 2;
     int geometry_fold_index = 0;
+    bool geometry_fold_type_given = false;
+    bool geometry_fold_index_given = false;
+    bool geometry_fold_name_given = false;
+    std::string geometry_fold_name;
+    bool clean_results_dir = false;
     double geometry_cylinder_radius = 12.0;
     double delta_vdw = 0.0;
     double geometry_grid_spacing = 2.0;
@@ -195,7 +261,6 @@ int main(int argc, char* argv[]) {
     double geometry_support_radius = 0.0;
     std::size_t geometry_min_support_nodes = 4;
     double geometry_reliable_radius = 0.0;
-    std::string geometry_output_prefix = "geometry";
     FoldPatchAnalysisConfig::MeshExportFormat mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::stl;
     bool split_in_out_mesh = false;
     double surface_min_separation = 0.0;
@@ -349,6 +414,7 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Error: missing value for --geometry_fold_type\n";
                 return 1;
             }
+            geometry_fold_type_given = true;
             geometry_fold_type = std::stoi(argv[++i]);
             continue;
         }
@@ -357,7 +423,30 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Error: missing value for --geometry_fold_index\n";
                 return 1;
             }
+            geometry_fold_index_given = true;
             geometry_fold_index = std::stoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--geometry_fold_name") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_fold_name\n";
+                return 1;
+            }
+            geometry_fold_name_given = true;
+            geometry_fold_name = argv[++i];
+            continue;
+        }
+        if (arg == "--clean-results-dir") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --clean-results-dir\n";
+                return 1;
+            }
+            try {
+                clean_results_dir = parseBoolSwitch(argv[++i], "--clean-results-dir");
+            } catch (const std::runtime_error& ex) {
+                std::cerr << ex.what() << '\n';
+                return 1;
+            }
             continue;
         }
         if (arg == "--geometry_cylinder_radius") {
@@ -422,14 +511,6 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             geometry_reliable_radius = std::stod(argv[++i]);
-            continue;
-        }
-        if (arg == "--geometry_out_prefix") {
-            if (i + 1 >= argc) {
-                std::cerr << "Error: missing value for --geometry_out_prefix\n";
-                return 1;
-            }
-            geometry_output_prefix = argv[++i];
             continue;
         }
         if (arg == "--export_mesh_format") {
@@ -889,6 +970,15 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: --geometry-analysis cannot be combined with --reorient.\n";
         return 1;
     }
+    if (geometry_fold_name_given && (geometry_fold_type_given || geometry_fold_index_given)) {
+        std::cerr << "Error: --geometry_fold_name is mutually exclusive with --geometry_fold_type and "
+                     "--geometry_fold_index.\n";
+        return 1;
+    }
+    if (geometry_fold_type_given != geometry_fold_index_given) {
+        std::cerr << "Error: --geometry_fold_type and --geometry_fold_index must be provided together.\n";
+        return 1;
+    }
     if (geometry_s7_lambda <= 0.0) {
         std::cerr << "Error: --geometry_s7_lambda must be > 0\n";
         return 1;
@@ -963,6 +1053,21 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    geometry_symmetry::FoldDefinition resolved_geometry_fold;
+    try {
+        if (geometry_fold_name_given) {
+            resolved_geometry_fold = geometry_symmetry::foldByName(geometry_fold_name);
+        } else {
+            resolved_geometry_fold = geometry_symmetry::foldByTypeIndex(geometry_fold_type, geometry_fold_index);
+        }
+    } catch (const std::runtime_error& ex) {
+        std::cerr << ex.what() << '\n';
+        return 1;
+    }
+    geometry_fold_type = resolved_geometry_fold.fold_type;
+    geometry_fold_index = resolved_geometry_fold.fold_index;
+    geometry_fold_name = resolved_geometry_fold.name;
+
     Logger logger;
     if (quiet) {
         logger.setVerbosity(LogLevel::WARNING);
@@ -995,7 +1100,8 @@ int main(int argc, char* argv[]) {
     try {
         logger.info("Starting CapDAT");
         logger.info(std::string("Resolved input PDBID '") + normalized_pdb_id + "' to " + resolved_input_path);
-        logger.info(std::string("Opening input file: ") + resolved_input_path);
+        logger.info("Geometry fold selection resolved to canonical fold '" + geometry_fold_name + "' (type=" +
+                    std::to_string(geometry_fold_type) + ", index=" + std::to_string(geometry_fold_index) + ")");
 
         PdbParser parser(config, &logger);
         Capsid capsid = parser.parseFile(resolved_input_path);
@@ -1020,11 +1126,21 @@ int main(int argc, char* argv[]) {
             applyReorientationWorkflow(capsid, reorient_request, &logger);
         (void)reorient_result;
 
+        std::filesystem::path geometry_results_fold_dir;
+        if (geometry_analysis_requested) {
+            const GeometryCanonicalPaths canonical_paths =
+                prepareCanonicalGeometryResultsRoot(normalized_pdb_id, geometry_fold_name, clean_results_dir);
+            geometry_results_fold_dir = canonical_paths.results_fold_dir;
+            logger.info("Geometry canonical results root: " + geometry_results_fold_dir.string());
+            logger.info(std::string("Geometry results cleanup applied: ") + (clean_results_dir ? "true" : "false"));
+        }
+
         FoldPatchAnalysisConfig geometry_config;
         geometry_config.enabled = geometry_analysis_requested;
         geometry_config.debug = debug;
         geometry_config.fold_type = geometry_fold_type;
         geometry_config.fold_index = geometry_fold_index;
+        geometry_config.fold_name = geometry_fold_name;
         geometry_config.cylinder_radius = geometry_cylinder_radius;
         geometry_config.delta_vdw = delta_vdw;
         geometry_config.grid_spacing = geometry_grid_spacing;
@@ -1034,7 +1150,7 @@ int main(int argc, char* argv[]) {
         geometry_config.stage5_min_support_nodes = geometry_min_support_nodes;
         geometry_config.stage5_reliable_radius = geometry_reliable_radius;
         geometry_config.export_rotated_capsid = debug;
-        geometry_config.output_prefix = geometry_output_prefix;
+        geometry_config.output_root_dir = geometry_results_fold_dir.string();
         geometry_config.stage6_mesh_export_format = mesh_export_format;
         geometry_config.stage6_split_in_out_meshes = split_in_out_mesh;
         geometry_config.stage6_min_separation = surface_min_separation;
@@ -1085,6 +1201,11 @@ int main(int argc, char* argv[]) {
         if (!export_final_output_path.empty()) {
             ExportCapsidConfig writer_config;
             writer_config.output_path = export_final_output_path;
+            if (geometry_analysis_requested) {
+                writer_config.output_path =
+                    (geometry_results_fold_dir / std::filesystem::path(export_final_output_path).filename()).string();
+                logger.info("Geometry mode: --export-final redirected to canonical results root: " + writer_config.output_path);
+            }
             writer_config.emit_header_comments = true;
             writer_config.emit_ter_records = true;
             writer_config.emit_end_record = true;
