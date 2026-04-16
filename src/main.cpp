@@ -94,6 +94,7 @@ void printHelp(const std::string& program_name) {
 
   [Geometry thickness]
       --geometry_thickness_enabled <true|false>  Stage 10 vertical thickness enable switch (default: true)
+      --geometry_thickness_method <vertical|radial> Stage 10 thickness method selector (default: vertical)
       --geometry_thickness_export_csv <true|false> Stage 10 CSV artifact export enable switch (default: true)
       --geometry_thickness_use_curvature_valid_domain_only <true|false>  Restrict Stage 10 domain to Stage 9 curvature-valid
       --geometry_thickness_min_thickness <A>   Stage 10 lower acceptance threshold (default: disabled)
@@ -194,6 +195,8 @@ int main(int argc, char* argv[]) {
     double geometry_qc_n_tail = 4.0;
     double geometry_qc_n_spike = 4.0;
     bool geometry_thickness_enabled = true;
+    FoldPatchAnalysisConfig::Stage10ThicknessMethod geometry_thickness_method =
+        FoldPatchAnalysisConfig::Stage10ThicknessMethod::vertical;
     bool geometry_thickness_export_csv = true;
     bool geometry_thickness_use_curvature_valid_domain_only = false;
     double geometry_thickness_min_thickness = 0.0;
@@ -753,6 +756,22 @@ int main(int argc, char* argv[]) {
             }
             continue;
         }
+        if (arg == "--geometry_thickness_method") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_thickness_method\n";
+                return 1;
+            }
+            const std::string method = argv[++i];
+            if (method == "vertical") {
+                geometry_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::vertical;
+            } else if (method == "radial") {
+                geometry_thickness_method = FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
+            } else {
+                std::cerr << "Error: --geometry_thickness_method expects vertical or radial\n";
+                return 1;
+            }
+            continue;
+        }
         if (arg == "--geometry_thickness_use_curvature_valid_domain_only") {
             if (i + 1 >= argc) {
                 std::cerr << "Error: missing value for --geometry_thickness_use_curvature_valid_domain_only\n";
@@ -986,6 +1005,7 @@ int main(int argc, char* argv[]) {
         geometry_config.stage9_qc_n_tail = geometry_qc_n_tail;
         geometry_config.stage9_qc_n_spike = geometry_qc_n_spike;
         geometry_config.stage10_enabled = geometry_thickness_enabled;
+        geometry_config.stage10_thickness_method = geometry_thickness_method;
         geometry_config.stage10_export_csv = geometry_thickness_export_csv;
         geometry_config.stage10_use_curvature_valid_domain_only = geometry_thickness_use_curvature_valid_domain_only;
         geometry_config.stage10_min_thickness = geometry_thickness_min_thickness;

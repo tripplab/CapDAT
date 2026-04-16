@@ -112,6 +112,8 @@ const char* stage10ThicknessMethodLabel(FoldPatchAnalysisConfig::Stage10Thicknes
     switch (method) {
     case FoldPatchAnalysisConfig::Stage10ThicknessMethod::vertical:
         return "vertical";
+    case FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial:
+        return "radial";
     }
     return "unknown";
 }
@@ -3956,6 +3958,173 @@ struct Stage10ScalarStats {
     double max = std::numeric_limits<double>::quiet_NaN();
 };
 
+bool sampleStage7ScalarFieldBilinear(const Stage4GridDescriptor& grid,
+                                     const std::vector<double>& field,
+                                     const std::vector<uint8_t>& valid_mask,
+                                     double x,
+                                     double y,
+                                     double* out_value) {
+    if (out_value == nullptr || grid.nx < 2 || grid.ny < 2 || field.size() != grid.nx * grid.ny ||
+        valid_mask.size() != field.size()) {
+        return false;
+    }
+    if (!std::isfinite(x) || !std::isfinite(y) || x < grid.x_min || x > grid.x_max || y < grid.y_min || y > grid.y_max) {
+        return false;
+    }
+
+    const auto x_it_hi = std::upper_bound(grid.x_values.begin(), grid.x_values.end(), x);
+    const auto y_it_hi = std::upper_bound(grid.y_values.begin(), grid.y_values.end(), y);
+    if (x_it_hi == grid.x_values.begin() || y_it_hi == grid.y_values.begin() || x_it_hi == grid.x_values.end() ||
+        y_it_hi == grid.y_values.end()) {
+        return false;
+    }
+    const std::size_t i1 = static_cast<std::size_t>(std::distance(grid.x_values.begin(), x_it_hi));
+    const std::size_t j1 = static_cast<std::size_t>(std::distance(grid.y_values.begin(), y_it_hi));
+    const std::size_t i0 = i1 - 1;
+    const std::size_t j0 = j1 - 1;
+    const double x0 = grid.x_values[i0];
+    const double x1 = grid.x_values[i1];
+    const double y0 = grid.y_values[j0];
+    const double y1 = grid.y_values[j1];
+    const double dx = x1 - x0;
+    const double dy = y1 - y0;
+    if (dx <= 0.0 || dy <= 0.0) {
+        return false;
+    }
+
+    const std::size_t idx00 = stage4NodeIndex(i0, j0, grid.nx);
+    const std::size_t idx10 = stage4NodeIndex(i1, j0, grid.nx);
+    const std::size_t idx01 = stage4NodeIndex(i0, j1, grid.nx);
+    const std::size_t idx11 = stage4NodeIndex(i1, j1, grid.nx);
+    const double z00 = field[idx00];
+    const double z10 = field[idx10];
+    const double z01 = field[idx01];
+    const double z11 = field[idx11];
+    if (valid_mask[idx00] == 0 || valid_mask[idx10] == 0 || valid_mask[idx01] == 0 || valid_mask[idx11] == 0 ||
+        !std::isfinite(z00) || !std::isfinite(z10) || !std::isfinite(z01) || !std::isfinite(z11)) {
+        return false;
+    }
+
+    const double tx = (x - x0) / dx;
+    const double ty = (y - y0) / dy;
+    *out_value = (1.0 - tx) * (1.0 - ty) * z00 + tx * (1.0 - ty) * z10 + (1.0 - tx) * ty * z01 + tx * ty * z11;
+    return true;
+}
+
+enum class Stage10RadialIntersectionStatus : uint8_t {
+    success = 0,
+    outside_inner_sampling_domain = 1,
+    no_bracket = 2,
+    root_failure = 3
+};
+
+struct Stage10RadialIntersectionResult {
+    Stage10RadialIntersectionStatus status = Stage10RadialIntersectionStatus::root_failure;
+    double s_inner = std::numeric_limits<double>::quiet_NaN();
+};
+
+Stage10RadialIntersectionResult findRadialInnerIntersectionOnStage7Surface(const Stage4GridDescriptor& grid,
+                                                                            const std::vector<double>& z_inner,
+                                                                            const std::vector<uint8_t>& metric_mask,
+                                                                            double ux,
+                                                                            double uy,
+                                                                            double uz,
+                                                                            double s_out,
+                                                                            double tolerance) {
+    Stage10RadialIntersectionResult result;
+    if (!std::isfinite(ux) || !std::isfinite(uy) || !std::isfinite(uz) || !std::isfinite(s_out) || s_out <= tolerance) {
+        return result;
+    }
+    auto eval_f = [&](double s, double* out_f) -> bool {
+        const double x = s * ux;
+        const double y = s * uy;
+        double z_inner_interp = std::numeric_limits<double>::quiet_NaN();
+        if (!sampleStage7ScalarFieldBilinear(grid, z_inner, metric_mask, x, y, &z_inner_interp)) {
+            return false;
+        }
+        *out_f = s * uz - z_inner_interp;
+        return std::isfinite(*out_f);
+    };
+
+    double f_hi = 0.0;
+    if (!eval_f(s_out, &f_hi)) {
+        result.status = Stage10RadialIntersectionStatus::outside_inner_sampling_domain;
+        return result;
+    }
+    if (std::fabs(f_hi) <= 1e-9) {
+        result.status = Stage10RadialIntersectionStatus::success;
+        result.s_inner = s_out;
+        return result;
+    }
+
+    constexpr std::size_t kScanSteps = 64;
+    const double s_min = std::max(0.0, 0.01 * s_out);
+    bool saw_domain_failure = false;
+    bool bracket_found = false;
+    double s_a = s_out;
+    double s_b = s_out;
+    double f_a = f_hi;
+    double f_b = f_hi;
+
+    double prev_s = s_out;
+    double prev_f = f_hi;
+    for (std::size_t step = 1; step <= kScanSteps; ++step) {
+        const double alpha = static_cast<double>(step) / static_cast<double>(kScanSteps);
+        const double s = s_out - alpha * (s_out - s_min);
+        double f_s = 0.0;
+        if (!eval_f(s, &f_s)) {
+            saw_domain_failure = true;
+            continue;
+        }
+        if (std::fabs(f_s) <= 1e-9) {
+            result.status = Stage10RadialIntersectionStatus::success;
+            result.s_inner = s;
+            return result;
+        }
+        if ((prev_f > 0.0 && f_s < 0.0) || (prev_f < 0.0 && f_s > 0.0)) {
+            s_a = prev_s;
+            s_b = s;
+            f_a = prev_f;
+            f_b = f_s;
+            bracket_found = true;
+            break;
+        }
+        prev_s = s;
+        prev_f = f_s;
+    }
+
+    if (!bracket_found) {
+        result.status = saw_domain_failure ? Stage10RadialIntersectionStatus::outside_inner_sampling_domain
+                                           : Stage10RadialIntersectionStatus::no_bracket;
+        return result;
+    }
+
+    constexpr std::size_t kMaxBisectionIterations = 64;
+    for (std::size_t iter = 0; iter < kMaxBisectionIterations; ++iter) {
+        const double s_mid = 0.5 * (s_a + s_b);
+        double f_mid = 0.0;
+        if (!eval_f(s_mid, &f_mid)) {
+            result.status = Stage10RadialIntersectionStatus::outside_inner_sampling_domain;
+            return result;
+        }
+        if (std::fabs(f_mid) <= 1e-9 || std::fabs(s_b - s_a) <= std::max(1e-8, tolerance)) {
+            result.status = Stage10RadialIntersectionStatus::success;
+            result.s_inner = s_mid;
+            return result;
+        }
+        if ((f_a > 0.0 && f_mid < 0.0) || (f_a < 0.0 && f_mid > 0.0)) {
+            s_b = s_mid;
+            f_b = f_mid;
+        } else {
+            s_a = s_mid;
+            f_a = f_mid;
+        }
+    }
+    (void)f_b;
+    result.status = Stage10RadialIntersectionStatus::root_failure;
+    return result;
+}
+
 Stage10ScalarStats computeStage10ScalarStats(const std::vector<double>& values, const std::vector<uint8_t>& valid_mask) {
     Stage10ScalarStats stats;
     std::vector<double> selected;
@@ -3999,15 +4168,18 @@ bool writeStage10ThicknessCsv(const GeometryStage10ThicknessResult& result, cons
     if (!out) {
         return false;
     }
-    out << "i,j,x,y,in_metric_domain,curvature_valid,thickness_attempted,thickness_valid,thickness_vertical\n";
+    out << "i,j,x,y,z_outer_smooth,in_metric_domain,curvature_valid,thickness_attempted,thickness_valid,thickness_vertical,thickness_radial,s_outer,s_inner\n";
     for (std::size_t j = 0; j < result.grid.ny; ++j) {
         for (std::size_t i = 0; i < result.grid.nx; ++i) {
             const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
             out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
+                << result.thickness_outer_z_stage7[idx] << ','
                 << static_cast<int>(result.metric_domain_mask[idx]) << ','
                 << static_cast<int>(result.curvature_valid_mask[idx]) << ','
                 << static_cast<int>(result.thickness_attempted_mask[idx]) << ','
-                << static_cast<int>(result.thickness_valid_mask[idx]) << ',' << result.thickness_vertical[idx] << '\n';
+                << static_cast<int>(result.thickness_valid_mask[idx]) << ',' << result.thickness_vertical[idx] << ','
+                << result.thickness_radial[idx] << ',' << result.thickness_radial_s_outer[idx] << ','
+                << result.thickness_radial_s_inner[idx] << '\n';
         }
     }
     return out.good();
@@ -4034,12 +4206,15 @@ bool writeStage10InvalidReasonCsv(const GeometryStage10ThicknessResult& result, 
     if (!out) {
         return false;
     }
-    out << "i,j,x,y,outside_domain,nonfinite_surface,negative_or_zero,below_min_threshold,above_max_threshold,qc_warn\n";
+    out << "i,j,x,y,outside_domain,outside_inner_sampling_domain,no_bracket,root_failure,nonfinite_surface,negative_or_zero,below_min_threshold,above_max_threshold,qc_warn\n";
     for (std::size_t j = 0; j < result.grid.ny; ++j) {
         for (std::size_t i = 0; i < result.grid.nx; ++i) {
             const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
             out << i << ',' << j << ',' << result.grid.x_values[i] << ',' << result.grid.y_values[j] << ','
                 << static_cast<int>(result.thickness_invalid_outside_domain_mask[idx]) << ','
+                << static_cast<int>(result.thickness_radial_invalid_outside_inner_domain_mask[idx]) << ','
+                << static_cast<int>(result.thickness_radial_invalid_no_bracket_mask[idx]) << ','
+                << static_cast<int>(result.thickness_radial_invalid_root_failure_mask[idx]) << ','
                 << static_cast<int>(result.thickness_invalid_nonfinite_surface_mask[idx]) << ','
                 << static_cast<int>(result.thickness_invalid_negative_or_zero_mask[idx]) << ','
                 << static_cast<int>(result.thickness_invalid_below_min_threshold_mask[idx]) << ','
@@ -4060,8 +4235,12 @@ bool writeStage10SummaryCsv(const GeometryStage10ThicknessResult& result, const 
            "thickness_attempted_node_count,thickness_valid_node_count,thickness_attempted_invalid_node_count,"
            "thickness_invalid_nonfinite_surface_count,thickness_invalid_negative_or_zero_count,"
            "thickness_invalid_below_min_threshold_count,thickness_invalid_above_max_threshold_count,"
-           "thickness_qc_warn_count,thickness_valid_and_curvature_valid_node_count,mean_thickness_vertical,"
+           "thickness_qc_warn_count,thickness_valid_and_curvature_valid_node_count,"
+           "thickness_radial_attempted_node_count,thickness_radial_valid_node_count,"
+           "thickness_radial_invalid_no_bracket_count,thickness_radial_invalid_root_failure_count,"
+           "thickness_radial_invalid_outside_inner_domain_count,mean_thickness_vertical,"
            "median_thickness_vertical,stddev_thickness_vertical,min_thickness_vertical,max_thickness_vertical,"
+           "mean_thickness_radial,median_thickness_radial,stddev_thickness_radial,min_thickness_radial,max_thickness_radial,"
            "thickness_valid_fraction_of_metric_domain,thickness_valid_intersection_fraction_of_metric_domain\n";
     out << result.thickness_method_label << ',' << result.local_thickness_definition << ','
         << result.thickness_input_surface_definition << ',' << result.thickness_contract_note << ','
@@ -4073,10 +4252,48 @@ bool writeStage10SummaryCsv(const GeometryStage10ThicknessResult& result, const 
         << result.thickness_invalid_below_min_threshold_count << ','
         << result.thickness_invalid_above_max_threshold_count << ',' << result.thickness_qc_warn_count << ','
         << result.thickness_valid_and_curvature_valid_node_count << ','
+        << result.thickness_radial_attempted_node_count << ',' << result.thickness_radial_valid_node_count << ','
+        << result.thickness_radial_invalid_no_bracket_count << ','
+        << result.thickness_radial_invalid_root_failure_count << ','
+        << result.thickness_radial_invalid_outside_inner_domain_count << ','
         << result.mean_thickness_vertical << ',' << result.median_thickness_vertical << ','
         << result.stddev_thickness_vertical << ',' << result.min_thickness_vertical << ','
-        << result.max_thickness_vertical << ',' << result.thickness_valid_fraction_of_metric_domain << ','
+        << result.max_thickness_vertical << ',' << result.mean_thickness_radial << ',' << result.median_thickness_radial
+        << ',' << result.stddev_thickness_radial << ',' << result.min_thickness_radial << ','
+        << result.max_thickness_radial << ',' << result.thickness_valid_fraction_of_metric_domain << ','
         << result.thickness_valid_intersection_fraction_of_metric_domain << '\n';
+    return out.good();
+}
+
+bool writeStage10RadialPOutInCsv(const GeometryStage10ThicknessResult& result, const std::string& path) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "i,j,P_out x,P_out y,P_out z,P_in x,P_in y,P_in z,t_radial\n";
+    for (std::size_t j = 0; j < result.grid.ny; ++j) {
+        for (std::size_t i = 0; i < result.grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, result.grid.nx);
+            const double x = result.grid.x_values[i];
+            const double y = result.grid.y_values[j];
+            const double z_out = result.thickness_outer_z_stage7[idx];
+            const double s_out = result.thickness_radial_s_outer[idx];
+            const double s_in = result.thickness_radial_s_inner[idx];
+            double p_in_x = std::numeric_limits<double>::quiet_NaN();
+            double p_in_y = std::numeric_limits<double>::quiet_NaN();
+            double p_in_z = std::numeric_limits<double>::quiet_NaN();
+            if (std::isfinite(s_out) && s_out > 0.0 && std::isfinite(s_in)) {
+                const double ux = x / s_out;
+                const double uy = y / s_out;
+                const double uz = z_out / s_out;
+                p_in_x = s_in * ux;
+                p_in_y = s_in * uy;
+                p_in_z = s_in * uz;
+            }
+            out << i << ',' << j << ',' << x << ',' << y << ',' << z_out << ',' << p_in_x << ',' << p_in_y << ','
+                << p_in_z << ',' << result.thickness_radial[idx] << '\n';
+        }
+    }
     return out.good();
 }
 } // namespace
@@ -4835,12 +5052,8 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
     if (stage7_result.node_count == 0 || stage7_result.grid.nx == 0 || stage7_result.grid.ny == 0) {
         throw std::runtime_error("Stage 10 requires a non-empty Stage 7 grid");
     }
-    if (config.stage10_thickness_method != FoldPatchAnalysisConfig::Stage10ThicknessMethod::vertical) {
-        throw std::runtime_error("Stage 10 requires geometry_thickness_method=vertical");
-    }
-
     result.messages.push_back("Geometry Stage 10");
-    result.messages.push_back("Geometry analysis: starting Stage 10 vertical thickness computation.");
+    result.messages.push_back("Geometry analysis: starting Stage 10 thickness computation.");
     result.grid = stage7_result.grid;
     result.node_count = stage7_result.node_count;
     result.reconstructed_mask = stage7_result.reconstructed_mask;
@@ -4861,6 +5074,10 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
 
     const double nan = std::numeric_limits<double>::quiet_NaN();
     result.thickness_vertical.assign(result.node_count, nan);
+    result.thickness_outer_z_stage7.assign(result.node_count, nan);
+    result.thickness_radial.assign(result.node_count, nan);
+    result.thickness_radial_s_outer.assign(result.node_count, nan);
+    result.thickness_radial_s_inner.assign(result.node_count, nan);
     result.thickness_attempted_mask.assign(result.node_count, 0);
     result.thickness_valid_mask.assign(result.node_count, 0);
     result.thickness_invalid_outside_domain_mask.assign(result.node_count, 0);
@@ -4869,9 +5086,13 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
     result.thickness_invalid_below_min_threshold_mask.assign(result.node_count, 0);
     result.thickness_invalid_above_max_threshold_mask.assign(result.node_count, 0);
     result.thickness_qc_warn_mask.assign(result.node_count, 0);
+    result.thickness_radial_valid_mask.assign(result.node_count, 0);
+    result.thickness_radial_invalid_no_bracket_mask.assign(result.node_count, 0);
+    result.thickness_radial_invalid_root_failure_mask.assign(result.node_count, 0);
+    result.thickness_radial_invalid_outside_inner_domain_mask.assign(result.node_count, 0);
 
     if (!stage8_result.success) {
-        result.messages.push_back("Geometry Stage 10 note: Stage 8 derivative estimation unavailable; continuing with vertical thickness only.");
+        result.messages.push_back("Geometry Stage 10 note: Stage 8 derivative estimation unavailable; continuing with Stage 7 surfaces.");
     }
 
     std::size_t metric_domain_node_count = 0;
@@ -4902,22 +5123,63 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
             continue;
         }
 
-        const double t_z = z_outer - z_inner;
-        result.thickness_vertical[idx] = t_z;
+        const double t_vertical = z_outer - z_inner;
+        result.thickness_vertical[idx] = t_vertical;
+        result.thickness_outer_z_stage7[idx] = z_outer;
 
-        if (t_z <= tolerance) {
+        double t_selected = t_vertical;
+        if (config.stage10_thickness_method == FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial) {
+            const std::size_t i = idx % result.grid.nx;
+            const std::size_t j = idx / result.grid.nx;
+            const double x = result.grid.x_values[i];
+            const double y = result.grid.y_values[j];
+            const double s_out = std::sqrt(x * x + y * y + z_outer * z_outer);
+            result.thickness_radial_s_outer[idx] = s_out;
+            if (s_out <= tolerance) {
+                result.thickness_radial_invalid_root_failure_mask[idx] = 1;
+                ++result.thickness_attempted_invalid_node_count;
+                ++result.thickness_radial_invalid_root_failure_count;
+                continue;
+            }
+            const double ux = x / s_out;
+            const double uy = y / s_out;
+            const double uz = z_outer / s_out;
+            const Stage10RadialIntersectionResult intersection = findRadialInnerIntersectionOnStage7Surface(
+                result.grid, stage7_result.z_inner_smooth, result.metric_domain_mask, ux, uy, uz, s_out, tolerance);
+            ++result.thickness_radial_attempted_node_count;
+            if (intersection.status != Stage10RadialIntersectionStatus::success || !std::isfinite(intersection.s_inner)) {
+                ++result.thickness_attempted_invalid_node_count;
+                if (intersection.status == Stage10RadialIntersectionStatus::outside_inner_sampling_domain) {
+                    result.thickness_radial_invalid_outside_inner_domain_mask[idx] = 1;
+                    ++result.thickness_radial_invalid_outside_inner_domain_count;
+                } else if (intersection.status == Stage10RadialIntersectionStatus::no_bracket) {
+                    result.thickness_radial_invalid_no_bracket_mask[idx] = 1;
+                    ++result.thickness_radial_invalid_no_bracket_count;
+                } else {
+                    result.thickness_radial_invalid_root_failure_mask[idx] = 1;
+                    ++result.thickness_radial_invalid_root_failure_count;
+                }
+                continue;
+            }
+            result.thickness_radial_s_inner[idx] = intersection.s_inner;
+            const double t_radial = s_out - intersection.s_inner;
+            result.thickness_radial[idx] = t_radial;
+            t_selected = t_radial;
+        }
+
+        if (t_selected <= tolerance) {
             result.thickness_invalid_negative_or_zero_mask[idx] = 1;
             ++result.thickness_attempted_invalid_node_count;
             ++result.thickness_invalid_negative_or_zero_count;
             continue;
         }
-        if (config.stage10_min_thickness > 0.0 && t_z < config.stage10_min_thickness) {
+        if (config.stage10_min_thickness > 0.0 && t_selected < config.stage10_min_thickness) {
             result.thickness_invalid_below_min_threshold_mask[idx] = 1;
             ++result.thickness_attempted_invalid_node_count;
             ++result.thickness_invalid_below_min_threshold_count;
             continue;
         }
-        if (config.stage10_max_thickness > 0.0 && t_z > config.stage10_max_thickness) {
+        if (config.stage10_max_thickness > 0.0 && t_selected > config.stage10_max_thickness) {
             result.thickness_invalid_above_max_threshold_mask[idx] = 1;
             ++result.thickness_attempted_invalid_node_count;
             ++result.thickness_invalid_above_max_threshold_count;
@@ -4925,6 +5187,10 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
         }
 
         result.thickness_valid_mask[idx] = 1;
+        if (config.stage10_thickness_method == FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial) {
+            result.thickness_radial_valid_mask[idx] = 1;
+            ++result.thickness_radial_valid_node_count;
+        }
         ++result.thickness_valid_node_count;
         if (result.curvature_valid_mask[idx] != 0) {
             ++result.thickness_valid_and_curvature_valid_node_count;
@@ -4936,12 +5202,26 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
         }
     }
 
-    const Stage10ScalarStats stats = computeStage10ScalarStats(result.thickness_vertical, result.thickness_valid_mask);
-    result.mean_thickness_vertical = stats.mean;
-    result.median_thickness_vertical = stats.median;
-    result.stddev_thickness_vertical = stats.stddev;
-    result.min_thickness_vertical = stats.min;
-    result.max_thickness_vertical = stats.max;
+    const Stage10ScalarStats vertical_stats = computeStage10ScalarStats(result.thickness_vertical, result.thickness_valid_mask);
+    result.mean_thickness_vertical = vertical_stats.mean;
+    result.median_thickness_vertical = vertical_stats.median;
+    result.stddev_thickness_vertical = vertical_stats.stddev;
+    result.min_thickness_vertical = vertical_stats.min;
+    result.max_thickness_vertical = vertical_stats.max;
+    const Stage10ScalarStats radial_stats = computeStage10ScalarStats(result.thickness_radial, result.thickness_valid_mask);
+    result.mean_thickness_radial = radial_stats.mean;
+    result.median_thickness_radial = radial_stats.median;
+    result.stddev_thickness_radial = radial_stats.stddev;
+    result.min_thickness_radial = radial_stats.min;
+    result.max_thickness_radial = radial_stats.max;
+
+    if (config.stage10_thickness_method == FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial) {
+        result.thickness_method_label = "stage10_radial_origin_centered_ray_intersection";
+        result.local_thickness_definition =
+            "distance_between_stage7_outer_point_and_stage7_inner_intersection_along_origin_centered_ray";
+        result.thickness_contract_note =
+            "stage10_radial_thickness_is_computed_by_tracing_the_origin_to_outer_surface_ray_and_intersecting_it_with_the_stage7_inner_surface";
+    }
 
     if (metric_domain_node_count > 0) {
         result.thickness_valid_fraction_of_metric_domain =
@@ -4952,10 +5232,12 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
     }
 
     if (config.stage10_export_csv) {
-        result.thickness_vertical_csv_path = config.output_prefix + "_thickness_vertical.csv";
-        result.thickness_valid_mask_csv_path = config.output_prefix + "_thickness_vertical_valid_mask.csv";
-        result.thickness_invalid_reason_csv_path = config.output_prefix + "_thickness_vertical_invalid_reason.csv";
-        result.thickness_summary_csv_path = config.output_prefix + "_thickness_vertical_summary.csv";
+        const std::string method_suffix =
+            config.stage10_thickness_method == FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial ? "radial" : "vertical";
+        result.thickness_vertical_csv_path = config.output_prefix + "_thickness_" + method_suffix + ".csv";
+        result.thickness_valid_mask_csv_path = config.output_prefix + "_thickness_" + method_suffix + "_valid_mask.csv";
+        result.thickness_invalid_reason_csv_path = config.output_prefix + "_thickness_" + method_suffix + "_invalid_reason.csv";
+        result.thickness_summary_csv_path = config.output_prefix + "_thickness_" + method_suffix + "_summary.csv";
         if (!writeStage10ThicknessCsv(result, result.thickness_vertical_csv_path)) {
             throw std::runtime_error("Failed to write Stage 10 thickness CSV");
         }
@@ -4967,6 +5249,12 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
         }
         if (!writeStage10SummaryCsv(result, result.thickness_summary_csv_path)) {
             throw std::runtime_error("Failed to write Stage 10 thickness summary CSV");
+        }
+        if (config.stage10_thickness_method == FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial) {
+            result.thickness_radial_p_out_in_csv_path = config.output_prefix + "_radial_P_out_in.csv";
+            if (!writeStage10RadialPOutInCsv(result, result.thickness_radial_p_out_in_csv_path)) {
+                throw std::runtime_error("Failed to write Stage 10 radial P_out/P_in CSV");
+            }
         }
     }
 
@@ -4982,9 +5270,27 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
                               std::to_string(result.thickness_valid_and_curvature_valid_node_count));
 
     if (result.thickness_valid_node_count > 0) {
-        result.messages.push_back("Geometry Stage 10 thickness stats (mean/min/max): " + std::to_string(result.mean_thickness_vertical) +
-                                  ", " + std::to_string(result.min_thickness_vertical) + ", " +
-                                  std::to_string(result.max_thickness_vertical));
+        if (config.stage10_thickness_method == FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial) {
+            result.messages.push_back("Geometry Stage 10 radial attempted node count: " +
+                                      std::to_string(result.thickness_radial_attempted_node_count));
+            result.messages.push_back("Geometry Stage 10 radial valid node count: " +
+                                      std::to_string(result.thickness_radial_valid_node_count));
+            result.messages.push_back("Geometry Stage 10 radial invalid no-bracket count: " +
+                                      std::to_string(result.thickness_radial_invalid_no_bracket_count));
+            result.messages.push_back("Geometry Stage 10 radial invalid root-failure count: " +
+                                      std::to_string(result.thickness_radial_invalid_root_failure_count));
+            result.messages.push_back("Geometry Stage 10 radial invalid outside-inner-domain count: " +
+                                      std::to_string(result.thickness_radial_invalid_outside_inner_domain_count));
+            result.messages.push_back("Geometry Stage 10 radial thickness stats (mean/min/max): " +
+                                      std::to_string(result.mean_thickness_radial) + ", " +
+                                      std::to_string(result.min_thickness_radial) + ", " +
+                                      std::to_string(result.max_thickness_radial));
+        } else {
+            result.messages.push_back("Geometry Stage 10 thickness stats (mean/min/max): " +
+                                      std::to_string(result.mean_thickness_vertical) + ", " +
+                                      std::to_string(result.min_thickness_vertical) + ", " +
+                                      std::to_string(result.max_thickness_vertical));
+        }
         result.success = true;
     } else {
         result.messages.push_back("Geometry Stage 10 failure: no valid thickness nodes were produced.");
@@ -4996,8 +5302,11 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
         result.messages.push_back("Geometry Stage 10 valid-mask CSV: " + result.thickness_valid_mask_csv_path);
         result.messages.push_back("Geometry Stage 10 invalid-reason CSV: " + result.thickness_invalid_reason_csv_path);
         result.messages.push_back("Geometry Stage 10 summary CSV: " + result.thickness_summary_csv_path);
+        if (config.stage10_thickness_method == FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial) {
+            result.messages.push_back("Geometry Stage 10 radial P_out/P_in CSV: " + result.thickness_radial_p_out_in_csv_path);
+        }
     }
-    result.messages.push_back("Geometry analysis: completed Stage 10 vertical thickness computation.");
+    result.messages.push_back("Geometry analysis: completed Stage 10 thickness computation.");
     logMessages(result.messages, logger);
     return result;
 }
