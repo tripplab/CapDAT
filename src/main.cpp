@@ -167,7 +167,7 @@ void printHelp(const std::string& program_name) {
       --geometry_fold_index <n>              Geometry fold index for selected type (default: 0)
       --geometry_fold_name <name>            Canonical fold name (2_0,2_1,3_0,3_1,5_0); mutually exclusive with type/index
       --clean-results-dir <true|false>       If true, delete contents of results/[PDBID]/[fold_name]/ before writing outputs
-      --geometry_cylinder_radius <A>         Geometry cylinder radius in angstroms (default: 12.0)
+      --geometry_cylinder_radius <A>         Geometry cylinder radius in angstroms (default: 35.0)
       --dvdW <A>                             Delta added to all assigned vdW radii in angstroms (default: 0.0)
       --geometry_grid_spacing <A>            Geometry Stage 4 XY grid spacing in angstroms (default: 2.0)
       --geometry_min_atoms_in_patch <n>      Minimum selected atoms required (default: 20)
@@ -240,16 +240,17 @@ void printVersion() {
 void printSummary(const Capsid& capsid,
                   const ParseStats& stats,
                   const StructuralSummary& structural_summary) {
-    std::cout << "Input file:              " << capsid.sourcePath() << '\n';
-    std::cout << "Total lines read:        " << stats.total_lines_read << '\n';
-    std::cout << "Coordinate records seen: " << stats.total_coordinate_records_detected << '\n';
-    std::cout << "Accepted atoms:          " << capsid.atomCount() << '\n';
-    std::cout << "Accepted residues:       " << capsid.residueCount() << '\n';
-    std::cout << "Internal subunits:       " << capsid.subunitCount() << '\n';
-    std::cout << "Accepted HETATM:         " << capsid.hetatmCount() << '\n';
-    std::cout << "Alternate locations:     " << capsid.altLocCount() << '\n';
-    std::cout << "Malformed records:       " << stats.total_malformed_records << '\n';
-    std::cout << "Skipped records:         " << capsid.skippedRecordCount() << '\n';
+    std::cout << "\n[Structural Summary — Input & Parsing]\n";
+    std::cout << "  Input file                 : " << capsid.sourcePath() << '\n';
+    std::cout << "  Total lines read           : " << stats.total_lines_read << '\n';
+    std::cout << "  Coordinate records seen    : " << stats.total_coordinate_records_detected << '\n';
+    std::cout << "  Accepted atoms             : " << capsid.atomCount() << '\n';
+    std::cout << "  Accepted residues          : " << capsid.residueCount() << '\n';
+    std::cout << "  Internal subunits          : " << capsid.subunitCount() << '\n';
+    std::cout << "  Accepted HETATM            : " << capsid.hetatmCount() << '\n';
+    std::cout << "  Alternate locations        : " << capsid.altLocCount() << '\n';
+    std::cout << "  Malformed records          : " << stats.total_malformed_records << '\n';
+    std::cout << "  Skipped records            : " << capsid.skippedRecordCount() << '\n';
     printStructuralSummaryBlock(std::cout, structural_summary);
 }
 
@@ -281,7 +282,7 @@ int main(int argc, char* argv[]) {
     bool geometry_fold_name_given = false;
     std::string geometry_fold_name;
     bool clean_results_dir = false;
-    double geometry_cylinder_radius = 12.0;
+    double geometry_cylinder_radius = 35.0;
     double delta_vdw = 0.0;
     double geometry_grid_spacing = 2.0;
     std::size_t geometry_min_atoms_in_patch = 20;
@@ -1150,10 +1151,10 @@ int main(int argc, char* argv[]) {
         PdbParser parser(config, &logger);
         Capsid capsid = parser.parseFile(resolved_input_path);
 
-        logger.info("Starting extended structural summary geometry");
+        logger.info("Starting Structural Summary");
         StructuralSummary structural_summary = computeStructuralSummary(capsid);
         printSummary(capsid, parser.stats(), structural_summary);
-        logger.info("Completed extended structural summary geometry");
+        logger.info("Completed Structural Summary");
 
         ReorientationRequest reorient_request;
         reorient_request.request_reorientation = reorient_requested;

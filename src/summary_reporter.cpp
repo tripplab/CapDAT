@@ -8,51 +8,51 @@ void printStructuralSummaryBlock(std::ostream& out, const StructuralSummary& sum
     const auto old_flags = out.flags();
     const auto old_precision = out.precision();
 
-    out << "\n";
+    out << "\n[Structural Summary — Geometry]\n";
     out << std::fixed << std::setprecision(3);
 
-    out << "Geometric center (accepted atoms): "
+    out << "  Geometric center (accepted atoms) : "
         << "(" << summary.center_x << ", "
         << summary.center_y << ", "
         << summary.center_z << ")\n";
 
-    out << "Coordinate bounds:\n";
-    out << "  x: [" << summary.x_min << ", " << summary.x_max << "]\n";
-    out << "  y: [" << summary.y_min << ", " << summary.y_max << "]\n";
-    out << "  z: [" << summary.z_min << ", " << summary.z_max << "]\n";
+    out << "\n  Coordinate bounds\n";
+    out << "    x range : [" << summary.x_min << ", " << summary.x_max << "]\n";
+    out << "    y range : [" << summary.y_min << ", " << summary.y_max << "]\n";
+    out << "    z range : [" << summary.z_min << ", " << summary.z_max << "]\n";
 
-    out << "Axis spans: "
+    out << "  Axis spans                     : "
         << "x=" << summary.x_span << ", "
         << "y=" << summary.y_span << ", "
         << "z=" << summary.z_span << "\n";
 
-    out << "Radial extent from geometric center: "
+    out << "  Radial extent from center       : "
         << "r_min=" << summary.r_min << ", "
         << "r_max=" << summary.r_max << ", "
         << "r_mean=" << summary.r_mean << ", "
         << "r_stddev=" << summary.r_stddev << "\n";
 
-    out << "Shell-thickness estimate (r_max - r_min): "
+    out << "  Shell-thickness estimate        : "
         << summary.shell_thickness_estimate << "\n";
 
-    out << "Bounding-box center (supplementary): "
+    out << "  Bounding-box center             : "
         << "(" << summary.bbox_center_x << ", "
         << summary.bbox_center_y << ", "
         << summary.bbox_center_z << ")\n";
 
-    out << "Per-subunit counts (compact):\n";
-    out << "  atoms/subunit: min=" << summary.atoms_per_subunit.min
+    out << "\n  Per-subunit counts\n";
+    out << "    atoms/subunit                : min=" << summary.atoms_per_subunit.min
         << ", max=" << summary.atoms_per_subunit.max
         << ", mean=" << summary.atoms_per_subunit.mean << "\n";
-    out << "  residues/subunit: min=" << summary.residues_per_subunit.min
+    out << "    residues/subunit             : min=" << summary.residues_per_subunit.min
         << ", max=" << summary.residues_per_subunit.max
         << ", mean=" << summary.residues_per_subunit.mean << "\n";
-    out << "  unique original labels: " << summary.unique_original_label_count << "\n";
+    out << "    unique original labels       : " << summary.unique_original_label_count << "\n";
 
     constexpr std::size_t kMaxInlineLabelList = 12;
     if (!summary.sorted_unique_original_labels.empty() &&
         summary.sorted_unique_original_labels.size() <= kMaxInlineLabelList) {
-        out << "  labels: ";
+        out << "    labels                       : ";
         for (std::size_t i = 0; i < summary.sorted_unique_original_labels.size(); ++i) {
             if (i > 0) {
                 out << ", ";

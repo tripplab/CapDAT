@@ -156,10 +156,10 @@ void testUniqueOriginalLabelSummaryAndFormatting() {
     printStructuralSummaryBlock(output, summary);
     const std::string rendered = output.str();
 
-    if (rendered.find("unique original labels: 3") == std::string::npos) {
+    if (rendered.find("unique original labels       : 3") == std::string::npos) {
         throw std::runtime_error("report missing unique original labels line");
     }
-    if (rendered.find("labels: <blank>, A, B") == std::string::npos) {
+    if (rendered.find("labels                       : <blank>, A, B") == std::string::npos) {
         throw std::runtime_error("report missing compact sorted labels line with blank placeholder");
     }
 }
