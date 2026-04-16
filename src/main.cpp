@@ -1235,13 +1235,15 @@ int main(int argc, char* argv[]) {
         geometry_config.stage10_min_thickness = geometry_thickness_min_thickness;
         geometry_config.stage10_max_thickness = geometry_thickness_max_thickness;
 
-        const GeometryAnalysisResult geometry_result =
-            runFoldPatchGeometryAnalysis(capsid, geometry_config, config, &logger);
-        if (!geometry_result.success) {
-            throw std::runtime_error("Geometry analysis failed in Stage 1/2/3/4/5 pipeline");
+        if (geometry_analysis_requested && geometry_config.enabled) {
+            const GeometryAnalysisResult geometry_result =
+                runFoldPatchGeometryAnalysis(capsid, geometry_config, config, &logger);
+            if (!geometry_result.success) {
+                throw std::runtime_error("Geometry analysis failed in Stage 1/2/3/4/5 pipeline");
+            }
+            const std::string input_name = std::filesystem::path(resolved_input_path).filename().string();
+            std::cout << buildGeometrySummaryReport(geometry_result, geometry_config, input_name);
         }
-        const std::string input_name = std::filesystem::path(resolved_input_path).filename().string();
-        std::cout << buildGeometrySummaryReport(geometry_result, geometry_config, input_name);
 
         if (!export_final_output_path.empty()) {
             ExportCapsidConfig writer_config;
