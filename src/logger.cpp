@@ -100,14 +100,18 @@ void Logger::debug(const std::string& message) {
  * filtering.
  */
 void Logger::log(LogLevel level, const std::string& message) {
-    const bool include_timestamp =
-        level == LogLevel::INFO && (message == "Starting CapDAT" || message == "Run completed successfully");
+    const bool include_start_timestamp = level == LogLevel::INFO && message == "Starting CapDAT";
+    const bool include_completion_timestamp = level == LogLevel::INFO && message == "Run completed successfully";
 
     std::string formatted;
-    if (include_timestamp) {
-        formatted = "[" + currentTimestamp() + "] "
+    if (include_start_timestamp) {
+        formatted = "[" + currentTimestamp() + "]\n"
                     "[" + levelToString(level) + "] "
                     + message;
+    } else if (include_completion_timestamp) {
+        formatted = "[" + levelToString(level) + "] "
+                    + message + "\n"
+                    "[" + currentTimestamp() + "]";
     } else {
         formatted = "[" + levelToString(level) + "] " + message;
     }

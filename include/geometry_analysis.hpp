@@ -704,6 +704,7 @@ struct GeometryAnalysisResult {
     GeometryStage8DerivativeEstimationResult stage8_derivatives;
     GeometryStage9CurvatureComputationResult stage9_curvature;
     GeometryStage10ThicknessResult stage10_thickness;
+    std::string run_summary_json_path;
     std::vector<std::string> messages;
 };
 

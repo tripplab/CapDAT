@@ -21,14 +21,6 @@ constexpr double kVdwRadiusFallbackAngstrom = 1.70;
 constexpr std::string_view kWarningMessagePrefix = "[[WARNING]] ";
 constexpr std::string_view kNoteMessagePrefix = "[[NOTE]] ";
 constexpr std::string_view kInfoMessagePrefix = "[[INFO]] ";
-constexpr std::string_view kAlwaysInfoPrefixGeometryRunSummary = "Geometry run summary JSON:";
-
-bool shouldAlwaysLogGeometryInfo(const std::string& message) {
-    if (message.rfind(kAlwaysInfoPrefixGeometryRunSummary, 0) == 0) {
-        return true;
-    }
-    return false;
-}
 
 void logMessages(const std::vector<std::string>& messages, Logger* logger) {
     if (logger == nullptr) {
@@ -45,10 +37,6 @@ void logMessages(const std::vector<std::string>& messages, Logger* logger) {
         }
         if (message.rfind(kInfoMessagePrefix, 0) == 0) {
             logger->info(message.substr(kInfoMessagePrefix.size()));
-            continue;
-        }
-        if (shouldAlwaysLogGeometryInfo(message)) {
-            logger->info(message);
             continue;
         }
         logger->debug(message);
@@ -2387,14 +2375,8 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
                               std::to_string(result.unique_outer_contact_atom_count));
     result.messages.push_back("Geometry Stage 4 unique inner-contact patch atoms (index-based): " +
                               std::to_string(result.unique_inner_contact_atom_count));
-    if (result.unique_both_contact_atom_count == 0) {
-        result.messages.push_back("Geometry Stage 4 unique both-contact patch atoms (index-based): " +
-                                  std::to_string(result.unique_both_contact_atom_count));
-    } else {
-        result.messages.push_back(std::string(kWarningMessagePrefix) +
-                                  "Geometry Stage 4 unique both-contact patch atoms (index-based): " +
-                                  std::to_string(result.unique_both_contact_atom_count));
-    }
+    result.messages.push_back("Geometry Stage 4 unique both-contact patch atoms (index-based): " +
+                              std::to_string(result.unique_both_contact_atom_count));
     result.messages.push_back("Geometry Stage 4 unique contact patch atoms union (index-based): " +
                               std::to_string(result.unique_contact_atom_count));
     result.messages.push_back("Geometry Stage 4 unique outer-contact atom serials: " +
@@ -5326,12 +5308,6 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
                                       std::to_string(result.thickness_radial_invalid_root_failure_count));
             result.messages.push_back("Geometry Stage 10 radial invalid outside-inner-domain count: " +
                                       std::to_string(result.thickness_radial_invalid_outside_inner_domain_count));
-            if (result.thickness_radial_invalid_outside_inner_domain_count > 0 &&
-                result.thickness_radial_invalid_no_bracket_count == 0 &&
-                result.thickness_radial_invalid_root_failure_count == 0) {
-                result.messages.push_back(
-                    "[[NOTE]] Geometry Stage 10 radial note: current radial failures are dominated by inner-surface sampling-domain loss along the radial ray, not by bracketing or root-convergence failure.");
-            }
             result.messages.push_back("Geometry Stage 10 radial active thickness stats (mean/min/max): " +
                                       std::to_string(result.mean_thickness_active) + ", " +
                                       std::to_string(result.min_thickness_active) + ", " +
@@ -5441,7 +5417,7 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
     if (!writeGeometryRunSummaryJson(config, parser_config, run_summary_json_path)) {
         throw std::runtime_error("Failed to write geometry run summary JSON: " + run_summary_json_path);
     }
-    result.messages.push_back("Geometry run summary JSON: " + run_summary_json_path);
+    result.run_summary_json_path = run_summary_json_path;
     logMessages(result.messages, logger);
 
     return result;
@@ -5497,6 +5473,16 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
         notes.size() < 3) {
         notes.push_back(
             "Some radial-thickness nodes were excluded because the inner surface could not be sampled along the full radial ray near the patch edge.");
+    }
+    if (radial_method && result.stage10_thickness.thickness_radial_invalid_outside_inner_domain_count > 0 &&
+        result.stage10_thickness.thickness_radial_invalid_no_bracket_count == 0 &&
+        result.stage10_thickness.thickness_radial_invalid_root_failure_count == 0 && notes.size() < 5) {
+        notes.push_back(
+            "Radial-thickness failures are currently dominated by inner-surface sampling-domain loss along the radial ray, not by bracketing or root-convergence failure.");
+    }
+    if (result.stage4_raw.unique_both_contact_atom_count > 0 && notes.size() < 5) {
+        notes.push_back(
+            "Warning. Raw sheet-contact overlap indicators were detected in Stage 4; inspect raw-contact diagnostics if needed.");
     }
     if (notes.size() < 3) {
         if (std::isfinite(thickness_frac) && thickness_frac >= 0.98) {
@@ -5567,6 +5553,9 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
     appendKeyValue(out, "Grid", fmtCount(result.stage4_raw.grid.nx) + " x " + fmtCount(result.stage4_raw.grid.ny));
     appendKeyValue(out, "Metric domain", fmtCount(metric_domain_count) + " nodes");
     appendKeyValue(out, "Curvature-valid", fmtCount(curvature_valid_count) + " nodes");
+    appendKeyValue(out,
+                   "Run summary JSON",
+                   result.run_summary_json_path.empty() ? "n/a" : result.run_summary_json_path);
     appendKeyValue(out, "Output prefix", config.output_prefix);
     out << '\n';
 
