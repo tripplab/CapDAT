@@ -4230,21 +4230,24 @@ bool writeStage10SummaryCsv(const GeometryStage10ThicknessResult& result, const 
     if (!out) {
         return false;
     }
-    out << "thickness_method_label,local_thickness_definition,thickness_input_surface_definition,"
-           "thickness_contract_note,thickness_domain_definition,node_count,thickness_excluded_outside_domain_count,"
+    out << "stage10_method,thickness_method_label,local_thickness_definition,thickness_input_surface_definition,"
+           "thickness_contract_note,thickness_domain_definition,thickness_domain_limitation_note,"
+           "radial_invalid_outside_inner_domain_definition,node_count,thickness_excluded_outside_domain_count,"
            "thickness_attempted_node_count,thickness_valid_node_count,thickness_attempted_invalid_node_count,"
            "thickness_invalid_nonfinite_surface_count,thickness_invalid_negative_or_zero_count,"
            "thickness_invalid_below_min_threshold_count,thickness_invalid_above_max_threshold_count,"
            "thickness_qc_warn_count,thickness_valid_and_curvature_valid_node_count,"
+           "thickness_valid_fraction_of_metric_domain,thickness_valid_intersection_fraction_of_metric_domain,"
+           "thickness_radial_valid_fraction_of_metric_domain,"
+           "thickness_radial_invalid_outside_inner_domain_fraction_of_metric_domain,"
            "thickness_radial_attempted_node_count,thickness_radial_valid_node_count,"
            "thickness_radial_invalid_no_bracket_count,thickness_radial_invalid_root_failure_count,"
-           "thickness_radial_invalid_outside_inner_domain_count,mean_thickness_vertical,"
-           "median_thickness_vertical,stddev_thickness_vertical,min_thickness_vertical,max_thickness_vertical,"
-           "mean_thickness_radial,median_thickness_radial,stddev_thickness_radial,min_thickness_radial,max_thickness_radial,"
-           "thickness_valid_fraction_of_metric_domain,thickness_valid_intersection_fraction_of_metric_domain\n";
-    out << result.thickness_method_label << ',' << result.local_thickness_definition << ','
+           "thickness_radial_invalid_outside_inner_domain_count,mean_thickness_active,median_thickness_active,"
+           "stddev_thickness_active,min_thickness_active,max_thickness_active\n";
+    out << result.stage10_method << ',' << result.thickness_method_label << ',' << result.local_thickness_definition << ','
         << result.thickness_input_surface_definition << ',' << result.thickness_contract_note << ','
-        << result.thickness_domain_definition << ',' << result.node_count << ','
+        << result.thickness_domain_definition << ',' << result.thickness_domain_limitation_note << ','
+        << result.radial_invalid_outside_inner_domain_definition << ',' << result.node_count << ','
         << result.thickness_excluded_outside_domain_count << ',' << result.thickness_attempted_node_count << ','
         << result.thickness_valid_node_count << ',' << result.thickness_attempted_invalid_node_count << ','
         << result.thickness_invalid_nonfinite_surface_count << ','
@@ -4252,16 +4255,16 @@ bool writeStage10SummaryCsv(const GeometryStage10ThicknessResult& result, const 
         << result.thickness_invalid_below_min_threshold_count << ','
         << result.thickness_invalid_above_max_threshold_count << ',' << result.thickness_qc_warn_count << ','
         << result.thickness_valid_and_curvature_valid_node_count << ','
+        << result.thickness_valid_fraction_of_metric_domain << ','
+        << result.thickness_valid_intersection_fraction_of_metric_domain << ','
+        << result.thickness_radial_valid_fraction_of_metric_domain << ','
+        << result.thickness_radial_invalid_outside_inner_domain_fraction_of_metric_domain << ','
         << result.thickness_radial_attempted_node_count << ',' << result.thickness_radial_valid_node_count << ','
         << result.thickness_radial_invalid_no_bracket_count << ','
         << result.thickness_radial_invalid_root_failure_count << ','
-        << result.thickness_radial_invalid_outside_inner_domain_count << ','
-        << result.mean_thickness_vertical << ',' << result.median_thickness_vertical << ','
-        << result.stddev_thickness_vertical << ',' << result.min_thickness_vertical << ','
-        << result.max_thickness_vertical << ',' << result.mean_thickness_radial << ',' << result.median_thickness_radial
-        << ',' << result.stddev_thickness_radial << ',' << result.min_thickness_radial << ','
-        << result.max_thickness_radial << ',' << result.thickness_valid_fraction_of_metric_domain << ','
-        << result.thickness_valid_intersection_fraction_of_metric_domain << '\n';
+        << result.thickness_radial_invalid_outside_inner_domain_count << ',' << result.mean_thickness_active << ','
+        << result.median_thickness_active << ',' << result.stddev_thickness_active << ','
+        << result.min_thickness_active << ',' << result.max_thickness_active << '\n';
     return out.good();
 }
 
@@ -5215,12 +5218,30 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
     result.min_thickness_radial = radial_stats.min;
     result.max_thickness_radial = radial_stats.max;
 
+    result.stage10_method = stage10ThicknessMethodLabel(config.stage10_thickness_method);
     if (config.stage10_thickness_method == FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial) {
         result.thickness_method_label = "stage10_radial_origin_centered_ray_intersection";
         result.local_thickness_definition =
             "distance_between_stage7_outer_point_and_stage7_inner_intersection_along_origin_centered_ray";
         result.thickness_contract_note =
             "stage10_radial_thickness_is_computed_by_tracing_the_origin_to_outer_surface_ray_and_intersecting_it_with_the_stage7_inner_surface";
+        result.thickness_domain_limitation_note =
+            "stage10_radial_validity_requires_not_only_outer_node_membership_in_stage7_metric_domain_but_also_inner_surface_sampleability_along_the_origin_centered_radial_ray";
+        result.radial_invalid_outside_inner_domain_definition =
+            "outer_node_is_in_stage7_metric_domain_but_required_inner_surface_evaluation_points_along_the_radial_ray_leave_the_current_valid_inner_sampling_or_interpolation_domain";
+        result.mean_thickness_active = result.mean_thickness_radial;
+        result.median_thickness_active = result.median_thickness_radial;
+        result.stddev_thickness_active = result.stddev_thickness_radial;
+        result.min_thickness_active = result.min_thickness_radial;
+        result.max_thickness_active = result.max_thickness_radial;
+        result.messages.push_back(
+            "Stage10 radial P_out/P_in export is only defined for nodes where the inner surface remains sampleable along the origin-centered radial ray.");
+    } else {
+        result.mean_thickness_active = result.mean_thickness_vertical;
+        result.median_thickness_active = result.median_thickness_vertical;
+        result.stddev_thickness_active = result.stddev_thickness_vertical;
+        result.min_thickness_active = result.min_thickness_vertical;
+        result.max_thickness_active = result.max_thickness_vertical;
     }
 
     if (metric_domain_node_count > 0) {
@@ -5229,6 +5250,13 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
         result.thickness_valid_intersection_fraction_of_metric_domain =
             static_cast<double>(result.thickness_valid_and_curvature_valid_node_count) /
             static_cast<double>(metric_domain_node_count);
+        if (config.stage10_thickness_method == FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial) {
+            result.thickness_radial_valid_fraction_of_metric_domain =
+                static_cast<double>(result.thickness_radial_valid_node_count) / static_cast<double>(metric_domain_node_count);
+            result.thickness_radial_invalid_outside_inner_domain_fraction_of_metric_domain =
+                static_cast<double>(result.thickness_radial_invalid_outside_inner_domain_count) /
+                static_cast<double>(metric_domain_node_count);
+        }
     }
 
     if (config.stage10_export_csv) {
@@ -5251,14 +5279,14 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
             throw std::runtime_error("Failed to write Stage 10 thickness summary CSV");
         }
         if (config.stage10_thickness_method == FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial) {
-            result.thickness_radial_p_out_in_csv_path = config.output_prefix + "_radial_P_out_in.csv";
+            result.thickness_radial_p_out_in_csv_path = config.output_prefix + "_thickness_radial_P_out_P_in_t.csv";
             if (!writeStage10RadialPOutInCsv(result, result.thickness_radial_p_out_in_csv_path)) {
                 throw std::runtime_error("Failed to write Stage 10 radial P_out/P_in CSV");
             }
         }
     }
 
-    result.messages.push_back("Geometry Stage 10 method: " + std::string(stage10ThicknessMethodLabel(config.stage10_thickness_method)));
+    result.messages.push_back("Geometry Stage 10 method: " + result.stage10_method);
     result.messages.push_back("Geometry Stage 10 domain mode: " + result.thickness_domain_definition);
     result.messages.push_back("Geometry Stage 10 attempted node count: " + std::to_string(result.thickness_attempted_node_count));
     result.messages.push_back("Geometry Stage 10 valid node count: " + std::to_string(result.thickness_valid_node_count));
@@ -5281,15 +5309,21 @@ GeometryStage10ThicknessResult runGeometryAnalysisStage10ThicknessComputation(
                                       std::to_string(result.thickness_radial_invalid_root_failure_count));
             result.messages.push_back("Geometry Stage 10 radial invalid outside-inner-domain count: " +
                                       std::to_string(result.thickness_radial_invalid_outside_inner_domain_count));
-            result.messages.push_back("Geometry Stage 10 radial thickness stats (mean/min/max): " +
-                                      std::to_string(result.mean_thickness_radial) + ", " +
-                                      std::to_string(result.min_thickness_radial) + ", " +
-                                      std::to_string(result.max_thickness_radial));
+            if (result.thickness_radial_invalid_outside_inner_domain_count > 0 &&
+                result.thickness_radial_invalid_no_bracket_count == 0 &&
+                result.thickness_radial_invalid_root_failure_count == 0) {
+                result.messages.push_back(
+                    "[[NOTE]] Geometry Stage 10 radial note: current radial failures are dominated by inner-surface sampling-domain loss along the radial ray, not by bracketing or root-convergence failure.");
+            }
+            result.messages.push_back("Geometry Stage 10 radial active thickness stats (mean/min/max): " +
+                                      std::to_string(result.mean_thickness_active) + ", " +
+                                      std::to_string(result.min_thickness_active) + ", " +
+                                      std::to_string(result.max_thickness_active));
         } else {
-            result.messages.push_back("Geometry Stage 10 thickness stats (mean/min/max): " +
-                                      std::to_string(result.mean_thickness_vertical) + ", " +
-                                      std::to_string(result.min_thickness_vertical) + ", " +
-                                      std::to_string(result.max_thickness_vertical));
+            result.messages.push_back("Geometry Stage 10 active thickness stats (mean/min/max): " +
+                                      std::to_string(result.mean_thickness_active) + ", " +
+                                      std::to_string(result.min_thickness_active) + ", " +
+                                      std::to_string(result.max_thickness_active));
         }
         result.success = true;
     } else {
