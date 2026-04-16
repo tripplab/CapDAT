@@ -2408,8 +2408,9 @@ GeometryStage4RawSheetResult runGeometryAnalysisStage4RawSheetDetection(
     result.messages.push_back("Geometry Stage 4 start timestamp (UTC): " + result.stage4_start_timestamp_utc);
     result.messages.push_back("Geometry Stage 4 end timestamp (UTC): " + result.stage4_end_timestamp_utc);
     result.messages.push_back("Geometry Stage 4 runtime seconds: " + std::to_string(result.stage4_runtime_seconds));
-    if (result.zero_thickness_node_count > 0 || result.negative_thickness_node_count > 0 ||
-        result.unique_both_contact_atom_count > 0) {
+    if (config.debug &&
+        (result.zero_thickness_node_count > 0 || result.negative_thickness_node_count > 0 ||
+         result.unique_both_contact_atom_count > 0)) {
         result.messages.push_back(
             std::string(kNoteMessagePrefix) +
             "Geometry Stage 4 note: non-zero zero-thickness/negative-thickness nodes or both-contact atoms "
@@ -5527,10 +5528,8 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
         notes.push_back(
             "Mean curvature H is reported with the surface-orientation sign convention used internally; its magnitude is usually more robust than its sign when summarizing broad capsid patches.");
     }
-    if (notes.size() < 5) {
-        notes.push_back(
-            "Gaussian curvature K distinguishes local shape class: positive K is dome-like, negative K is saddle-like, and values near zero are weakly curved or cylindrical-like.");
-    }
+    notes.push_back(
+        "Gaussian curvature K distinguishes local shape class: positive K is dome-like, negative K is saddle-like, and values near zero are weakly curved or cylindrical-like.");
     while (notes.size() < 2) {
         static const char* kFallbacks[] = {
             "Detailed per-node values and masks are available in the exported CSV files.",
@@ -5549,6 +5548,7 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
     appendKeyValue(out, "Working frame", result.preparation.final_frame_description);
     appendKeyValue(out, "Cylinder radius", fmtFixed(config.cylinder_radius) + " \u00C5");
     appendKeyValue(out, "Grid spacing", fmtFixed(config.grid_spacing) + " \u00C5");
+    appendKeyValue(out, "Thickness method", radial_method ? "radial" : "vertical");
     appendKeyValue(out, "Patch atoms", fmtCount(patch_atoms));
     appendKeyValue(out, "Grid", fmtCount(result.stage4_raw.grid.nx) + " x " + fmtCount(result.stage4_raw.grid.ny));
     appendKeyValue(out, "Metric domain", fmtCount(metric_domain_count) + " nodes");

@@ -105,13 +105,11 @@ void Logger::log(LogLevel level, const std::string& message) {
 
     std::string formatted;
     if (include_start_timestamp) {
-        formatted = "[" + currentTimestamp() + "]\n"
-                    "[" + levelToString(level) + "] "
-                    + message;
+        formatted = "[" + currentTimestamp() + "] "
+                    "[" + levelToString(level) + "] " + message;
     } else if (include_completion_timestamp) {
-        formatted = "[" + levelToString(level) + "] "
-                    + message + "\n"
-                    "[" + currentTimestamp() + "]";
+        formatted = "[" + currentTimestamp() + "] "
+                    "[" + levelToString(level) + "] " + message;
     } else {
         formatted = "[" + levelToString(level) + "] " + message;
     }
