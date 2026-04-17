@@ -5574,6 +5574,7 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
     appendKeyValue(out, "Grid", fmtCount(result.stage4_raw.grid.nx) + " x " + fmtCount(result.stage4_raw.grid.ny));
     appendKeyValue(out, "Metric domain", fmtCount(metric_domain_count) + " nodes");
     appendKeyValue(out, "Curvature-valid", fmtCount(curvature_valid_count) + " nodes");
+    appendKeyValue(out, "Thickness-valid", fmtCount(thickness_valid_count) + " nodes");
     appendKeyValue(out,
                    "Run summary JSON",
                    result.run_summary_json_path.empty() ? "n/a" : result.run_summary_json_path);
@@ -5603,17 +5604,15 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
     out << '\n';
 
     constexpr int summary_method_col_width = 11;
-    constexpr int summary_valid_col_width = 9;
     constexpr int summary_metric_col_width = 8;
     constexpr int summary_value_col_width = 13;
 
     out << "Thickness\n";
     out << "---------------------------------------------------------\n";
-    out << std::left << std::setw(summary_method_col_width) << "Method" << std::setw(summary_valid_col_width) << "Valid"
-        << std::setw(summary_value_col_width) << "Mean" << std::setw(summary_value_col_width) << "Median"
+    out << std::left << std::setw(summary_method_col_width) << "Method" << std::setw(summary_value_col_width) << "Mean"
+        << std::setw(summary_value_col_width) << "Median"
         << std::setw(summary_value_col_width) << "StdDev" << std::setw(summary_value_col_width) << "Min" << "Max\n";
     out << std::left << std::setw(summary_method_col_width) << (radial_method ? "radial" : "vertical")
-        << std::setw(summary_valid_col_width) << fmtCount(thickness_valid_count)
         << std::setw(summary_value_col_width) << fmtFixed(result.stage10_thickness.mean_thickness_active)
         << std::setw(summary_value_col_width) << fmtFixed(result.stage10_thickness.median_thickness_active)
         << std::setw(summary_value_col_width) << fmtFixed(result.stage10_thickness.stddev_thickness_active)
