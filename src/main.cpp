@@ -1124,6 +1124,10 @@ int main(int argc, char* argv[]) {
 
     try {
         if (!log_path.empty()) {
+            const std::filesystem::path log_parent = std::filesystem::path(log_path).parent_path();
+            if (!log_parent.empty()) {
+                ensureDirectoryExistsOrThrow(log_parent, "log parent");
+            }
             logger.setLogFile(log_path);
         }
     } catch (const std::exception& e) {
