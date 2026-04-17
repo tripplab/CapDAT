@@ -296,4 +296,4 @@ done
 
 For more details look into the `docs` directory:
 
-<https://github.com/tripplab/CapDAT/blob/geometry/docs>
+<https://github.com/tripplab/CapDAT/blob/geometry/docs/CapDAT_technical_specs.md>
