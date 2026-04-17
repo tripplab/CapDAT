@@ -5462,7 +5462,7 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
             return "n/a";
         }
         std::ostringstream out;
-        out << std::scientific << std::setprecision(1) << value;
+        out << std::scientific << std::setprecision(2) << value;
         return out.str();
     };
     const auto appendKeyValue = [](std::ostringstream& out, const std::string& key, const std::string& value) {
@@ -5602,56 +5602,61 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
     }
     out << '\n';
 
+    constexpr int summary_method_col_width = 11;
+    constexpr int summary_valid_col_width = 9;
+    constexpr int summary_metric_col_width = 8;
+    constexpr int summary_value_col_width = 13;
+
     out << "Thickness\n";
     out << "---------------------------------------------------------\n";
-    out << std::left << std::setw(11) << "Method" << std::setw(9) << "Valid" << std::setw(10) << "Mean" << std::setw(10)
-        << "Median" << std::setw(10) << "StdDev" << std::setw(10) << "Min" << "Max\n";
-    out << std::left << std::setw(11) << (radial_method ? "radial" : "vertical") << std::setw(9)
-        << fmtCount(thickness_valid_count) << std::setw(10) << fmtFixed(result.stage10_thickness.mean_thickness_active)
-        << std::setw(10) << fmtFixed(result.stage10_thickness.median_thickness_active) << std::setw(10)
-        << fmtFixed(result.stage10_thickness.stddev_thickness_active) << std::setw(10)
-        << fmtFixed(result.stage10_thickness.min_thickness_active) << fmtFixed(result.stage10_thickness.max_thickness_active)
-        << '\n';
+    out << std::left << std::setw(summary_method_col_width) << "Method" << std::setw(summary_valid_col_width) << "Valid"
+        << std::setw(summary_value_col_width) << "Mean" << std::setw(summary_value_col_width) << "Median"
+        << std::setw(summary_value_col_width) << "StdDev" << std::setw(summary_value_col_width) << "Min" << "Max\n";
+    out << std::left << std::setw(summary_method_col_width) << (radial_method ? "radial" : "vertical")
+        << std::setw(summary_valid_col_width) << fmtCount(thickness_valid_count)
+        << std::setw(summary_value_col_width) << fmtFixed(result.stage10_thickness.mean_thickness_active)
+        << std::setw(summary_value_col_width) << fmtFixed(result.stage10_thickness.median_thickness_active)
+        << std::setw(summary_value_col_width) << fmtFixed(result.stage10_thickness.stddev_thickness_active)
+        << std::setw(summary_value_col_width) << fmtFixed(result.stage10_thickness.min_thickness_active)
+        << fmtFixed(result.stage10_thickness.max_thickness_active) << '\n';
     out << '\n';
 
-    constexpr int curvature_metric_col_width = 8;
-    constexpr int curvature_value_col_width = 12;
     out << "Curvature - outer surface\n";
     out << "---------------------------------------------------------\n";
-    out << std::left << std::setw(curvature_metric_col_width) << "Metric" << std::setw(curvature_value_col_width) << "Mean"
-        << std::setw(curvature_value_col_width) << "Median" << std::setw(curvature_value_col_width) << "StdDev"
-        << std::setw(curvature_value_col_width) << "Min" << "Max\n";
-    out << std::left << std::setw(curvature_metric_col_width) << "H"
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_mean_oriented_H)
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_median_oriented_H)
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_stddev_oriented_H)
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_min_oriented_H)
+    out << std::left << std::setw(summary_metric_col_width) << "Metric" << std::setw(summary_value_col_width) << "Mean"
+        << std::setw(summary_value_col_width) << "Median" << std::setw(summary_value_col_width) << "StdDev"
+        << std::setw(summary_value_col_width) << "Min" << "Max\n";
+    out << std::left << std::setw(summary_metric_col_width) << "H"
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_mean_oriented_H)
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_median_oriented_H)
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_stddev_oriented_H)
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_min_oriented_H)
         << fmtScientificShort(result.stage9_curvature.outer_max_oriented_H) << '\n';
-    out << std::left << std::setw(curvature_metric_col_width) << "K"
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_mean_K)
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_median_K)
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_stddev_K)
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_min_K)
+    out << std::left << std::setw(summary_metric_col_width) << "K"
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_mean_K)
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_median_K)
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_stddev_K)
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_min_K)
         << fmtScientificShort(result.stage9_curvature.outer_max_K) << '\n';
     out << "K QC warn fraction: " << fmtFraction(result.stage9_curvature.outer_K_qc_warn_count, curvature_valid_count)
         << "\n\n";
 
     out << "Curvature - inner surface\n";
     out << "---------------------------------------------------------\n";
-    out << std::left << std::setw(curvature_metric_col_width) << "Metric" << std::setw(curvature_value_col_width) << "Mean"
-        << std::setw(curvature_value_col_width) << "Median" << std::setw(curvature_value_col_width) << "StdDev"
-        << std::setw(curvature_value_col_width) << "Min" << "Max\n";
-    out << std::left << std::setw(curvature_metric_col_width) << "H"
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_mean_oriented_H)
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_median_oriented_H)
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_stddev_oriented_H)
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_min_oriented_H)
+    out << std::left << std::setw(summary_metric_col_width) << "Metric" << std::setw(summary_value_col_width) << "Mean"
+        << std::setw(summary_value_col_width) << "Median" << std::setw(summary_value_col_width) << "StdDev"
+        << std::setw(summary_value_col_width) << "Min" << "Max\n";
+    out << std::left << std::setw(summary_metric_col_width) << "H"
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_mean_oriented_H)
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_median_oriented_H)
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_stddev_oriented_H)
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_min_oriented_H)
         << fmtScientificShort(result.stage9_curvature.inner_max_oriented_H) << '\n';
-    out << std::left << std::setw(curvature_metric_col_width) << "K"
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_mean_K)
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_median_K)
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_stddev_K)
-        << std::setw(curvature_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_min_K)
+    out << std::left << std::setw(summary_metric_col_width) << "K"
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_mean_K)
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_median_K)
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_stddev_K)
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_min_K)
         << fmtScientificShort(result.stage9_curvature.inner_max_K) << '\n';
     out << "K QC warn fraction: " << fmtFraction(result.stage9_curvature.inner_K_qc_warn_count, curvature_valid_count)
         << "\n\n";
