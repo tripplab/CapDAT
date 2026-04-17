@@ -5610,15 +5610,16 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
     out << "---------------------------------------------------------\n";
     out << std::left << std::setw(8) << "Metric" << std::setw(10) << "Mean" << std::setw(10) << "Median" << std::setw(10)
         << "StdDev" << std::setw(10) << "Min" << "Max\n";
-    out << std::left << std::setw(8) << "H" << std::setw(10) << fmtFixed(result.stage9_curvature.outer_mean_oriented_H)
-        << std::setw(10) << fmtFixed(result.stage9_curvature.outer_median_oriented_H) << std::setw(10)
-        << fmtFixed(result.stage9_curvature.outer_stddev_oriented_H) << std::setw(10)
-        << fmtFixed(result.stage9_curvature.outer_min_oriented_H) << fmtFixed(result.stage9_curvature.outer_max_oriented_H)
+    out << std::left << std::setw(8) << "H" << std::setw(10) << formatScientific(result.stage9_curvature.outer_mean_oriented_H)
+        << std::setw(10) << formatScientific(result.stage9_curvature.outer_median_oriented_H) << std::setw(10)
+        << formatScientific(result.stage9_curvature.outer_stddev_oriented_H) << std::setw(10)
+        << formatScientific(result.stage9_curvature.outer_min_oriented_H)
+        << formatScientific(result.stage9_curvature.outer_max_oriented_H) << '\n';
+    out << std::left << std::setw(8) << "K" << std::setw(10) << formatScientific(result.stage9_curvature.outer_mean_K)
+        << std::setw(10) << formatScientific(result.stage9_curvature.outer_median_K) << std::setw(10)
+        << formatScientific(result.stage9_curvature.outer_stddev_K) << std::setw(10)
+        << formatScientific(result.stage9_curvature.outer_min_K) << formatScientific(result.stage9_curvature.outer_max_K)
         << '\n';
-    out << std::left << std::setw(8) << "K" << std::setw(10) << fmtFixed(result.stage9_curvature.outer_mean_K)
-        << std::setw(10) << fmtFixed(result.stage9_curvature.outer_median_K) << std::setw(10)
-        << fmtFixed(result.stage9_curvature.outer_stddev_K) << std::setw(10) << fmtFixed(result.stage9_curvature.outer_min_K)
-        << fmtFixed(result.stage9_curvature.outer_max_K) << '\n';
     out << "K QC warn fraction: " << fmtFraction(result.stage9_curvature.outer_K_qc_warn_count, curvature_valid_count)
         << "\n\n";
 
@@ -5626,15 +5627,16 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
     out << "---------------------------------------------------------\n";
     out << std::left << std::setw(8) << "Metric" << std::setw(10) << "Mean" << std::setw(10) << "Median" << std::setw(10)
         << "StdDev" << std::setw(10) << "Min" << "Max\n";
-    out << std::left << std::setw(8) << "H" << std::setw(10) << fmtFixed(result.stage9_curvature.inner_mean_oriented_H)
-        << std::setw(10) << fmtFixed(result.stage9_curvature.inner_median_oriented_H) << std::setw(10)
-        << fmtFixed(result.stage9_curvature.inner_stddev_oriented_H) << std::setw(10)
-        << fmtFixed(result.stage9_curvature.inner_min_oriented_H) << fmtFixed(result.stage9_curvature.inner_max_oriented_H)
+    out << std::left << std::setw(8) << "H" << std::setw(10) << formatScientific(result.stage9_curvature.inner_mean_oriented_H)
+        << std::setw(10) << formatScientific(result.stage9_curvature.inner_median_oriented_H) << std::setw(10)
+        << formatScientific(result.stage9_curvature.inner_stddev_oriented_H) << std::setw(10)
+        << formatScientific(result.stage9_curvature.inner_min_oriented_H)
+        << formatScientific(result.stage9_curvature.inner_max_oriented_H) << '\n';
+    out << std::left << std::setw(8) << "K" << std::setw(10) << formatScientific(result.stage9_curvature.inner_mean_K)
+        << std::setw(10) << formatScientific(result.stage9_curvature.inner_median_K) << std::setw(10)
+        << formatScientific(result.stage9_curvature.inner_stddev_K) << std::setw(10)
+        << formatScientific(result.stage9_curvature.inner_min_K) << formatScientific(result.stage9_curvature.inner_max_K)
         << '\n';
-    out << std::left << std::setw(8) << "K" << std::setw(10) << fmtFixed(result.stage9_curvature.inner_mean_K)
-        << std::setw(10) << fmtFixed(result.stage9_curvature.inner_median_K) << std::setw(10)
-        << fmtFixed(result.stage9_curvature.inner_stddev_K) << std::setw(10) << fmtFixed(result.stage9_curvature.inner_min_K)
-        << fmtFixed(result.stage9_curvature.inner_max_K) << '\n';
     out << "K QC warn fraction: " << fmtFraction(result.stage9_curvature.inner_K_qc_warn_count, curvature_valid_count)
         << "\n\n";
 
