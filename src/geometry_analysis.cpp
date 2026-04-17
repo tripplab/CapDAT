@@ -5605,7 +5605,7 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
     out << '\n';
 
     constexpr int summary_method_col_width = 11;
-    constexpr int summary_metric_col_width = 8;
+    constexpr int summary_metric_col_width = 14;
     constexpr int summary_value_col_width = 13;
 
     out << "Thickness [\u00C5]\n";
@@ -5623,15 +5623,18 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
 
     out << "Curvature - sphere of radius r_mean=" << fmtFixed(structural_r_mean) << " \u00C5\n";
     out << "---------------------------------------------------------\n";
-    out << std::left << std::setw(summary_metric_col_width) << "Metric" << "Analytical\n";
+    out << std::left << std::setw(summary_metric_col_width) << "Metric" << std::setw(summary_value_col_width)
+        << "Analytical" << '\n';
     const double sphere_H = std::isfinite(structural_r_mean) && structural_r_mean != 0.0
                                 ? (1.0 / structural_r_mean)
                                 : std::numeric_limits<double>::quiet_NaN();
     const double sphere_K = std::isfinite(structural_r_mean) && structural_r_mean != 0.0
                                 ? (1.0 / (structural_r_mean * structural_r_mean))
                                 : std::numeric_limits<double>::quiet_NaN();
-    out << std::left << std::setw(summary_metric_col_width) << "H [\u00C5^-1]" << fmtScientificShort(sphere_H) << '\n';
-    out << std::left << std::setw(summary_metric_col_width) << "K [\u00C5^-2]" << fmtScientificShort(sphere_K) << "\n\n";
+    out << std::left << std::setw(summary_metric_col_width) << "H [\u00C5^-1]" << std::setw(summary_value_col_width)
+        << fmtScientificShort(sphere_H) << '\n';
+    out << std::left << std::setw(summary_metric_col_width) << "K [\u00C5^-2]" << std::setw(summary_value_col_width)
+        << fmtScientificShort(sphere_K) << "\n\n";
 
     out << "Curvature - outer surface\n";
     out << "---------------------------------------------------------\n";
