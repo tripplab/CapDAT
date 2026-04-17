@@ -1247,7 +1247,7 @@ int main(int argc, char* argv[]) {
                 throw std::runtime_error("Geometry analysis failed in Stage 1/2/3/4/5 pipeline");
             }
             const std::string input_name = std::filesystem::path(resolved_input_path).filename().string();
-            std::cout << buildGeometrySummaryReport(geometry_result, geometry_config, input_name);
+            std::cout << buildGeometrySummaryReport(geometry_result, geometry_config, input_name, structural_summary.r_mean);
         }
 
         if (!export_final_output_path.empty()) {

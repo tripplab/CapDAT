@@ -808,6 +808,7 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
 
 std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
                                        const FoldPatchAnalysisConfig& config,
-                                       const std::string& input_name);
+                                       const std::string& input_name,
+                                       double structural_r_mean);
 
 #endif // CAPDAT_GEOMETRY_ANALYSIS_HPP
