@@ -259,21 +259,41 @@ A **successful sample parser run** should look similar to:
 `[INFO] Run completed successfully [YYYY-MM-DD HH:MM:SS]`
 `[YYYY-MM-DD HH:MM:SS]`
 
-## Notes for This Branch
+## Batch execution over multiple canonical folds
 
-This README intentionally reflects the **current development state of the `geometry` branch**, not a minimal parser-only foundation. That means:
-- geometry-analysis options are part of the documented CLI surface,
-- CTest is part of the expected development workflow,
-- the build instructions explicitly enable tests and Debug mode,
-- branch-specific cloning instructions point directly to `geometry`,
-- the old dedicated section `Reorientation and final export semantics (v01)` is intentionally removed.
+When you want to run the same geometry-analysis workflow for several canonical folds, the simplest approach is to wrap CapDAT in a small Bash loop and launch one independent run per fold.
 
-The authoritative references for future README updates on this branch should be:
-- `CMakeLists.txt` for build/test targets and options,
-- `src/main.cpp` for the real CLI surface,
-- the geometry-analysis implementation and tests for stage-level behavior as the pipeline evolves.
+This is intentionally a **batch of independent runs**, not one shared in-memory multi-fold run. Each invocation reparses the original input, resolves its own fold, and writes outputs to its own canonical results directory:
 
+- `results/[PDBID]/[fold_name]/`
+
+That keeps runs isolated and avoids cross-fold state contamination.
+
+### Example: run all canonical folds
+
+```bash
+PDBID="1cwp"
+CapDAT="./build/capsid_analyzer"
+
+for fold_name in 2_0 2_1 3_0 3_1 5_0; do
+  echo "=================================================="
+  echo "Running geometry-analysis for PDBID=${PDBID}, fold=${fold_name}"
+  echo "=================================================="
+
+  "${CapDAT}" -i "${PDBID}" -l results/"${PDBID}"/"${fold_name}"/output.log \
+    --geometry-analysis \
+    --geometry_fold_name "${fold_name}"
+
+  status=$?
+  if [ ${status} -ne 0 ]; then
+    echo "ERROR: run failed for fold ${fold_name} with exit code ${status}" >&2
+  else
+    echo "OK: run completed for fold ${fold_name}"
+  fi
+done
+
+## Notes
 
 For more details look into the `docs` directory:
 
-<https://github.com/tripplab/CapDAT/blob/geometry/docs/technical_spec_and_dev_guide.md>
+<https://github.com/tripplab/CapDAT/blob/geometry/docs>
