@@ -249,6 +249,8 @@ if(CAPDAT_BUILD_TESTS)
              COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && rm -rf results/1cwp/2_0 && '$<TARGET_FILE:capsid_analyzer>' --input 1cwp --geometry-analysis >/tmp/capdat_geom_root.log 2>&1 && test -d results && test -d results/1cwp && test -d results/1cwp/2_0 && test -f results/1cwp/2_0/R35_stage_run_summary.json")
     add_test(NAME capdat_cli_geometry_fold_name_success
              COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && rm -rf results/1cwp/5_0 && '$<TARGET_FILE:capsid_analyzer>' --input 1cwp --geometry-analysis --geometry_fold_name 5_0 >/tmp/capdat_geom_foldname.log 2>&1 && test -d results/1cwp/5_0 && test -f results/1cwp/5_0/R35_stage_run_summary.json")
+    add_test(NAME capdat_cli_geometry_log_path_bootstrap
+             COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && rm -rf results/1cwp/2_0 && '$<TARGET_FILE:capsid_analyzer>' --input 1cwp --geometry-analysis --geometry_fold_name 2_0 --log results/1cwp/2_0/output.log >/tmp/capdat_geom_logpath.log 2>&1 && test -d results && test -d results/1cwp && test -d results/1cwp/2_0 && test -f results/1cwp/2_0/output.log && test -f results/1cwp/2_0/R35_stage_run_summary.json")
     add_test(NAME capdat_cli_geometry_fold_name_invalid
              COMMAND bash -lc "cd '${PROJECT_SOURCE_DIR}' && output=$('$<TARGET_FILE:capsid_analyzer>' --input 1cwp --geometry-analysis --geometry_fold_name bad_fold 2>&1); status=$?; [ $status -ne 0 ] && grep -Fq \"Invalid canonical fold name\" <<< \"$output\"")
     add_test(NAME capdat_cli_geometry_fold_name_mutual_exclusion
