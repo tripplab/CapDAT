@@ -5439,7 +5439,8 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
 
 std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
                                        const FoldPatchAnalysisConfig& config,
-                                       const std::string& input_name) {
+                                       const std::string& input_name,
+                                       double structural_r_mean) {
     const auto fmtCount = [](std::size_t value) -> std::string { return std::to_string(value); };
     const auto fmtFixed = [](double value, int precision = 3) -> std::string {
         if (!std::isfinite(value)) {
@@ -5607,7 +5608,7 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
     constexpr int summary_metric_col_width = 8;
     constexpr int summary_value_col_width = 13;
 
-    out << "Thickness\n";
+    out << "Thickness [\u00C5]\n";
     out << "---------------------------------------------------------\n";
     out << std::left << std::setw(summary_method_col_width) << "Method" << std::setw(summary_value_col_width) << "Mean"
         << std::setw(summary_value_col_width) << "Median"
@@ -5620,18 +5621,30 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
         << fmtFixed(result.stage10_thickness.max_thickness_active) << '\n';
     out << '\n';
 
+    out << "Curvature - sphere of radius r_mean=" << fmtFixed(structural_r_mean) << " \u00C5\n";
+    out << "---------------------------------------------------------\n";
+    out << std::left << std::setw(summary_metric_col_width) << "Metric" << "Analytical\n";
+    const double sphere_H = std::isfinite(structural_r_mean) && structural_r_mean != 0.0
+                                ? (1.0 / structural_r_mean)
+                                : std::numeric_limits<double>::quiet_NaN();
+    const double sphere_K = std::isfinite(structural_r_mean) && structural_r_mean != 0.0
+                                ? (1.0 / (structural_r_mean * structural_r_mean))
+                                : std::numeric_limits<double>::quiet_NaN();
+    out << std::left << std::setw(summary_metric_col_width) << "H [\u00C5^-1]" << fmtScientificShort(sphere_H) << '\n';
+    out << std::left << std::setw(summary_metric_col_width) << "K [\u00C5^-2]" << fmtScientificShort(sphere_K) << "\n\n";
+
     out << "Curvature - outer surface\n";
     out << "---------------------------------------------------------\n";
     out << std::left << std::setw(summary_metric_col_width) << "Metric" << std::setw(summary_value_col_width) << "Mean"
         << std::setw(summary_value_col_width) << "Median" << std::setw(summary_value_col_width) << "StdDev"
         << std::setw(summary_value_col_width) << "Min" << "Max\n";
-    out << std::left << std::setw(summary_metric_col_width) << "H"
+    out << std::left << std::setw(summary_metric_col_width) << "H [\u00C5^-1]"
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_mean_oriented_H)
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_median_oriented_H)
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_stddev_oriented_H)
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_min_oriented_H)
         << fmtScientificShort(result.stage9_curvature.outer_max_oriented_H) << '\n';
-    out << std::left << std::setw(summary_metric_col_width) << "K"
+    out << std::left << std::setw(summary_metric_col_width) << "K [\u00C5^-2]"
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_mean_K)
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_median_K)
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_stddev_K)
@@ -5645,13 +5658,13 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
     out << std::left << std::setw(summary_metric_col_width) << "Metric" << std::setw(summary_value_col_width) << "Mean"
         << std::setw(summary_value_col_width) << "Median" << std::setw(summary_value_col_width) << "StdDev"
         << std::setw(summary_value_col_width) << "Min" << "Max\n";
-    out << std::left << std::setw(summary_metric_col_width) << "H"
+    out << std::left << std::setw(summary_metric_col_width) << "H [\u00C5^-1]"
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_mean_oriented_H)
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_median_oriented_H)
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_stddev_oriented_H)
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_min_oriented_H)
         << fmtScientificShort(result.stage9_curvature.inner_max_oriented_H) << '\n';
-    out << std::left << std::setw(summary_metric_col_width) << "K"
+    out << std::left << std::setw(summary_metric_col_width) << "K [\u00C5^-2]"
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_mean_K)
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_median_K)
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_stddev_K)
