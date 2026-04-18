@@ -5568,10 +5568,6 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
                    result.preparation.resolved_fold_name + " (type=" + std::to_string(config.fold_type) +
                        ", index=" + std::to_string(config.fold_index) + ")");
     appendKeyValue(out, "Working frame", result.preparation.final_frame_description);
-    appendKeyValue(out, "Output root", config.output_root_dir);
-    appendKeyValue(out,
-                   "Run summary JSON",
-                   result.run_summary_json_path.empty() ? "n/a" : result.run_summary_json_path);
     appendKeyValue(out, "Cylinder radius", fmtFixed(config.cylinder_radius) + " \u00C5");
     appendKeyValue(out, "Grid spacing", fmtFixed(config.grid_spacing) + " \u00C5");
     appendKeyValue(out, "Thickness method", radial_method ? "radial" : "vertical");
@@ -5580,6 +5576,10 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
     appendKeyValue(out, "Metric domain", fmtCount(metric_domain_count) + " nodes");
     appendKeyValue(out, "Curvature-valid", fmtCount(curvature_valid_count) + " nodes");
     appendKeyValue(out, "Thickness-valid", fmtCount(thickness_valid_count) + " nodes");
+    appendKeyValue(out, "Output root", config.output_root_dir);
+    appendKeyValue(out,
+                   "Run summary JSON",
+                   result.run_summary_json_path.empty() ? "n/a" : result.run_summary_json_path);
     out << "Visualizations in:\n";
     out << "  - " << (result.stage2_patch.export_path.empty() ? "n/a" : result.stage2_patch.export_path) << '\n';
     out << "  - "
