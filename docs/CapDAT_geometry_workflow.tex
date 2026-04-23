@@ -1,0 +1,171 @@
+\paragraph{End-to-end geometry-analysis pipeline.}
+The geometry workflow implemented in the \texttt{geometry} branch is a staged fold-centered patch-analysis pipeline that transforms a parsed capsid structure into locally reconstructed inner and outer surfaces, then into derivative fields, curvature fields, and thickness fields. The stages are summarized below in execution order.
+
+\begin{enumerate}
+  \item \textbf{Input parsing and capsid construction.}  
+  The program begins from a parsed \texttt{Capsid} object built from the input \texttt{data/[PDBID]\_full.vdb} file. At this point, the accepted atomic coordinates define the working molecular structure on which the geometry pipeline operates.
+
+  \item \textbf{Stage 1: canonical fold resolution and working-frame preparation.}  
+  The requested canonical fold is resolved from the configured fold type and fold index. Using the post-parse symmetry/orientation machinery, the selected fold axis is aligned to the positive \(Z\) axis. If needed, this is applied as an in-place coordinate rotation of the capsid; if the requested fold is already aligned to \(+Z\), the workflow records an identity transformation while still updating orientation provenance. The output of this stage is therefore a \emph{common working frame} in which the chosen fold is centered analytically around the \(+Z\) direction.
+
+  \item \textbf{Stage 2: cylindrical patch selection.}  
+  After reorientation, the local fold-centered patch is selected by a strict geometric rule. An atom is retained if and only if
+  \[
+    z > 0
+    \qquad\text{and}\qquad
+    r_{xy} = \sqrt{x^2+y^2} \le R ,
+  \]
+  where \(R\) is the configured cylinder radius. This stage therefore extracts the positive-\(Z\), fold-centered cylindrical cap used in all later analysis. The selected atoms are exported as a traceable patch subset.
+
+  \item \textbf{Stage 3: analytical patch normalization.}  
+  The selected patch atoms are converted into an analytical atom cloud suitable for geometric envelope calculations. Each patch atom stores: rotated working-frame coordinates, normalized element identity, assigned van der Waals radius, membership facts inherited from Stage 2, and a stable pointer to the original atom. Unsupported or unresolved elements fall back to a default van der Waals radius. The output is an \texttt{AnalyticalPatch} that serves as the geometric substrate for raw surface detection.
+
+  \item \textbf{Stage 4: regular-grid raw outer/inner sheet detection by vertical ray--sphere envelope sampling.}  
+  A regular Cartesian grid is built over the disk \(\{(x,y): x^2+y^2 \le R^2\}\) with spacing \(h\). For each grid node \((x_i,y_j)\), the code intersects the vertical line through that node with all atomic spheres in the analytical patch. If an atom sphere intersects the line, the intersection provides lower and upper contact heights \(z_{\mathrm{low}}\) and \(z_{\mathrm{high}}\). The raw envelopes are then defined as
+  \[
+    z_{\mathrm{outer,raw}}(x_i,y_j) = \max_{\text{all hits}} z_{\mathrm{high}},
+    \qquad
+    z_{\mathrm{inner,raw}}(x_i,y_j) = \min_{\text{all hits}} z_{\mathrm{low}}.
+  \]
+  Thus, Stage 4 does \emph{not} choose the atom with highest center or lowest center; it chooses the envelope-defining contact by the extremal line--sphere intersection height. The stage records contact provenance, valid/invalid masks, and raw-contact diagnostics.
+
+  \item \textbf{Stage 5: seed, boundary, interpolation, and reliable-core preparation.}  
+  The Stage 4 raw envelopes are promoted into seed fields for surface reconstruction. This stage constructs: outer and inner seed arrays, paired-seed masks, boundary-exclusion masks, interpolation-allowed masks, hard-invalid masks, and a reliable-core mask. The result is a reconstruction-ready domain partition that separates trusted seed nodes, admissible interpolation nodes, excluded boundary regions, and the interior core used for downstream metrics.
+
+  \item \textbf{Stage 6: deterministic surface reconstruction on the regular grid.}  
+  The outer and inner raw seeds are reconstructed into continuous scalar fields on the Stage 4 grid. The implemented algorithm keeps paired seeds fixed, initializes interpolation-allowed nodes from local four-neighbor averages when possible, and then applies deterministic Jacobi relaxation using only finite four-neighbor values. Non-crossing enforcement can be applied afterward by ensuring a minimum allowed outer--inner separation. The output is a pair of reconstructed surfaces,
+  \[
+    z_{\mathrm{outer,recon}}(x_i,y_j), \qquad z_{\mathrm{inner,recon}}(x_i,y_j),
+  \]
+  plus masks describing the reconstructed and final-valid analysis domain. Optional mesh exports are generated here.
+
+  \item \textbf{Stage 7: surface smoothing / regularization.}  
+  The reconstructed Stage 6 surfaces are further regularized. Two methods are supported: a legacy smoothing pass and a thin-plate-style grid fit. In the thin-plate mode, fidelity weights distinguish seed-like and interpolated nodes, boundary conditions can be free/fixed/soft, and a bending-regularization parameter controls smoothness. A second non-crossing enforcement step may be applied after smoothing. The result is a pair of smoothed metric surfaces,
+  \[
+    z_{\mathrm{outer,smooth}}(x_i,y_j), \qquad z_{\mathrm{inner,smooth}}(x_i,y_j),
+  \]
+  together with the \emph{metric-domain mask}, which restricts downstream differential analysis to the reliable smoothed core.
+
+  \item \textbf{Stage 8: local quadratic derivative estimation.}  
+  Stage 8 operates only when Stage 7 uses the thin-plate grid-fit method. For each node in the metric domain, the code gathers neighboring valid nodes within a configured support radius and fits a local quadratic surface in shifted coordinates \((u,v)\):
+  \[
+    z(u,v) = a + bu + cv + du^2 + euv + fv^2 .
+  \]
+  From this fit, the derivatives at the central node are obtained as
+  \[
+    z_x = b, \qquad z_y = c, \qquad z_{xx} = 2d, \qquad z_{yy} = 2f, \qquad z_{xy} = e .
+  \]
+  This is performed independently for the outer and inner smoothed surfaces. The stage also enforces support-quality requirements, including minimum support size, directional span, centered support, conditioning threshold, and residual thresholds. Nodes failing these checks are excluded from derivative-valid status. The outputs are therefore locally fitted first- and second-derivative fields for both surfaces, plus detailed derivative-valid and derivative-failure masks.
+
+  \item \textbf{Stage 9: Monge-patch curvature computation, radial sign correction, and \(K\)-QC.}  
+  Stage 9 consumes the Stage 8 derivative fields and evaluates curvature nodewise by treating each smoothed surface locally as a Monge patch \(z=z(x,y)\). For each derivative-valid node, Gaussian curvature is computed as
+  \[
+    K = \frac{z_{xx}z_{yy} - z_{xy}^2}{\left(1+z_x^2+z_y^2\right)^2},
+  \]
+  and mean curvature is computed as
+  \[
+    H = \frac{(1+z_x^2)z_{yy} - 2 z_x z_y z_{xy} + (1+z_y^2)z_{xx}}
+             {2\left(1+z_x^2+z_y^2\right)^{3/2}} .
+  \]
+  These formulas are evaluated independently for the outer and inner surfaces.
+
+  The stage then constructs the graph normal
+  \[
+    \mathbf{n}_{\mathrm{graph}} = (-z_x,\,-z_y,\,1)
+  \]
+  and compares it against the outward radial direction from the origin to the surface point,
+  \[
+    \mathbf{r} = (x,y,z) .
+  \]
+  Using the normalized dot product
+  \[
+    \frac{\mathbf{n}_{\mathrm{graph}}\cdot \mathbf{r}}
+         {\|\mathbf{n}_{\mathrm{graph}}\|\,\|\mathbf{r}\|},
+  \]
+  the code decides whether the graph normal is outward-facing. This orientation check is used to define an \emph{oriented} mean curvature:
+  \[
+    H_{\mathrm{oriented}} =
+    \begin{cases}
+      H, & \mathbf{n}_{\mathrm{graph}}\cdot\mathbf{r} > 0,\\
+      -H, & \mathbf{n}_{\mathrm{graph}}\cdot\mathbf{r} \le 0.
+    \end{cases}
+  \]
+  Gaussian curvature \(K\) is left unchanged, since it is invariant under normal reversal.
+
+  After curvature evaluation, the stage performs quality control on \(K\) only. First, a global-tail detector compares each valid \(K\) value against the global median and robust sigma estimated from the full curvature-valid set. Second, a local-spike detector compares each node against the median and robust scale of its valid \(8\)-neighborhood. Nodes flagged by either test receive \(K\)-warning flags and a downgraded confidence class, but remain part of the curvature-valid domain. The stage outputs raw \(H\), oriented \(H\), raw \(K\), radial-normal alignment metadata, curvature-valid masks, and \(K\)-QC flags.
+
+  \item \textbf{Stage 10: thickness computation.}  
+  Thickness is computed downstream from the Stage 7 surfaces, with optional restriction to the Stage 9 curvature-valid domain. Two methods are supported. In the vertical method,
+  \[
+    t_{\mathrm{vertical}} = z_{\mathrm{outer,smooth}} - z_{\mathrm{inner,smooth}} .
+  \]
+  In the radial method, the code follows the origin-centered ray through the outer point and searches for its intersection with the inner Stage 7 surface; thickness is then the difference in radial distance between the outer and inner intersection points. Domain failures, bracketing failures, and root-finding failures are explicitly tracked. Stage 10 reports nodewise thickness fields, validity masks, invalidity reasons, and summary statistics.
+
+\end{enumerate}
+
+\paragraph{Pipeline logic in compact dependency form.}
+The full dependency chain can therefore be summarized as
+\[
+\text{Capsid}
+\;\rightarrow\;
+\text{Stage 1 orientation}
+\;\rightarrow\;
+\text{Stage 2 patch selection}
+\;\rightarrow\;
+\text{Stage 3 analytical patch}
+\;\rightarrow\;
+\text{Stage 4 raw envelopes}
+\;\rightarrow\;
+\text{Stage 5 seeds/masks}
+\;\rightarrow\;
+\text{Stage 6 reconstruction}
+\;\rightarrow\;
+\text{Stage 7 smoothing}
+\;\rightarrow\;
+\text{Stage 8 local quadratic derivative estimation}
+\;\rightarrow\;
+\text{Stage 9 Monge-patch curvature + radial sign correction + \(K\)-QC}
+\;\rightarrow\;
+\text{Stage 10 thickness}.
+\]
+
+\paragraph{Text flow diagram.}
+The same workflow may be represented schematically as follows:
+\[
+\boxed{
+\begin{array}{c}
+\text{Parsed capsid} \\[2pt]
+\downarrow \\[2pt]
+\text{Stage 1: resolve canonical fold and align selected fold to } +Z \\[2pt]
+\downarrow \\[2pt]
+\text{Stage 2: select fold-centered cylindrical patch } (z>0,\; r_{xy}\le R) \\[2pt]
+\downarrow \\[2pt]
+\text{Stage 3: normalize patch atoms and assign van der Waals radii} \\[2pt]
+\downarrow \\[2pt]
+\text{Stage 4: sample raw outer/inner sheets by vertical ray--sphere envelope detection} \\[2pt]
+\downarrow \\[2pt]
+\text{Stage 5: prepare seeds, interpolation masks, boundary masks, reliable core} \\[2pt]
+\downarrow \\[2pt]
+\text{Stage 6: reconstruct outer and inner scalar surfaces on the regular grid} \\[2pt]
+\downarrow \\[2pt]
+\text{Stage 7: smooth / regularize reconstructed surfaces} \\[2pt]
+\downarrow \\[2pt]
+\text{Stage 8: local quadratic derivative estimation } 
+\bigl(z_x,z_y,z_{xx},z_{yy},z_{xy}\bigr) \\[2pt]
+\downarrow \\[2pt]
+\text{Stage 9: Monge-patch curvature evaluation } (H,K) \\
+\text{\hspace{2.3cm} + radial sign correction for } H \\
+\text{\hspace{2.3cm} + global/local } K\text{-QC} \\[2pt]
+\downarrow \\[2pt]
+\text{Stage 10: thickness computation (vertical or radial)}
+\end{array}
+}
+\]
+
+\paragraph{Interpretive note.}
+In this implementation, curvature is \emph{not} computed directly from the atom cloud and \emph{not} from the raw Stage 4 contact sheets. Instead, it is a downstream quantity derived from the \emph{Stage 7 smoothed surfaces} through \emph{Stage 8 local quadratic derivative estimation}, after which \emph{Stage 9} evaluates Monge-patch curvature formulas, corrects the sign of \(H\) using the outward radial convention, and assigns robustness warnings based on \(K\)-specific global-tail and local-spike detectors. This makes the curvature fields fundamentally dependent on the quality of reconstruction, smoothing, derivative support geometry, and Stage 9 quality-control masks.
+
+
+
+
+
