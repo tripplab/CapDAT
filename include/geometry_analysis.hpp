@@ -512,14 +512,14 @@ struct GeometryStage8DerivativeEstimationResult {
 };
 
 struct Stage9IntegralAverageStats {
-    std::size_t candidate_cell_count = 0;
-    std::size_t valid_cell_count = 0;
-    double retained_cell_fraction = std::numeric_limits<double>::quiet_NaN();
-    double projected_area = std::numeric_limits<double>::quiet_NaN();
+    double area_mean = std::numeric_limits<double>::quiet_NaN();
     double surface_area = std::numeric_limits<double>::quiet_NaN();
+    double projected_area = std::numeric_limits<double>::quiet_NaN();
+    std::size_t valid_cell_count = 0;
+    std::size_t candidate_cell_count = 0;
+    double retained_fraction = std::numeric_limits<double>::quiet_NaN();
+    double mean_J = std::numeric_limits<double>::quiet_NaN();
     double weighted_numerator = std::numeric_limits<double>::quiet_NaN();
-    double area_weighted_mean = std::numeric_limits<double>::quiet_NaN();
-    std::string domain_rule = "fully_valid_four_corner_cells";
 };
 
 struct GeometryStage9CurvatureComputationResult {
@@ -616,12 +616,21 @@ struct GeometryStage9CurvatureComputationResult {
     std::string curvature_valid_mask_csv_path;
     std::string curvature_summary_csv_path;
 
-    Stage9IntegralAverageStats outer_oriented_H_area_average;
-    Stage9IntegralAverageStats inner_oriented_H_area_average;
-    Stage9IntegralAverageStats outer_K_area_average;
-    Stage9IntegralAverageStats inner_K_area_average;
-    Stage9IntegralAverageStats outer_K_qc_clean_area_average;
-    Stage9IntegralAverageStats inner_K_qc_clean_area_average;
+    Stage9IntegralAverageStats outer_H_area;
+    Stage9IntegralAverageStats outer_K_area;
+    Stage9IntegralAverageStats outer_K_qc_clean_area;
+
+    Stage9IntegralAverageStats inner_H_area;
+    Stage9IntegralAverageStats inner_K_area;
+    Stage9IntegralAverageStats inner_K_qc_clean_area;
+
+    double outer_H_mean_discrepancy = std::numeric_limits<double>::quiet_NaN();
+    double outer_K_mean_discrepancy = std::numeric_limits<double>::quiet_NaN();
+    double inner_H_mean_discrepancy = std::numeric_limits<double>::quiet_NaN();
+    double inner_K_mean_discrepancy = std::numeric_limits<double>::quiet_NaN();
+
+    double outer_K_qc_rejected_fraction = std::numeric_limits<double>::quiet_NaN();
+    double inner_K_qc_rejected_fraction = std::numeric_limits<double>::quiet_NaN();
 
     std::vector<std::string> messages;
 };
