@@ -2855,12 +2855,12 @@ void testStage9IntegralAreaAverageConstantFlatField() {
     FoldPatchAnalysisConfig config;
     config.stage9_export_csv = false;
     const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
-    assertTrue(stage9.outer_oriented_H_area_average.candidate_cell_count == 4, "3x3 grid has 4 candidate cells");
-    assertTrue(stage9.outer_oriented_H_area_average.valid_cell_count == 4, "all 4 cells should be valid");
-    assertTrue(near(stage9.outer_oriented_H_area_average.projected_area, 4.0), "projected area should be 4");
-    assertTrue(near(stage9.outer_oriented_H_area_average.surface_area, 4.0), "surface area should be 4");
-    assertTrue(near(stage9.outer_oriented_H_area_average.weighted_numerator, 0.0), "flat H numerator should be 0");
-    assertTrue(near(stage9.outer_oriented_H_area_average.area_weighted_mean, 0.0), "flat H mean should be 0");
+    assertTrue(stage9.outer_H_area.candidate_cell_count == 4, "3x3 grid has 4 candidate cells");
+    assertTrue(stage9.outer_H_area.valid_cell_count == 4, "all 4 cells should be valid");
+    assertTrue(near(stage9.outer_H_area.projected_area, 4.0), "projected area should be 4");
+    assertTrue(near(stage9.outer_H_area.surface_area, 4.0), "surface area should be 4");
+    assertTrue(near(stage9.outer_H_area.weighted_numerator, 0.0), "flat H numerator should be 0");
+    assertTrue(near(stage9.outer_H_area.area_mean, 0.0), "flat H mean should be 0");
 }
 
 void testStage9IntegralAreaAverageSlopedConstantField() {
@@ -2884,9 +2884,9 @@ void testStage9IntegralAreaAverageSlopedConstantField() {
     FoldPatchAnalysisConfig config;
     config.stage9_export_csv = false;
     const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
-    assertTrue(near(stage9.outer_oriented_H_area_average.area_weighted_mean, 0.0), "constant zero field should stay zero");
-    assertTrue(near(stage9.outer_oriented_H_area_average.surface_area, 4.0 * expectedJ), "surface area should include J");
-    assertTrue(near(stage9.outer_oriented_H_area_average.projected_area, 4.0), "projected area should stay 4");
+    assertTrue(near(stage9.outer_H_area.area_mean, 0.0), "constant zero field should stay zero");
+    assertTrue(near(stage9.outer_H_area.surface_area, 4.0 * expectedJ), "surface area should include J");
+    assertTrue(near(stage9.outer_H_area.projected_area, 4.0), "projected area should stay 4");
 }
 
 void testStage9IntegralAreaAverageMaskRejectionAndQcCleanK() {
@@ -2914,8 +2914,8 @@ void testStage9IntegralAreaAverageMaskRejectionAndQcCleanK() {
     config.stage9_export_csv = false;
     config.stage9_qc_n_spike = 2.0;
     const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
-    assertTrue(stage9.outer_K_area_average.valid_cell_count == 3, "invalid corner should reject only touching cell");
-    assertTrue(stage9.outer_K_qc_clean_area_average.valid_cell_count < stage9.outer_K_area_average.valid_cell_count,
+    assertTrue(stage9.outer_K_area.valid_cell_count == 3, "invalid corner should reject only touching cell");
+    assertTrue(stage9.outer_K_qc_clean_area.valid_cell_count < stage9.outer_K_area.valid_cell_count,
                "QC-clean K must be stricter than all-valid K");
 }
 
