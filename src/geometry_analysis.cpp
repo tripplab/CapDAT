@@ -3860,6 +3860,61 @@ Stage9ScalarStats computeStage9ScalarStats(const std::vector<double>& values, co
     return stats;
 }
 
+Stage9IntegralAverageStats computeStage9SurfaceAreaWeightedCellAverage(const Stage4GridDescriptor& grid,
+                                                                       const std::vector<double>& field_values,
+                                                                       const std::vector<double>& dz_dx,
+                                                                       const std::vector<double>& dz_dy,
+                                                                       const std::vector<uint8_t>& validity_mask,
+                                                                       const std::vector<uint8_t>* exclusion_mask) {
+    Stage9IntegralAverageStats stats;
+    if (grid.nx < 2 || grid.ny < 2) {
+        return stats;
+    }
+    const double dA_proj = grid.spacing * grid.spacing;
+    double numerator = 0.0;
+    double denominator = 0.0;
+    double projected_area = 0.0;
+    for (std::size_t j = 0; j + 1 < grid.ny; ++j) {
+        for (std::size_t i = 0; i + 1 < grid.nx; ++i) {
+            const std::size_t idx00 = stage4NodeIndex(i, j, grid.nx);
+            const std::size_t idx10 = stage4NodeIndex(i + 1, j, grid.nx);
+            const std::size_t idx01 = stage4NodeIndex(i, j + 1, grid.nx);
+            const std::size_t idx11 = stage4NodeIndex(i + 1, j + 1, grid.nx);
+            const std::size_t idxs[4] = {idx00, idx10, idx01, idx11};
+            ++stats.candidate_cell_count;
+            bool accepted = true;
+            for (const std::size_t idx : idxs) {
+                if (validity_mask[idx] == 0 || !std::isfinite(field_values[idx]) || !std::isfinite(dz_dx[idx]) ||
+                    !std::isfinite(dz_dy[idx]) || (exclusion_mask != nullptr && (*exclusion_mask)[idx] != 0)) {
+                    accepted = false;
+                    break;
+                }
+            }
+            if (!accepted) {
+                continue;
+            }
+            const double field_c = 0.25 * (field_values[idx00] + field_values[idx10] + field_values[idx01] + field_values[idx11]);
+            const auto J = [&](std::size_t idx) { return std::sqrt(1.0 + (dz_dx[idx] * dz_dx[idx]) + (dz_dy[idx] * dz_dy[idx])); };
+            const double J_c = 0.25 * (J(idx00) + J(idx10) + J(idx01) + J(idx11));
+            numerator += field_c * J_c * dA_proj;
+            denominator += J_c * dA_proj;
+            projected_area += dA_proj;
+            ++stats.valid_cell_count;
+        }
+    }
+    if (stats.candidate_cell_count > 0) {
+        stats.retained_cell_fraction =
+            static_cast<double>(stats.valid_cell_count) / static_cast<double>(stats.candidate_cell_count);
+    }
+    stats.projected_area = projected_area;
+    stats.surface_area = denominator;
+    stats.weighted_numerator = numerator;
+    if (stats.valid_cell_count > 0 && denominator > 0.0) {
+        stats.area_weighted_mean = numerator / denominator;
+    }
+    return stats;
+}
+
 bool writeStage9CurvatureCsv(const GeometryStage9CurvatureComputationResult& result,
                              const std::string& path,
                              const std::vector<double>& raw_H,
@@ -3935,7 +3990,24 @@ bool writeStage9SummaryCsv(const GeometryStage9CurvatureComputationResult& resul
            "inner_mean_H,inner_median_H,inner_stddev_H,inner_min_H,inner_max_H,"
            "inner_mean_oriented_H,inner_median_oriented_H,inner_stddev_oriented_H,inner_min_oriented_H,"
            "inner_max_oriented_H,"
-           "inner_mean_K,inner_median_K,inner_stddev_K,inner_min_K,inner_max_K\n";
+           "inner_mean_K,inner_median_K,inner_stddev_K,inner_min_K,inner_max_K,"
+           "outer_area_avg_oriented_H,outer_area_avg_oriented_H_valid_cells,outer_area_avg_oriented_H_candidate_cells,"
+           "outer_area_avg_oriented_H_retained_cell_fraction,outer_area_avg_oriented_H_projected_area,"
+           "outer_area_avg_oriented_H_surface_area,outer_area_avg_oriented_H_weighted_numerator,"
+           "inner_area_avg_oriented_H,inner_area_avg_oriented_H_valid_cells,inner_area_avg_oriented_H_candidate_cells,"
+           "inner_area_avg_oriented_H_retained_cell_fraction,inner_area_avg_oriented_H_projected_area,"
+           "inner_area_avg_oriented_H_surface_area,inner_area_avg_oriented_H_weighted_numerator,"
+           "outer_area_avg_K,outer_area_avg_K_valid_cells,outer_area_avg_K_candidate_cells,"
+           "outer_area_avg_K_retained_cell_fraction,outer_area_avg_K_projected_area,outer_area_avg_K_surface_area,"
+           "outer_area_avg_K_weighted_numerator,inner_area_avg_K,inner_area_avg_K_valid_cells,"
+           "inner_area_avg_K_candidate_cells,inner_area_avg_K_retained_cell_fraction,inner_area_avg_K_projected_area,"
+           "inner_area_avg_K_surface_area,inner_area_avg_K_weighted_numerator,outer_area_avg_K_qc_clean,"
+           "outer_area_avg_K_qc_clean_valid_cells,outer_area_avg_K_qc_clean_candidate_cells,"
+           "outer_area_avg_K_qc_clean_retained_cell_fraction,outer_area_avg_K_qc_clean_projected_area,"
+           "outer_area_avg_K_qc_clean_surface_area,outer_area_avg_K_qc_clean_weighted_numerator,"
+           "inner_area_avg_K_qc_clean,inner_area_avg_K_qc_clean_valid_cells,inner_area_avg_K_qc_clean_candidate_cells,"
+           "inner_area_avg_K_qc_clean_retained_cell_fraction,inner_area_avg_K_qc_clean_projected_area,"
+           "inner_area_avg_K_qc_clean_surface_area,inner_area_avg_K_qc_clean_weighted_numerator\n";
     out << result.node_count << ',' << result.metric_domain_node_count << ',' << result.derivative_valid_node_count << ','
         << result.curvature_valid_node_count << ',' << result.curvature_valid_fraction_of_metric_domain << ','
         << result.curvature_valid_fraction_of_derivative_valid << ',' << result.curvature_invalid_nonfinite_input_count
@@ -3957,7 +4029,42 @@ bool writeStage9SummaryCsv(const GeometryStage9CurvatureComputationResult& resul
         << result.inner_mean_oriented_H << ',' << result.inner_median_oriented_H << ','
         << result.inner_stddev_oriented_H << ',' << result.inner_min_oriented_H << ',' << result.inner_max_oriented_H << ','
         << result.inner_mean_K << ',' << result.inner_median_K << ',' << result.inner_stddev_K << ','
-        << result.inner_min_K << ',' << result.inner_max_K << '\n';
+        << result.inner_min_K << ',' << result.inner_max_K << ','
+        << result.outer_oriented_H_area_average.area_weighted_mean << ','
+        << result.outer_oriented_H_area_average.valid_cell_count << ','
+        << result.outer_oriented_H_area_average.candidate_cell_count << ','
+        << result.outer_oriented_H_area_average.retained_cell_fraction << ','
+        << result.outer_oriented_H_area_average.projected_area << ','
+        << result.outer_oriented_H_area_average.surface_area << ','
+        << result.outer_oriented_H_area_average.weighted_numerator << ','
+        << result.inner_oriented_H_area_average.area_weighted_mean << ','
+        << result.inner_oriented_H_area_average.valid_cell_count << ','
+        << result.inner_oriented_H_area_average.candidate_cell_count << ','
+        << result.inner_oriented_H_area_average.retained_cell_fraction << ','
+        << result.inner_oriented_H_area_average.projected_area << ','
+        << result.inner_oriented_H_area_average.surface_area << ','
+        << result.inner_oriented_H_area_average.weighted_numerator << ','
+        << result.outer_K_area_average.area_weighted_mean << ',' << result.outer_K_area_average.valid_cell_count << ','
+        << result.outer_K_area_average.candidate_cell_count << ',' << result.outer_K_area_average.retained_cell_fraction << ','
+        << result.outer_K_area_average.projected_area << ',' << result.outer_K_area_average.surface_area << ','
+        << result.outer_K_area_average.weighted_numerator << ',' << result.inner_K_area_average.area_weighted_mean << ','
+        << result.inner_K_area_average.valid_cell_count << ',' << result.inner_K_area_average.candidate_cell_count << ','
+        << result.inner_K_area_average.retained_cell_fraction << ',' << result.inner_K_area_average.projected_area << ','
+        << result.inner_K_area_average.surface_area << ',' << result.inner_K_area_average.weighted_numerator << ','
+        << result.outer_K_qc_clean_area_average.area_weighted_mean << ','
+        << result.outer_K_qc_clean_area_average.valid_cell_count << ','
+        << result.outer_K_qc_clean_area_average.candidate_cell_count << ','
+        << result.outer_K_qc_clean_area_average.retained_cell_fraction << ','
+        << result.outer_K_qc_clean_area_average.projected_area << ','
+        << result.outer_K_qc_clean_area_average.surface_area << ','
+        << result.outer_K_qc_clean_area_average.weighted_numerator << ','
+        << result.inner_K_qc_clean_area_average.area_weighted_mean << ','
+        << result.inner_K_qc_clean_area_average.valid_cell_count << ','
+        << result.inner_K_qc_clean_area_average.candidate_cell_count << ','
+        << result.inner_K_qc_clean_area_average.retained_cell_fraction << ','
+        << result.inner_K_qc_clean_area_average.projected_area << ','
+        << result.inner_K_qc_clean_area_average.surface_area << ','
+        << result.inner_K_qc_clean_area_average.weighted_numerator << '\n';
     return out.good();
 }
 
@@ -4948,6 +5055,45 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
     result.inner_stddev_K = inner_K_stats.stddev;
     result.inner_min_K = inner_K_stats.min;
     result.inner_max_K = inner_K_stats.max;
+
+    result.outer_oriented_H_area_average = computeStage9SurfaceAreaWeightedCellAverage(
+        result.grid,
+        result.outer_oriented_mean_curvature_H,
+        stage8_result.outer_dz_dx,
+        stage8_result.outer_dz_dy,
+        result.curvature_valid_mask,
+        nullptr);
+    result.inner_oriented_H_area_average = computeStage9SurfaceAreaWeightedCellAverage(
+        result.grid,
+        result.inner_oriented_mean_curvature_H,
+        stage8_result.inner_dz_dx,
+        stage8_result.inner_dz_dy,
+        result.curvature_valid_mask,
+        nullptr);
+    result.outer_K_area_average = computeStage9SurfaceAreaWeightedCellAverage(result.grid,
+                                                                               result.outer_gaussian_curvature_K,
+                                                                               stage8_result.outer_dz_dx,
+                                                                               stage8_result.outer_dz_dy,
+                                                                               result.curvature_valid_mask,
+                                                                               nullptr);
+    result.inner_K_area_average = computeStage9SurfaceAreaWeightedCellAverage(result.grid,
+                                                                               result.inner_gaussian_curvature_K,
+                                                                               stage8_result.inner_dz_dx,
+                                                                               stage8_result.inner_dz_dy,
+                                                                               result.curvature_valid_mask,
+                                                                               nullptr);
+    result.outer_K_qc_clean_area_average = computeStage9SurfaceAreaWeightedCellAverage(result.grid,
+                                                                                        result.outer_gaussian_curvature_K,
+                                                                                        stage8_result.outer_dz_dx,
+                                                                                        stage8_result.outer_dz_dy,
+                                                                                        result.curvature_valid_mask,
+                                                                                        &result.outer_K_qc_warn_flag);
+    result.inner_K_qc_clean_area_average = computeStage9SurfaceAreaWeightedCellAverage(result.grid,
+                                                                                        result.inner_gaussian_curvature_K,
+                                                                                        stage8_result.inner_dz_dx,
+                                                                                        stage8_result.inner_dz_dy,
+                                                                                        result.curvature_valid_mask,
+                                                                                        &result.inner_K_qc_warn_flag);
 
     if (result.metric_domain_node_count > 0) {
         result.curvature_valid_fraction_of_metric_domain =

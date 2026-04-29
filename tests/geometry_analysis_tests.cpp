@@ -2837,6 +2837,88 @@ void testStage9CsvExportIncludesQcColumns() {
     removeIfExists(stage9.curvature_summary_csv_path);
 }
 
+void testStage9IntegralAreaAverageConstantFlatField() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    for (std::size_t idx = 0; idx < stage8.node_count; ++idx) {
+        stage8.outer_dz_dx[idx] = 0.0;
+        stage8.outer_dz_dy[idx] = 0.0;
+        stage8.inner_dz_dx[idx] = 0.0;
+        stage8.inner_dz_dy[idx] = 0.0;
+        stage8.outer_d2z_dx2[idx] = 0.0;
+        stage8.outer_d2z_dy2[idx] = 0.0;
+        stage8.outer_d2z_dxdy[idx] = 0.0;
+        stage8.inner_d2z_dx2[idx] = 0.0;
+        stage8.inner_d2z_dy2[idx] = 0.0;
+        stage8.inner_d2z_dxdy[idx] = 0.0;
+    }
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    FoldPatchAnalysisConfig config;
+    config.stage9_export_csv = false;
+    const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+    assertTrue(stage9.outer_oriented_H_area_average.candidate_cell_count == 4, "3x3 grid has 4 candidate cells");
+    assertTrue(stage9.outer_oriented_H_area_average.valid_cell_count == 4, "all 4 cells should be valid");
+    assertTrue(near(stage9.outer_oriented_H_area_average.projected_area, 4.0), "projected area should be 4");
+    assertTrue(near(stage9.outer_oriented_H_area_average.surface_area, 4.0), "surface area should be 4");
+    assertTrue(near(stage9.outer_oriented_H_area_average.weighted_numerator, 0.0), "flat H numerator should be 0");
+    assertTrue(near(stage9.outer_oriented_H_area_average.area_weighted_mean, 0.0), "flat H mean should be 0");
+}
+
+void testStage9IntegralAreaAverageSlopedConstantField() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    const double a = 1.5;
+    const double b = -0.5;
+    const double expectedJ = std::sqrt(1.0 + (a * a) + (b * b));
+    for (std::size_t idx = 0; idx < stage8.node_count; ++idx) {
+        stage8.outer_dz_dx[idx] = a;
+        stage8.outer_dz_dy[idx] = b;
+        stage8.inner_dz_dx[idx] = a;
+        stage8.inner_dz_dy[idx] = b;
+        stage8.outer_d2z_dx2[idx] = 0.0;
+        stage8.outer_d2z_dy2[idx] = 0.0;
+        stage8.outer_d2z_dxdy[idx] = 0.0;
+        stage8.inner_d2z_dx2[idx] = 0.0;
+        stage8.inner_d2z_dy2[idx] = 0.0;
+        stage8.inner_d2z_dxdy[idx] = 0.0;
+    }
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    FoldPatchAnalysisConfig config;
+    config.stage9_export_csv = false;
+    const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+    assertTrue(near(stage9.outer_oriented_H_area_average.area_weighted_mean, 0.0), "constant zero field should stay zero");
+    assertTrue(near(stage9.outer_oriented_H_area_average.surface_area, 4.0 * expectedJ), "surface area should include J");
+    assertTrue(near(stage9.outer_oriented_H_area_average.projected_area, 4.0), "projected area should stay 4");
+}
+
+void testStage9IntegralAreaAverageMaskRejectionAndQcCleanK() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    for (std::size_t idx = 0; idx < stage8.node_count; ++idx) {
+        stage8.outer_dz_dx[idx] = 0.0;
+        stage8.outer_dz_dy[idx] = 0.0;
+        stage8.inner_dz_dx[idx] = 0.0;
+        stage8.inner_dz_dy[idx] = 0.0;
+        stage8.outer_d2z_dx2[idx] = 0.2;
+        stage8.outer_d2z_dy2[idx] = 0.2;
+        stage8.outer_d2z_dxdy[idx] = 0.0;
+        stage8.inner_d2z_dx2[idx] = 0.2;
+        stage8.inner_d2z_dy2[idx] = 0.2;
+        stage8.inner_d2z_dxdy[idx] = 0.0;
+    }
+    stage8.outer_dz_dx[nodeIndex(0, 0, stage8.grid.nx)] = std::numeric_limits<double>::infinity();
+    stage8.inner_dz_dx[nodeIndex(0, 0, stage8.grid.nx)] = std::numeric_limits<double>::infinity();
+    stage8.outer_d2z_dx2[nodeIndex(1, 1, stage8.grid.nx)] = 10.0;
+    stage8.outer_d2z_dy2[nodeIndex(1, 1, stage8.grid.nx)] = 10.0;
+    stage8.inner_d2z_dx2[nodeIndex(1, 1, stage8.grid.nx)] = 10.0;
+    stage8.inner_d2z_dy2[nodeIndex(1, 1, stage8.grid.nx)] = 10.0;
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    FoldPatchAnalysisConfig config;
+    config.stage9_export_csv = false;
+    config.stage9_qc_n_spike = 2.0;
+    const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+    assertTrue(stage9.outer_K_area_average.valid_cell_count == 3, "invalid corner should reject only touching cell");
+    assertTrue(stage9.outer_K_qc_clean_area_average.valid_cell_count < stage9.outer_K_area_average.valid_cell_count,
+               "QC-clean K must be stricter than all-valid K");
+}
+
 void testStage1ToStage6Integration() {
     Capsid capsid = makeSimpleCapsid();
     FoldPatchAnalysisConfig config;
@@ -3103,6 +3185,9 @@ int main() {
         testStage9CsvExportSmoke();
         testStage9QcWarnFlagsAndConfidenceClass();
         testStage9CsvExportIncludesQcColumns();
+        testStage9IntegralAreaAverageConstantFlatField();
+        testStage9IntegralAreaAverageSlopedConstantField();
+        testStage9IntegralAreaAverageMaskRejectionAndQcCleanK();
         testStage10SimpleValidThicknessField();
         testStage10OutsideDomainInvalidation();
         testStage10NegativeOrZeroInvalidation();

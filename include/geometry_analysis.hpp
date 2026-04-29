@@ -511,6 +511,17 @@ struct GeometryStage8DerivativeEstimationResult {
     std::vector<std::string> messages;
 };
 
+struct Stage9IntegralAverageStats {
+    std::size_t candidate_cell_count = 0;
+    std::size_t valid_cell_count = 0;
+    double retained_cell_fraction = std::numeric_limits<double>::quiet_NaN();
+    double projected_area = std::numeric_limits<double>::quiet_NaN();
+    double surface_area = std::numeric_limits<double>::quiet_NaN();
+    double weighted_numerator = std::numeric_limits<double>::quiet_NaN();
+    double area_weighted_mean = std::numeric_limits<double>::quiet_NaN();
+    std::string domain_rule = "fully_valid_four_corner_cells";
+};
+
 struct GeometryStage9CurvatureComputationResult {
     bool success = false;
     Stage4GridDescriptor grid;
@@ -604,6 +615,13 @@ struct GeometryStage9CurvatureComputationResult {
     std::string inner_curvature_csv_path;
     std::string curvature_valid_mask_csv_path;
     std::string curvature_summary_csv_path;
+
+    Stage9IntegralAverageStats outer_oriented_H_area_average;
+    Stage9IntegralAverageStats inner_oriented_H_area_average;
+    Stage9IntegralAverageStats outer_K_area_average;
+    Stage9IntegralAverageStats inner_K_area_average;
+    Stage9IntegralAverageStats outer_K_qc_clean_area_average;
+    Stage9IntegralAverageStats inner_K_qc_clean_area_average;
 
     std::vector<std::string> messages;
 };
