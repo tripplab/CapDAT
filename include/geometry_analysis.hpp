@@ -629,8 +629,10 @@ struct GeometryStage9CurvatureComputationResult {
     double inner_H_mean_discrepancy = std::numeric_limits<double>::quiet_NaN();
     double inner_K_mean_discrepancy = std::numeric_limits<double>::quiet_NaN();
 
-    double outer_K_qc_rejected_fraction = std::numeric_limits<double>::quiet_NaN();
-    double inner_K_qc_rejected_fraction = std::numeric_limits<double>::quiet_NaN();
+    double outer_K_qc_rejected_fraction_of_candidate_cells = std::numeric_limits<double>::quiet_NaN();
+    double inner_K_qc_rejected_fraction_of_candidate_cells = std::numeric_limits<double>::quiet_NaN();
+    double outer_K_qc_rejected_fraction_of_curvature_valid_cells = std::numeric_limits<double>::quiet_NaN();
+    double inner_K_qc_rejected_fraction_of_curvature_valid_cells = std::numeric_limits<double>::quiet_NaN();
 
     std::vector<std::string> messages;
 };
