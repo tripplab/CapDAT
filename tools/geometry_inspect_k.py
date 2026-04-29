@@ -49,24 +49,43 @@ class LoadedGeometryCsvs:
 
 COLUMN_ALIAS_MAP: dict[str, tuple[str, ...]] = {
     "point_index": ("point_index", "point_idx", "idx", "index", "vertex_index", "vertex_idx"),
+    "i": ("i", "ix", "grid_i"),
+    "j": ("j", "iy", "grid_j"),
     "x": ("x", "coord_x", "px", "pos_x"),
     "y": ("y", "coord_y", "py", "pos_y"),
     "z": ("z", "coord_z", "pz", "pos_z"),
-    "k": ("k", "curvature_k", "principal_k", "k_value"),
+    "k": ("k", "curvature_k", "principal_k", "k_value", "k_raw"),
     "valid": ("valid", "is_valid", "mask", "valid_mask"),
     "reason": ("reason", "failure_reason", "error_reason", "status_reason"),
+    "derivative_valid": ("derivative_valid",),
+    "curvature_valid": ("curvature_valid",),
+    "metric_domain": ("metric_domain",),
+    "fit_attempted": ("fit_attempted", "derivative_fit_attempted"),
+    "thickness_valid": ("thickness_valid",),
 }
 
 REQUIRED_COLUMNS_BY_LABEL: dict[str, tuple[str, ...]] = {
-    "outer curvature": ("point_index", "k"),
-    "inner curvature": ("point_index", "k"),
-    "outer derivatives": ("point_index",),
-    "inner derivatives": ("point_index",),
-    "curvature valid mask": ("point_index", "valid"),
-    "derivative valid mask": ("point_index", "valid"),
-    "derivative failure reason": ("point_index", "reason"),
-    "metric domain mask": ("point_index", "valid"),
-    "smooth valid mask": ("point_index", "valid"),
+    "outer curvature": ("k",),
+    "inner curvature": ("k",),
+    "outer derivatives": (),
+    "inner derivatives": (),
+    "curvature valid mask": (),
+    "derivative valid mask": (),
+    "derivative failure reason": (),
+    "metric domain mask": (),
+    "smooth valid mask": (),
+}
+
+ALTERNATE_REQUIRED_COLUMNS_BY_LABEL: dict[str, tuple[tuple[str, ...], ...]] = {
+    "outer curvature": (("point_index",), ("i", "j")),
+    "inner curvature": (("point_index",), ("i", "j")),
+    "outer derivatives": (("point_index",), ("i", "j")),
+    "inner derivatives": (("point_index",), ("i", "j")),
+    "curvature valid mask": (("point_index", "valid"), ("i", "j", "curvature_valid")),
+    "derivative valid mask": (("point_index", "valid"), ("i", "j", "derivative_valid")),
+    "derivative failure reason": (("point_index", "reason"), ("i", "j", "fit_attempted")),
+    "metric domain mask": (("point_index", "valid"), ("i", "j", "metric_domain")),
+    "smooth valid mask": (("point_index", "valid"), ("i", "j", "thickness_valid")),
 }
 
 
@@ -92,6 +111,7 @@ def validate_required_columns(
     label: str,
 ) -> dict[str, str]:
     required_columns = REQUIRED_COLUMNS_BY_LABEL.get(label, ())
+    alternate_groups = ALTERNATE_REQUIRED_COLUMNS_BY_LABEL.get(label, ())
     resolved_aliases = resolve_column_aliases(df)
     missing = [name for name in required_columns if name not in resolved_aliases]
 
@@ -110,6 +130,19 @@ def validate_required_columns(
             f"Missing required columns for {label}: {missing}. "
             f"Available columns: {list(df.columns)}"
         )
+
+    if alternate_groups:
+        for group in alternate_groups:
+            missing_group = [name for name in group if name not in resolved_aliases]
+            if not missing_group:
+                break
+        else:
+            expected = " OR ".join(str(list(group)) for group in alternate_groups)
+            raise ValueError(
+                f"Missing required alternative columns for {label}. "
+                f"Expected one of: {expected}. "
+                f"Available columns: {list(df.columns)}"
+            )
 
     return resolved_aliases
 
