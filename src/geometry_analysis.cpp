@@ -4007,7 +4007,18 @@ bool writeStage9SummaryCsv(const GeometryStage9CurvatureComputationResult& resul
            "outer_area_avg_K_qc_clean_surface_area,outer_area_avg_K_qc_clean_weighted_numerator,"
            "inner_area_avg_K_qc_clean,inner_area_avg_K_qc_clean_valid_cells,inner_area_avg_K_qc_clean_candidate_cells,"
            "inner_area_avg_K_qc_clean_retained_fraction,inner_area_avg_K_qc_clean_projected_area,"
-           "inner_area_avg_K_qc_clean_surface_area,inner_area_avg_K_qc_clean_weighted_numerator\n";
+           "inner_area_avg_K_qc_clean_surface_area,inner_area_avg_K_qc_clean_weighted_numerator,"
+           "outer_K_qc_rejected_cells,outer_K_qc_rejected_fraction_of_curvature_valid_cells,"
+           "outer_K_qc_rejected_fraction_of_candidate_cells,inner_K_qc_rejected_cells,"
+           "inner_K_qc_rejected_fraction_of_curvature_valid_cells,inner_K_qc_rejected_fraction_of_candidate_cells\n";
+    std::size_t outer_qc_rejected_cells = 0;
+    std::size_t inner_qc_rejected_cells = 0;
+    if (result.outer_K_area.valid_cell_count >= result.outer_K_qc_clean_area.valid_cell_count) {
+        outer_qc_rejected_cells = result.outer_K_area.valid_cell_count - result.outer_K_qc_clean_area.valid_cell_count;
+    }
+    if (result.inner_K_area.valid_cell_count >= result.inner_K_qc_clean_area.valid_cell_count) {
+        inner_qc_rejected_cells = result.inner_K_area.valid_cell_count - result.inner_K_qc_clean_area.valid_cell_count;
+    }
     out << result.node_count << ',' << result.metric_domain_node_count << ',' << result.derivative_valid_node_count << ','
         << result.curvature_valid_node_count << ',' << result.curvature_valid_fraction_of_metric_domain << ','
         << result.curvature_valid_fraction_of_derivative_valid << ',' << result.curvature_invalid_nonfinite_input_count
@@ -4064,7 +4075,13 @@ bool writeStage9SummaryCsv(const GeometryStage9CurvatureComputationResult& resul
         << result.inner_K_qc_clean_area.retained_fraction << ','
         << result.inner_K_qc_clean_area.projected_area << ','
         << result.inner_K_qc_clean_area.surface_area << ','
-        << result.inner_K_qc_clean_area.weighted_numerator << '\n';
+        << result.inner_K_qc_clean_area.weighted_numerator << ','
+        << outer_qc_rejected_cells << ','
+        << result.outer_K_qc_rejected_fraction_of_curvature_valid_cells << ','
+        << result.outer_K_qc_rejected_fraction_of_candidate_cells << ','
+        << inner_qc_rejected_cells << ','
+        << result.inner_K_qc_rejected_fraction_of_curvature_valid_cells << ','
+        << result.inner_K_qc_rejected_fraction_of_candidate_cells << '\n';
     return out.good();
 }
 
@@ -5100,8 +5117,18 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
     result.inner_H_mean_discrepancy = std::fabs(result.inner_mean_oriented_H - result.inner_H_area.area_mean);
     result.inner_K_mean_discrepancy = std::fabs(result.inner_mean_K - result.inner_K_area.area_mean);
 
-    result.outer_K_qc_rejected_fraction = 1.0 - result.outer_K_qc_clean_area.retained_fraction;
-    result.inner_K_qc_rejected_fraction = 1.0 - result.inner_K_qc_clean_area.retained_fraction;
+    result.outer_K_qc_rejected_fraction_of_candidate_cells = 1.0 - result.outer_K_qc_clean_area.retained_fraction;
+    result.inner_K_qc_rejected_fraction_of_candidate_cells = 1.0 - result.inner_K_qc_clean_area.retained_fraction;
+    if (result.outer_K_area.valid_cell_count > 0) {
+        result.outer_K_qc_rejected_fraction_of_curvature_valid_cells =
+            static_cast<double>(result.outer_K_area.valid_cell_count - result.outer_K_qc_clean_area.valid_cell_count) /
+            static_cast<double>(result.outer_K_area.valid_cell_count);
+    }
+    if (result.inner_K_area.valid_cell_count > 0) {
+        result.inner_K_qc_rejected_fraction_of_curvature_valid_cells =
+            static_cast<double>(result.inner_K_area.valid_cell_count - result.inner_K_qc_clean_area.valid_cell_count) /
+            static_cast<double>(result.inner_K_area.valid_cell_count);
+    }
 
     if (result.metric_domain_node_count > 0) {
         result.curvature_valid_fraction_of_metric_domain =
@@ -5816,20 +5843,42 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
         << '\n';
     out << "Curvature - outer surface (surface-area-weighted integral summary)\n";
     out << "------------------------------------------------------------------\n";
-    out << "Metric        AreaMean     SurfArea     ProjArea     ValidCells  Retained  MeanJ   Num\n";
+    out << std::left << std::setw(12) << "Metric" << std::right << std::setw(13) << "AreaMean" << std::setw(13)
+        << "SurfArea" << std::setw(13) << "ProjArea" << std::setw(12) << "ValidCells" << std::setw(11) << "RetCand"
+        << std::setw(11) << "MeanJ" << std::setw(13) << "Num" << '\n';
     const auto print_area_row = [&](const std::string& metric, const Stage9IntegralAverageStats& stats) {
-        out << std::left << std::setw(12) << metric << std::setw(13) << fmtScientificShort(stats.area_mean) << std::setw(13)
-            << fmtScientificShort(stats.surface_area) << std::setw(13) << fmtScientificShort(stats.projected_area)
-            << std::setw(12) << stats.valid_cell_count << std::setw(10) << fmtScientificShort(stats.retained_fraction)
-            << std::setw(8) << fmtScientificShort(stats.mean_J) << fmtScientificShort(stats.weighted_numerator) << '\n';
+        out << std::left << std::setw(12) << metric << std::right << std::setw(13) << fmtScientificShort(stats.area_mean)
+            << std::setw(13) << fmtScientificShort(stats.surface_area) << std::setw(13)
+            << fmtScientificShort(stats.projected_area) << std::setw(12) << stats.valid_cell_count << std::setw(11)
+            << fmtScientificShort(stats.retained_fraction) << std::setw(11) << fmtScientificShort(stats.mean_J)
+            << std::setw(13) << fmtScientificShort(stats.weighted_numerator) << '\n';
     };
+    // H row: oriented H, curvature_valid_mask, no QC exclusion.
     print_area_row("H [\u00C5^-1]", result.stage9_curvature.outer_H_area);
+    // K row: K, curvature_valid_mask, no QC exclusion.
     print_area_row("K [\u00C5^-2]", result.stage9_curvature.outer_K_area);
+    // K QC clean row: K, curvature_valid_mask, excludes cells where any corner node has K_qc_warn_flag != 0.
     print_area_row("K QC clean", result.stage9_curvature.outer_K_qc_clean_area);
+    std::size_t outer_qc_rejected_cell_count = 0;
+    bool outer_qc_rejected_count_valid = false;
+    if (result.stage9_curvature.outer_K_area.valid_cell_count >= result.stage9_curvature.outer_K_qc_clean_area.valid_cell_count) {
+        outer_qc_rejected_cell_count =
+            result.stage9_curvature.outer_K_area.valid_cell_count - result.stage9_curvature.outer_K_qc_clean_area.valid_cell_count;
+        outer_qc_rejected_count_valid = true;
+    } else {
+        out << "[[WARNING]] Stage 9 QC-clean valid cell count exceeds all-valid cell count; QC rejection diagnostic suppressed.\n";
+    }
     out << "Diagnostics:\n";
     out << "- |mean_node - mean_area| (H) = " << fmtScientificShort(result.stage9_curvature.outer_H_mean_discrepancy) << '\n';
     out << "- |mean_node - mean_area| (K) = " << fmtScientificShort(result.stage9_curvature.outer_K_mean_discrepancy) << '\n';
-    out << "- qc_rejected_fraction      = " << fmtScientificShort(result.stage9_curvature.outer_K_qc_rejected_fraction) << "\n\n";
+    if (outer_qc_rejected_count_valid) {
+        out << "- K QC rejected cells                          = " << outer_qc_rejected_cell_count << " / "
+            << result.stage9_curvature.outer_K_area.valid_cell_count << '\n';
+        out << "- K QC rejected fraction of curvature-valid    = "
+            << fmtScientificShort(result.stage9_curvature.outer_K_qc_rejected_fraction_of_curvature_valid_cells) << '\n';
+    }
+    out << "- K QC rejected fraction of candidate cells    = "
+        << fmtScientificShort(result.stage9_curvature.outer_K_qc_rejected_fraction_of_candidate_cells) << "\n\n";
 
     out << "Curvature - inner surface (nodewise mean)\n";
     out << "---------------------------------------------------------\n";
@@ -5852,15 +5901,32 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
         << '\n';
     out << "Curvature - inner surface (surface-area-weighted integral summary)\n";
     out << "------------------------------------------------------------------\n";
-    out << "Metric        AreaMean     SurfArea     ProjArea     ValidCells  Retained  MeanJ   Num\n";
+    out << std::left << std::setw(12) << "Metric" << std::right << std::setw(13) << "AreaMean" << std::setw(13)
+        << "SurfArea" << std::setw(13) << "ProjArea" << std::setw(12) << "ValidCells" << std::setw(11) << "RetCand"
+        << std::setw(11) << "MeanJ" << std::setw(13) << "Num" << '\n';
     print_area_row("H [\u00C5^-1]", result.stage9_curvature.inner_H_area);
     print_area_row("K [\u00C5^-2]", result.stage9_curvature.inner_K_area);
     print_area_row("K QC clean", result.stage9_curvature.inner_K_qc_clean_area);
+    std::size_t inner_qc_rejected_cell_count = 0;
+    bool inner_qc_rejected_count_valid = false;
+    if (result.stage9_curvature.inner_K_area.valid_cell_count >= result.stage9_curvature.inner_K_qc_clean_area.valid_cell_count) {
+        inner_qc_rejected_cell_count =
+            result.stage9_curvature.inner_K_area.valid_cell_count - result.stage9_curvature.inner_K_qc_clean_area.valid_cell_count;
+        inner_qc_rejected_count_valid = true;
+    } else {
+        out << "[[WARNING]] Stage 9 QC-clean valid cell count exceeds all-valid cell count; QC rejection diagnostic suppressed.\n";
+    }
     out << "Diagnostics:\n";
     out << "- |mean_node - mean_area| (H) = " << fmtScientificShort(result.stage9_curvature.inner_H_mean_discrepancy) << '\n';
     out << "- |mean_node - mean_area| (K) = " << fmtScientificShort(result.stage9_curvature.inner_K_mean_discrepancy) << '\n';
-    out << "- qc_rejected_fraction      = " << fmtScientificShort(result.stage9_curvature.inner_K_qc_rejected_fraction)
-        << "\n\n";
+    if (inner_qc_rejected_count_valid) {
+        out << "- K QC rejected cells                          = " << inner_qc_rejected_cell_count << " / "
+            << result.stage9_curvature.inner_K_area.valid_cell_count << '\n';
+        out << "- K QC rejected fraction of curvature-valid    = "
+            << fmtScientificShort(result.stage9_curvature.inner_K_qc_rejected_fraction_of_curvature_valid_cells) << '\n';
+    }
+    out << "- K QC rejected fraction of candidate cells    = "
+        << fmtScientificShort(result.stage9_curvature.inner_K_qc_rejected_fraction_of_candidate_cells) << "\n\n";
 
     out << "Notes\n";
     out << "---------------------------------------------------------\n";
