@@ -31,6 +31,7 @@ class GeometryCsvFiles:
 
     metric_domain_mask: Optional[Path] = None
     smooth_valid_mask: Optional[Path] = None
+    curvature_summary: Optional[Path] = None
 
 
 @dataclass
@@ -45,6 +46,7 @@ class LoadedGeometryCsvs:
     derivative_failure_reason: Optional[pd.DataFrame] = None
     metric_domain_mask: Optional[pd.DataFrame] = None
     smooth_valid_mask: Optional[pd.DataFrame] = None
+    curvature_summary: Optional[pd.DataFrame] = None
 
 
 COLUMN_ALIAS_MAP: dict[str, tuple[str, ...]] = {
@@ -74,6 +76,7 @@ REQUIRED_COLUMNS_BY_LABEL: dict[str, tuple[str, ...]] = {
     "derivative failure reason": (),
     "metric domain mask": (),
     "smooth valid mask": (),
+    "curvature summary": (),
 }
 
 ALTERNATE_REQUIRED_COLUMNS_BY_LABEL: dict[str, tuple[tuple[str, ...], ...]] = {
@@ -86,6 +89,7 @@ ALTERNATE_REQUIRED_COLUMNS_BY_LABEL: dict[str, tuple[tuple[str, ...], ...]] = {
     "derivative failure reason": (("point_index", "reason"), ("i", "j", "fit_attempted")),
     "metric domain mask": (("point_index", "valid"), ("i", "j", "metric_domain")),
     "smooth valid mask": (("point_index", "valid"), ("i", "j", "thickness_valid")),
+    "curvature summary": (),
 }
 
 
@@ -287,6 +291,15 @@ def discover_geometry_csv_files(
         required=False,
     )
 
+    curvature_summary = _glob_one(
+        result_dir,
+        [
+            f"{p}curvature*summary*.csv",
+        ],
+        label="curvature summary CSV",
+        required=False,
+    )
+
     return GeometryCsvFiles(
         result_dir=result_dir,
         prefix=prefix,
@@ -299,6 +312,7 @@ def discover_geometry_csv_files(
         derivative_failure_reason=derivative_failure_reason,
         metric_domain_mask=metric_domain_mask,
         smooth_valid_mask=smooth_valid_mask,
+        curvature_summary=curvature_summary,
     )
 
 
@@ -332,6 +346,7 @@ def load_geometry_csvs(files: GeometryCsvFiles) -> LoadedGeometryCsvs:
         derivative_failure_reason=read_csv_checked(files.derivative_failure_reason, label="derivative failure reason"),
         metric_domain_mask=read_csv_checked(files.metric_domain_mask, label="metric domain mask"),
         smooth_valid_mask=read_csv_checked(files.smooth_valid_mask, label="smooth valid mask"),
+        curvature_summary=read_csv_checked(files.curvature_summary, label="curvature summary"),
     )
 
 
