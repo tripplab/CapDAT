@@ -392,6 +392,26 @@ def merge_surface_geometry(
 
     merged = cdf.merge(ddf, on=merge_keys, how="inner", suffixes=("_curv", "_deriv"), validate="one_to_one")
 
+    # Merge inputs share several coordinate/domain columns. Normalize those
+    # duplicated columns back to canonical names so downstream checks can use a
+    # stable schema.
+    for base_col in ("x", "y", "metric_domain", "derivative_valid", "curvature_valid"):
+        curv_col = f"{base_col}_curv"
+        deriv_col = f"{base_col}_deriv"
+        if base_col in merged.columns:
+            continue
+        if curv_col in merged.columns and deriv_col in merged.columns:
+            if not merged[curv_col].equals(merged[deriv_col]):
+                raise ValueError(
+                    f"{surface} merge mismatch for duplicated column '{base_col}' "
+                    f"between curvature and derivatives tables"
+                )
+            merged[base_col] = merged[curv_col]
+        elif curv_col in merged.columns:
+            merged[base_col] = merged[curv_col]
+        elif deriv_col in merged.columns:
+            merged[base_col] = merged[deriv_col]
+
     expected_rows = min(len(cdf), len(ddf))
     actual_rows = len(merged)
     print(f"[INFO] {surface} merge row counts: curvature={len(cdf)}, derivatives={len(ddf)}, merged={actual_rows}")
