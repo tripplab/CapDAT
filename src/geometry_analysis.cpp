@@ -4009,8 +4009,8 @@ bool writeStage9SummaryCsv(const GeometryStage9CurvatureComputationResult& resul
            "inner_area_avg_K_qc_clean_retained_fraction,inner_area_avg_K_qc_clean_projected_area,"
            "inner_area_avg_K_qc_clean_surface_area,inner_area_avg_K_qc_clean_weighted_numerator,"
            "outer_K_qc_rejected_cells,outer_K_qc_rejected_fraction_of_curvature_valid_cells,"
-           "outer_K_qc_rejected_fraction_of_candidate_cells,inner_K_qc_rejected_cells,"
-           "inner_K_qc_rejected_fraction_of_curvature_valid_cells,inner_K_qc_rejected_fraction_of_candidate_cells\n";
+           "outer_K_qc_clean_non_retained_fraction_of_candidate_cells,inner_K_qc_rejected_cells,"
+           "inner_K_qc_rejected_fraction_of_curvature_valid_cells,inner_K_qc_clean_non_retained_fraction_of_candidate_cells\n";
     std::size_t outer_qc_rejected_cells = 0;
     std::size_t inner_qc_rejected_cells = 0;
     if (result.outer_K_area.valid_cell_count >= result.outer_K_qc_clean_area.valid_cell_count) {
@@ -5877,7 +5877,7 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
         out << "- K QC rejected fraction of curvature-valid    = "
             << fmtScientificShort(result.stage9_curvature.outer_K_qc_rejected_fraction_of_curvature_valid_cells) << '\n';
     }
-    out << "- K QC rejected fraction of candidate cells    = "
+    out << "- K QC-clean non-retained fraction of candidate cells = "
         << fmtScientificShort(result.stage9_curvature.outer_K_qc_rejected_fraction_of_candidate_cells) << "\n\n";
 
     out << "Curvature - inner surface (nodewise mean)\n";
@@ -5925,7 +5925,7 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
         out << "- K QC rejected fraction of curvature-valid    = "
             << fmtScientificShort(result.stage9_curvature.inner_K_qc_rejected_fraction_of_curvature_valid_cells) << '\n';
     }
-    out << "- K QC rejected fraction of candidate cells    = "
+    out << "- K QC-clean non-retained fraction of candidate cells = "
         << fmtScientificShort(result.stage9_curvature.inner_K_qc_rejected_fraction_of_candidate_cells) << "\n\n";
 
     out << "Notes\n";
