@@ -5787,7 +5787,7 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
     out << std::left << std::setw(summary_metric_col_width) << "K [\u00C5^-2]" << std::setw(summary_value_col_width)
         << fmtScientificShort(sphere_K) << "\n\n";
 
-    out << "Curvature - outer surface\n";
+    out << "Curvature - outer surface (nodewise mean)\n";
     out << "---------------------------------------------------------\n";
     out << std::left << std::setw(summary_metric_col_width) << "Metric" << std::setw(summary_value_col_width) << "Mean"
         << std::setw(summary_value_col_width) << "Median" << std::setw(summary_value_col_width) << "StdDev"
@@ -5805,9 +5805,23 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_min_K)
         << fmtScientificShort(result.stage9_curvature.outer_max_K) << '\n';
     out << "K QC warn fraction: " << fmtFraction(result.stage9_curvature.outer_K_qc_warn_count, curvature_valid_count)
-        << "\n\n";
+        << '\n';
+    out << "Curvature - outer surface (surface-area-weighted mean)\n";
+    out << "---------------------------------------------------------\n";
+    out << std::left << std::setw(summary_metric_col_width) << "Metric" << std::setw(summary_value_col_width) << "Mean"
+        << std::setw(summary_value_col_width) << "Median" << std::setw(summary_value_col_width) << "StdDev"
+        << std::setw(summary_value_col_width) << "Min" << "Max\n";
+    out << std::left << std::setw(summary_metric_col_width) << "H [\u00C5^-1]"
+        << std::setw(summary_value_col_width)
+        << fmtScientificShort(result.stage9_curvature.outer_oriented_H_area_average.area_weighted_mean)
+        << std::setw(summary_value_col_width) << "n/a" << std::setw(summary_value_col_width) << "n/a"
+        << std::setw(summary_value_col_width) << "n/a" << "n/a\n";
+    out << std::left << std::setw(summary_metric_col_width) << "K [\u00C5^-2]"
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.outer_K_area_average.area_weighted_mean)
+        << std::setw(summary_value_col_width) << "n/a" << std::setw(summary_value_col_width) << "n/a"
+        << std::setw(summary_value_col_width) << "n/a" << "n/a\n\n";
 
-    out << "Curvature - inner surface\n";
+    out << "Curvature - inner surface (nodewise mean)\n";
     out << "---------------------------------------------------------\n";
     out << std::left << std::setw(summary_metric_col_width) << "Metric" << std::setw(summary_value_col_width) << "Mean"
         << std::setw(summary_value_col_width) << "Median" << std::setw(summary_value_col_width) << "StdDev"
@@ -5825,7 +5839,21 @@ std::string buildGeometrySummaryReport(const GeometryAnalysisResult& result,
         << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_min_K)
         << fmtScientificShort(result.stage9_curvature.inner_max_K) << '\n';
     out << "K QC warn fraction: " << fmtFraction(result.stage9_curvature.inner_K_qc_warn_count, curvature_valid_count)
-        << "\n\n";
+        << '\n';
+    out << "Curvature - inner surface (surface-area-weighted mean)\n";
+    out << "---------------------------------------------------------\n";
+    out << std::left << std::setw(summary_metric_col_width) << "Metric" << std::setw(summary_value_col_width) << "Mean"
+        << std::setw(summary_value_col_width) << "Median" << std::setw(summary_value_col_width) << "StdDev"
+        << std::setw(summary_value_col_width) << "Min" << "Max\n";
+    out << std::left << std::setw(summary_metric_col_width) << "H [\u00C5^-1]"
+        << std::setw(summary_value_col_width)
+        << fmtScientificShort(result.stage9_curvature.inner_oriented_H_area_average.area_weighted_mean)
+        << std::setw(summary_value_col_width) << "n/a" << std::setw(summary_value_col_width) << "n/a"
+        << std::setw(summary_value_col_width) << "n/a" << "n/a\n";
+    out << std::left << std::setw(summary_metric_col_width) << "K [\u00C5^-2]"
+        << std::setw(summary_value_col_width) << fmtScientificShort(result.stage9_curvature.inner_K_area_average.area_weighted_mean)
+        << std::setw(summary_value_col_width) << "n/a" << std::setw(summary_value_col_width) << "n/a"
+        << std::setw(summary_value_col_width) << "n/a" << "n/a\n\n";
 
     out << "Notes\n";
     out << "---------------------------------------------------------\n";
