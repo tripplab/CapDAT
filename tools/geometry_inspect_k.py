@@ -47,6 +47,73 @@ class LoadedGeometryCsvs:
     smooth_valid_mask: Optional[pd.DataFrame] = None
 
 
+COLUMN_ALIAS_MAP: dict[str, tuple[str, ...]] = {
+    "point_index": ("point_index", "point_idx", "idx", "index", "vertex_index", "vertex_idx"),
+    "x": ("x", "coord_x", "px", "pos_x"),
+    "y": ("y", "coord_y", "py", "pos_y"),
+    "z": ("z", "coord_z", "pz", "pos_z"),
+    "k": ("k", "curvature_k", "principal_k", "k_value"),
+    "valid": ("valid", "is_valid", "mask", "valid_mask"),
+    "reason": ("reason", "failure_reason", "error_reason", "status_reason"),
+}
+
+REQUIRED_COLUMNS_BY_LABEL: dict[str, tuple[str, ...]] = {
+    "outer curvature": ("point_index", "k"),
+    "inner curvature": ("point_index", "k"),
+    "outer derivatives": ("point_index",),
+    "inner derivatives": ("point_index",),
+    "curvature valid mask": ("point_index", "valid"),
+    "derivative valid mask": ("point_index", "valid"),
+    "derivative failure reason": ("point_index", "reason"),
+    "metric domain mask": ("point_index", "valid"),
+    "smooth valid mask": ("point_index", "valid"),
+}
+
+
+def _normalize_column_name(value: str) -> str:
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+def resolve_column_aliases(df: pd.DataFrame) -> dict[str, str]:
+    normalized_to_actual = {_normalize_column_name(col): col for col in df.columns}
+    resolved: dict[str, str] = {}
+    for canonical, aliases in COLUMN_ALIAS_MAP.items():
+        for alias in aliases:
+            actual = normalized_to_actual.get(_normalize_column_name(alias))
+            if actual is not None:
+                resolved[canonical] = actual
+                break
+    return resolved
+
+
+def validate_required_columns(
+    df: pd.DataFrame,
+    *,
+    label: str,
+) -> dict[str, str]:
+    required_columns = REQUIRED_COLUMNS_BY_LABEL.get(label, ())
+    resolved_aliases = resolve_column_aliases(df)
+    missing = [name for name in required_columns if name not in resolved_aliases]
+
+    print(f"[INFO] {label} discovered columns: {list(df.columns)}")
+
+    if resolved_aliases:
+        mapping_str = ", ".join(
+            f"{canonical}->{actual}" for canonical, actual in sorted(resolved_aliases.items())
+        )
+        print(f"[INFO] {label} alias resolution: {mapping_str}")
+    else:
+        print(f"[WARN] {label} alias resolution: no known aliases found")
+
+    if missing:
+        raise ValueError(
+            f"Missing required columns for {label}: {missing}. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    return resolved_aliases
+
+
 def _glob_one(
     result_dir: Path,
     patterns: list[str],
@@ -215,6 +282,7 @@ def read_csv_checked(path: Optional[Path], *, label: str) -> Optional[pd.DataFra
         print(f"[WARN] CSV is empty: {label}: {path}")
     else:
         print(f"[INFO] Loaded {label}: {len(df)} rows, {len(df.columns)} columns")
+        validate_required_columns(df, label=label)
 
     return df
 
@@ -286,4 +354,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
