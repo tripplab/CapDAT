@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 
@@ -350,6 +351,81 @@ def load_geometry_csvs(files: GeometryCsvFiles) -> LoadedGeometryCsvs:
     )
 
 
+def _build_rename_map(df: pd.DataFrame) -> dict[str, str]:
+    aliases = resolve_column_aliases(df)
+    rename_map: dict[str, str] = {}
+    for canonical, actual in aliases.items():
+        if actual != canonical and canonical not in df.columns:
+            rename_map[actual] = canonical
+    return rename_map
+
+
+def _standardize_columns(df: pd.DataFrame, *, label: str) -> pd.DataFrame:
+    rename_map = _build_rename_map(df)
+    if rename_map:
+        print(f"[INFO] {label} renaming columns: {rename_map}")
+        return df.rename(columns=rename_map).copy()
+    return df.copy()
+
+
+def merge_surface_geometry(
+    curvature_df: Optional[pd.DataFrame],
+    derivative_df: Optional[pd.DataFrame],
+    *,
+    surface: str,
+) -> Optional[pd.DataFrame]:
+    if curvature_df is None or derivative_df is None:
+        print(f"[WARN] Skipping {surface} merge; missing curvature or derivatives table")
+        return None
+
+    cdf = _standardize_columns(curvature_df, label=f"{surface} curvature")
+    ddf = _standardize_columns(derivative_df, label=f"{surface} derivatives")
+
+    merge_keys = ["i", "j"]
+    missing_curv = [k for k in merge_keys if k not in cdf.columns]
+    missing_deriv = [k for k in merge_keys if k not in ddf.columns]
+    if missing_curv or missing_deriv:
+        raise ValueError(
+            f"Cannot merge {surface} tables by i,j. "
+            f"Missing in curvature: {missing_curv}; missing in derivatives: {missing_deriv}"
+        )
+
+    merged = cdf.merge(ddf, on=merge_keys, how="inner", suffixes=("_curv", "_deriv"), validate="one_to_one")
+
+    expected_rows = min(len(cdf), len(ddf))
+    actual_rows = len(merged)
+    print(f"[INFO] {surface} merge row counts: curvature={len(cdf)}, derivatives={len(ddf)}, merged={actual_rows}")
+    if actual_rows != expected_rows:
+        raise ValueError(
+            f"Row-count validation failed for {surface} merge by i,j: "
+            f"expected {expected_rows} rows (min of inputs), got {actual_rows}"
+        )
+
+    for required_col in ("dz_dx", "dz_dy", "x", "y", "k"):
+        if required_col not in merged.columns:
+            raise ValueError(f"Missing required column '{required_col}' after {surface} merge")
+
+    merged["K_raw"] = merged["k"]
+    merged["slope_mag"] = np.sqrt(merged["dz_dx"] ** 2 + merged["dz_dy"] ** 2)
+    merged["J"] = np.sqrt(1.0 + merged["dz_dx"] ** 2 + merged["dz_dy"] ** 2)
+    merged["abs_K"] = merged["K_raw"].abs()
+    merged["r"] = np.sqrt(merged["x"] ** 2 + merged["y"] ** 2)
+
+    if "curvature_valid" not in merged.columns:
+        merged["curvature_valid"] = True
+    if "K_qc_warn_flag" not in merged.columns:
+        merged["K_qc_warn_flag"] = 0
+
+    merged["K_qc_clean"] = merged["curvature_valid"].astype(bool) & (merged["K_qc_warn_flag"] == 0)
+    print(f"[INFO] {surface} derived columns computed: slope_mag, J, abs_K, r, K_qc_clean")
+    return merged
+
+
+def run_surface_merges(loaded: LoadedGeometryCsvs) -> None:
+    _ = merge_surface_geometry(loaded.outer_curvature, loaded.outer_derivatives, surface="outer")
+    _ = merge_surface_geometry(loaded.inner_curvature, loaded.inner_derivatives, surface="inner")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="CapDAT geometry diagnostic CSV discovery and loading."
@@ -394,9 +470,10 @@ def main() -> int:
         strict=args.strict,
     )
 
-    _ = load_geometry_csvs(files)
+    loaded = load_geometry_csvs(files)
+    run_surface_merges(loaded)
 
-    print("[SUCCESS] File discovery and CSV loading completed.")
+    print("[SUCCESS] File discovery, loading, and surface merge checks completed.")
     return 0
 
 
