@@ -948,6 +948,146 @@ def print_residual_summary_stats(surface_df: pd.DataFrame, surface_name: str) ->
             )
 
 
+def plot_neighbor_heatmap(
+    surface_df: pd.DataFrame,
+    surface_name: str,
+    value_col: str,
+    label: str,
+    out_dir: Path,
+    percentile: float,
+    overlay_qc: bool = False,
+) -> None:
+    required = ["i", "j", "x", "y", "derivative_valid", value_col]
+    missing = [col for col in required if col not in surface_df.columns]
+    if missing:
+        print(f"[WARN] Missing required columns for {surface_name} {value_col}: {missing}; skipping plot")
+        return
+    plot_df = surface_df.copy()
+    plot_df["derivative_valid"] = plot_df["derivative_valid"].astype(int)
+    plot_df[value_col] = pd.to_numeric(plot_df[value_col], errors="coerce")
+    invalid_mask = (
+        (plot_df["derivative_valid"] != 1)
+        | (~np.isfinite(plot_df[value_col]))
+        | (plot_df[value_col] <= 0.0)
+    )
+    plot_df.loc[invalid_mask, value_col] = np.nan
+    values = plot_df[value_col].to_numpy(dtype=float)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        print(f"[WARN] No finite derivative-valid {value_col} values for {surface_name}; skipping plot")
+        return
+    vmin = float(np.nanpercentile(finite, 1.0))
+    vmax = float(np.nanpercentile(finite, percentile))
+    if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or (vmax <= vmin):
+        vmin = float(np.nanmin(finite))
+        vmax = float(np.nanmax(finite))
+    if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or (vmax <= vmin):
+        print(f"[WARN] Invalid color scaling for {surface_name} {value_col}; skipping plot")
+        return
+    grid, extent = dataframe_to_grid(plot_df, value_col)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    cmap = "viridis" if value_col == "neighbor_count" else "magma"
+    im = ax.imshow(grid, origin="lower", interpolation="nearest", aspect="equal", cmap=cmap, vmin=vmin, vmax=vmax, extent=extent)
+    title_surface = "Outer" if surface_name == "outer" else "Inner"
+    if value_col == "neighbor_count":
+        base_title = f"{title_surface} surface: neighbor count (Stage 8)"
+    else:
+        base_title = f"{title_surface} surface: neighbor max radius (Å)"
+    ax.set_title(base_title + (" + K QC warnings" if overlay_qc else ""))
+    ax.set_xlabel("x [Å]")
+    ax.set_ylabel("y [Å]")
+    if overlay_qc and "K_qc_warn_flag" in plot_df.columns and "curvature_valid" in plot_df.columns:
+        qc_df = plot_df.loc[(plot_df["curvature_valid"].astype(int) == 1) & (plot_df["K_qc_warn_flag"].astype(int) != 0)]
+        if len(qc_df) > 0:
+            ax.scatter(qc_df["x"], qc_df["y"], marker="s", color="black", s=8, alpha=0.6, linewidths=0)
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(label)
+    suffix = "_qc_overlay" if overlay_qc else ""
+    stem = "neighbor_count" if value_col == "neighbor_count" else "neighbor_radius"
+    out_path = out_dir / f"{surface_name}_{stem}{suffix}.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
+
+def plot_scale_radial_profiles(surface_df: pd.DataFrame, surface_name: str, out_dir: Path) -> None:
+    required = ["x", "y", "neighbor_count", "neighbor_max_radius", "derivative_valid", "curvature_valid", "K_qc_warn_flag"]
+    missing = [col for col in required if col not in surface_df.columns]
+    if missing:
+        print(f"[WARN] Missing required columns for {surface_name} radial profiles: {missing}; skipping")
+        return
+    df = surface_df.copy()
+    df["derivative_valid"] = df["derivative_valid"].astype(int)
+    df["curvature_valid"] = df["curvature_valid"].astype(int)
+    df["K_qc_warn_flag"] = df["K_qc_warn_flag"].astype(int)
+    df["neighbor_count"] = pd.to_numeric(df["neighbor_count"], errors="coerce")
+    df["neighbor_max_radius"] = pd.to_numeric(df["neighbor_max_radius"], errors="coerce")
+    df.loc[(df["derivative_valid"] != 1) | (~np.isfinite(df["neighbor_count"])) | (df["neighbor_count"] <= 0.0), "neighbor_count"] = np.nan
+    df.loc[(df["derivative_valid"] != 1) | (~np.isfinite(df["neighbor_max_radius"])) | (df["neighbor_max_radius"] <= 0.0), "neighbor_max_radius"] = np.nan
+    df["r"] = np.sqrt(np.square(pd.to_numeric(df["x"], errors="coerce")) + np.square(pd.to_numeric(df["y"], errors="coerce")))
+    df = df[np.isfinite(df["r"])].copy()
+    if df.empty:
+        print(f"[WARN] No finite radial coordinates for {surface_name}; skipping radial profiles")
+        return
+    r_max = float(df["r"].max())
+    bin_count = int(min(25, max(15, np.sqrt(max(len(df), 1)).astype(int))))
+    bins = np.linspace(0.0, r_max, bin_count + 1)
+    centers = 0.5 * (bins[:-1] + bins[1:])
+    df["r_bin"] = pd.cut(df["r"], bins=bins, include_lowest=True, labels=False)
+    grouped = df.groupby("r_bin", observed=True)
+    count_mean = grouped["neighbor_count"].mean().reindex(range(bin_count)).to_numpy(dtype=float)
+    count_median = grouped["neighbor_count"].median().reindex(range(bin_count)).to_numpy(dtype=float)
+    rad_mean = grouped["neighbor_max_radius"].mean().reindex(range(bin_count)).to_numpy(dtype=float)
+    rad_median = grouped["neighbor_max_radius"].median().reindex(range(bin_count)).to_numpy(dtype=float)
+    qc_num = grouped.apply(lambda g: int(((g["curvature_valid"] == 1) & (g["K_qc_warn_flag"] != 0)).sum())).reindex(range(bin_count), fill_value=0)
+    qc_den = grouped.apply(lambda g: int((g["curvature_valid"] == 1).sum())).reindex(range(bin_count), fill_value=0)
+    qc_fraction = np.divide(qc_num.to_numpy(dtype=float), qc_den.to_numpy(dtype=float), out=np.full(bin_count, np.nan), where=qc_den.to_numpy(dtype=float) > 0.0)
+    fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True, constrained_layout=True)
+    axes[0].plot(centers, count_mean, label="mean", lw=1.8)
+    axes[0].plot(centers, count_median, label="median", lw=1.8, ls="--")
+    axes[0].set_ylabel("count")
+    axes[0].set_title(("Outer" if surface_name == "outer" else "Inner") + " surface: scale radial profiles")
+    axes[0].legend()
+    axes[1].plot(centers, rad_mean, label="mean", lw=1.8)
+    axes[1].plot(centers, rad_median, label="median", lw=1.8, ls="--")
+    axes[1].set_ylabel("radius [Å]")
+    axes[1].legend()
+    axes[2].plot(centers, qc_fraction, lw=1.8, color="black")
+    axes[2].set_ylabel("fraction")
+    axes[2].set_xlabel("r [Å]")
+    out_path = out_dir / f"{surface_name}_scale_radial_profiles.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
+
+def compute_scale_enrichment(surface_df: pd.DataFrame, surface_name: str) -> None:
+    required = ["neighbor_count", "neighbor_max_radius", "derivative_valid", "curvature_valid", "K_qc_warn_flag"]
+    missing = [col for col in required if col not in surface_df.columns]
+    if missing:
+        print(f"[WARN] Missing required columns for {surface_name} scale enrichment: {missing}")
+        return
+    df = surface_df.copy()
+    df["derivative_valid"] = df["derivative_valid"].astype(int)
+    df["curvature_valid"] = df["curvature_valid"].astype(int)
+    df["K_qc_warn_flag"] = df["K_qc_warn_flag"].astype(int)
+    for col in ("neighbor_count", "neighbor_max_radius"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df.loc[(df["derivative_valid"] != 1) | (~np.isfinite(df[col])) | (df[col] <= 0.0), col] = np.nan
+    qc_mask = (df["curvature_valid"] == 1) & (df["K_qc_warn_flag"] != 0)
+    nonqc_mask = (df["curvature_valid"] == 1) & (df["K_qc_warn_flag"] == 0)
+    for col in ("neighbor_count", "neighbor_max_radius"):
+        qc_vals = df.loc[qc_mask, col].to_numpy(dtype=float)
+        nonqc_vals = df.loc[nonqc_mask, col].to_numpy(dtype=float)
+        qc_vals = qc_vals[np.isfinite(qc_vals)]
+        nonqc_vals = nonqc_vals[np.isfinite(nonqc_vals)]
+        med_qc = float(np.nanmedian(qc_vals)) if qc_vals.size > 0 else np.nan
+        med_nonqc = float(np.nanmedian(nonqc_vals)) if nonqc_vals.size > 0 else np.nan
+        ratio = med_qc / med_nonqc if (np.isfinite(med_qc) and np.isfinite(med_nonqc) and med_nonqc != 0.0) else np.nan
+        label = "neighbor_count" if col == "neighbor_count" else "neighbor_radius"
+        print(f"[INFO] {surface_name} {label} enrichment: median_qc={med_qc:.6g}, median_nonqc={med_nonqc:.6g}, ratio={ratio:.6g}")
+
+
 def run_surface_merges(loaded: LoadedGeometryCsvs) -> dict[str, Optional[pd.DataFrame]]:
     return {
         "outer": merge_surface_geometry(loaded.outer_curvature, loaded.outer_derivatives, surface="outer"),
@@ -1074,6 +1214,14 @@ def main() -> int:
                     args.residual_percentile,
                     overlay_qc=True,
                 )
+            for surf_name, surf_df in (("outer", outer_df), ("inner", inner_df)):
+                plot_neighbor_heatmap(surf_df, surf_name, "neighbor_count", "neighbor count", out_dir, 99.0, overlay_qc=False)
+                plot_neighbor_heatmap(surf_df, surf_name, "neighbor_max_radius", "neighbor max radius [Å]", out_dir, 99.0, overlay_qc=False)
+                if args.qc_overlay:
+                    plot_neighbor_heatmap(surf_df, surf_name, "neighbor_count", "neighbor count", out_dir, 99.0, overlay_qc=True)
+                    plot_neighbor_heatmap(surf_df, surf_name, "neighbor_max_radius", "neighbor max radius [Å]", out_dir, 99.0, overlay_qc=True)
+                plot_scale_radial_profiles(surf_df, surf_name, out_dir)
+                compute_scale_enrichment(surf_df, surf_name)
     else:
         surface_df = merged_by_surface.get(args.surface)
         if surface_df is None:
@@ -1101,11 +1249,19 @@ def main() -> int:
                     plot_residual_heatmap(
                         surface_df, args.surface, residual_col, residual_label, out_dir, args.residual_percentile, True
                     )
+            plot_neighbor_heatmap(surface_df, args.surface, "neighbor_count", "neighbor count", out_dir, 99.0, overlay_qc=False)
+            plot_neighbor_heatmap(surface_df, args.surface, "neighbor_max_radius", "neighbor max radius [Å]", out_dir, 99.0, overlay_qc=False)
+            if args.qc_overlay:
+                plot_neighbor_heatmap(surface_df, args.surface, "neighbor_count", "neighbor count", out_dir, 99.0, overlay_qc=True)
+                plot_neighbor_heatmap(surface_df, args.surface, "neighbor_max_radius", "neighbor max radius [Å]", out_dir, 99.0, overlay_qc=True)
+            plot_scale_radial_profiles(surface_df, args.surface, out_dir)
+            compute_scale_enrichment(surface_df, args.surface)
 
     success_msg = "[SUCCESS] K heatmaps"
     success_msg += ", QC overlays," if args.qc_overlay else ""
-    success_msg += " condition indicators, and residual diagnostics generated."
+    success_msg += " condition indicators, residual diagnostics, and scale mismatch diagnostics generated."
     print(success_msg)
+    print("[SUCCESS] Scale mismatch diagnostics generated.")
     return 0
 
 
