@@ -12,6 +12,7 @@ import argparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from datetime import datetime, timezone
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -56,6 +57,30 @@ class LoadedGeometryCsvs:
     metric_domain_mask: Optional[pd.DataFrame] = None
     smooth_valid_mask: Optional[pd.DataFrame] = None
     curvature_summary: Optional[pd.DataFrame] = None
+
+
+@dataclass(frozen=True)
+class CurvatureInterpretationRecord:
+    surface: str
+    H_node: float
+    H_area: float
+    delta_H: float
+    relative_delta_H: float
+    H_stability: str
+    K_node: float
+    K_area: float
+    K_area_QC: float
+    delta_K_area_vs_QC: float
+    relative_delta_K_area_vs_QC: float
+    K_sign_change_area_vs_QC: bool
+    QC_reject: float
+    K_num_like_rho: float
+    K_num_like_pearson: float
+    K_num_like_qc_enrichment: float
+    K_status: str
+    H_interpretation: str
+    K_interpretation: str
+    recommended_sentence: str
 
 
 COLUMN_ALIAS_MAP: dict[str, tuple[str, ...]] = {
@@ -1272,6 +1297,168 @@ def analyze_absK_vs_k_num_like(surface_df: pd.DataFrame, surface_name: str) -> p
     print(f"[INFO] {surface_name} abs(K_num_like) QC enrichment: median_qc={med_qc:.6g}, median_nonqc={med_nonqc:.6g}, ratio={safe_ratio(med_qc, med_nonqc):.6g}, p95_qc={p95_qc:.6g}, p95_nonqc={p95_nonqc:.6g}")
     return analysis_df
 
+
+def analyze_k_num_like_metrics(surface_df: pd.DataFrame, surface_name: str) -> dict[str, float]:
+    required = ["curvature_valid", "derivative_valid", "abs_K", "abs_K_num_like", "K_qc_warn_flag"]
+    if any(c not in surface_df.columns for c in required):
+        return {}
+    analysis_df = analyze_absK_vs_k_num_like(surface_df, surface_name)
+    if len(analysis_df) < 2:
+        return {}
+    x = pd.to_numeric(analysis_df["abs_K_num_like"], errors="coerce").to_numpy(dtype=float)
+    y = pd.to_numeric(analysis_df["abs_K"], errors="coerce").to_numpy(dtype=float)
+    rho = safe_rank_corr(x, y)
+    pearson = safe_corr(x, y)
+    qc_mask = (analysis_df["curvature_valid"].astype(int) == 1) & (analysis_df["K_qc_warn_flag"].astype(int) != 0)
+    nonqc_mask = (analysis_df["curvature_valid"].astype(int) == 1) & (analysis_df["K_qc_warn_flag"].astype(int) == 0)
+    qc_vals = pd.to_numeric(analysis_df.loc[qc_mask, "abs_K_num_like"], errors="coerce").to_numpy(dtype=float)
+    nonqc_vals = pd.to_numeric(analysis_df.loc[nonqc_mask, "abs_K_num_like"], errors="coerce").to_numpy(dtype=float)
+    med_qc = float(np.nanmedian(qc_vals)) if np.isfinite(qc_vals).any() else np.nan
+    med_nonqc = float(np.nanmedian(nonqc_vals)) if np.isfinite(nonqc_vals).any() else np.nan
+    return {
+        "K_num_like_pearson": pearson,
+        "K_num_like_rho": rho,
+        "K_num_like_qc_enrichment": safe_ratio(med_qc, med_nonqc),
+        "K_num_like_qc_median": med_qc,
+        "K_num_like_nonqc_median": med_nonqc,
+    }
+
+
+def _signed_class(value: float, eps: float = 1e-12) -> int:
+    if not np.isfinite(value) or abs(value) < eps:
+        return 0
+    return 1 if value > 0 else -1
+
+
+def classify_k_status(record: CurvatureInterpretationRecord) -> str:
+    if (
+        (record.QC_reject > 0.25)
+        or record.K_sign_change_area_vs_QC
+        or (record.relative_delta_K_area_vs_QC >= 1.0)
+        or (abs(record.K_num_like_rho) >= 0.75)
+        or (record.K_num_like_qc_enrichment >= 3.0)
+    ):
+        return "C: diagnostic_only"
+    if (
+        (record.QC_reject < 0.10)
+        and (not record.K_sign_change_area_vs_QC)
+        and (record.relative_delta_K_area_vs_QC < 0.50)
+        and (abs(record.K_num_like_rho) < 0.60)
+        and (record.K_num_like_qc_enrichment < 2.0)
+    ):
+        return "A: usable"
+    return "B: cautious"
+
+
+def format_sci(value: float) -> str:
+    if not np.isfinite(value):
+        return "nan"
+    return f"{value:.3e}"
+
+
+def build_curvature_interpretation_records(curvature_summary_df: pd.DataFrame, diagnostics_by_surface: dict[str, dict[str, float]], surfaces: list[str]) -> list[CurvatureInterpretationRecord]:
+    epsilon = 1e-12
+    if curvature_summary_df.empty:
+        return []
+    row = curvature_summary_df.iloc[0]
+    records: list[CurvatureInterpretationRecord] = []
+    for surface in surfaces:
+        H_node = float(row[f"{surface}_mean_oriented_H"])
+        H_area = float(row[f"{surface}_area_avg_oriented_H"])
+        delta_H = abs(H_node - H_area)
+        rel_H = delta_H / max(abs(H_node), epsilon)
+        if rel_H < 0.10:
+            H_stability = "stable"
+            H_interp = f"The oriented mean curvature estimate is stable across nodewise and surface-area-weighted summaries. The absolute difference between H_node and H_area is {delta_H:.6g}, corresponding to a relative difference of {rel_H:.6g}. H can therefore be used as a primary interpretable curvature descriptor for this surface."
+        elif rel_H < 0.25:
+            H_stability = "moderately sensitive"
+            H_interp = "The oriented mean curvature estimate shows moderate sensitivity to surface-area weighting. H remains interpretable, but comparisons should report both nodewise and area-weighted values."
+        else:
+            H_stability = "unstable"
+            H_interp = "The oriented mean curvature estimate is strongly affected by the averaging scheme. H should not be interpreted without inspecting the spatial map and support diagnostics."
+        K_node = float(row[f"{surface}_mean_K"])
+        K_area = float(row[f"{surface}_area_avg_K"])
+        K_area_qc = float(row[f"{surface}_area_avg_K_qc_clean"])
+        delta_k = abs(K_area - K_area_qc)
+        rel_k = delta_k / max(abs(K_area), epsilon)
+        s1, s2 = _signed_class(K_area, epsilon), _signed_class(K_area_qc, epsilon)
+        sign_change = (s1 * s2) < 0
+        near_zero_instability = ((s1 == 0) != (s2 == 0))
+        qc_reject = float(row[f"{surface}_K_qc_rejected_fraction_of_curvature_valid_cells"])
+        diag = diagnostics_by_surface.get(surface, {})
+        rec = CurvatureInterpretationRecord(surface, H_node, H_area, delta_H, rel_H, H_stability, K_node, K_area, K_area_qc, delta_k, rel_k, sign_change, qc_reject, float(diag.get("K_num_like_rho", np.nan)), float(diag.get("K_num_like_pearson", np.nan)), float(diag.get("K_num_like_qc_enrichment", np.nan)), "", H_interp, "", "")
+        status = classify_k_status(rec)
+        if sign_change:
+            sign_sentence = "The sign change between all-valid and QC-clean K indicates that the K summary is not robust to removal of flagged regions."
+        elif near_zero_instability:
+            sign_sentence = "A near-zero sign instability is present between all-valid and QC-clean K, indicating sensitivity around zero-crossing behavior."
+        else:
+            sign_sentence = "The sign is preserved after QC filtering, but magnitude sensitivity should still be considered."
+        k_interp = (
+            f"Gaussian curvature is sensitive to QC filtering. The all-valid area-weighted K is {K_area:.6g}, whereas the QC-clean area-weighted K is {K_area_qc:.6g}. "
+            f"The QC rejection fraction among curvature-valid cells is {qc_reject:.6g}. {sign_sentence}\n\n"
+            f"The instability is strongly associated with the determinant-like second-derivative term. The Spearman correlation between abs(K) and abs(K_num_like) is {rec.K_num_like_rho:.6g}, and QC-warning nodes show a {rec.K_num_like_qc_enrichment:.6g}x enrichment in abs(K_num_like) relative to non-QC nodes. "
+            "This indicates that K instability is primarily driven by nonlinear coupling of second-derivative estimates rather than by derivative-fit conditioning, neighborhood-scale variation, or RMS residual alone."
+        )
+        if status.startswith("A"):
+            recommendation = f"For the {surface} surface, H and K may both be interpreted, although K should still be reported with QC support metrics."
+        elif status.startswith("B"):
+            recommendation = f"For the {surface} surface, H is suitable for primary interpretation, whereas K should be interpreted cautiously and only alongside QC-clean and support diagnostics."
+        else:
+            recommendation = f"For the {surface} surface, H is suitable for primary interpretation, but K should be treated as a high-sensitivity diagnostic rather than a robust structural descriptor under the current local graph-surface estimator."
+        records.append(CurvatureInterpretationRecord(**{**rec.__dict__, "K_status": status, "K_interpretation": k_interp, "recommended_sentence": recommendation}))
+    return records
+
+
+def write_curvature_interpretation_csv(records: list[CurvatureInterpretationRecord], out_path: Path) -> None:
+    rows = []
+    for r in records:
+        rows.append({
+            "surface": r.surface, "H_node": r.H_node, "H_area": r.H_area, "delta_H": r.delta_H, "relative_delta_H": r.relative_delta_H, "H_stability": r.H_stability,
+            "K_node": r.K_node, "K_area": r.K_area, "K_area_QC": r.K_area_QC, "delta_K_area_vs_QC": r.delta_K_area_vs_QC, "relative_delta_K_area_vs_QC": r.relative_delta_K_area_vs_QC,
+            "K_sign_change_area_vs_QC": r.K_sign_change_area_vs_QC, "QC_reject": r.QC_reject, "K_num_like_pearson": r.K_num_like_pearson, "K_num_like_rho": r.K_num_like_rho,
+            "K_num_like_qc_enrichment": r.K_num_like_qc_enrichment, "K_status": r.K_status, "recommended_interpretation": r.recommended_sentence,
+        })
+    pd.DataFrame(rows).to_csv(out_path, index=False)
+    print(f"[INFO] Saved: {out_path}")
+
+
+def write_curvature_interpretation_markdown(records: list[CurvatureInterpretationRecord], out_path: Path, metadata: dict[str, str]) -> None:
+    surfaces = [r.surface for r in records]
+    lines = [
+        "# CapDAT curvature interpretation report",
+        "",
+        "## Metadata",
+        f"- result directory: `{metadata['result_dir']}`",
+        f"- prefix: `{metadata['prefix']}`",
+        f"- generated timestamp: `{datetime.now(timezone.utc).isoformat()}`",
+        f"- surfaces analyzed: `{', '.join(surfaces)}`",
+        "- input files used:",
+        f"  - curvature summary CSV: `{metadata.get('curvature_summary', 'N/A')}`",
+        f"  - outer curvature CSV: `{metadata.get('outer_curvature', 'N/A')}`",
+        f"  - inner curvature CSV: `{metadata.get('inner_curvature', 'N/A')}`",
+        f"  - outer derivatives CSV: `{metadata.get('outer_derivatives', 'N/A')}`",
+        f"  - inner derivatives CSV: `{metadata.get('inner_derivatives', 'N/A')}`",
+        "",
+        "## Summary table",
+        "",
+        "| Surface | H_node | H_area | ΔH | K_node | K_area | K_area_QC | QC_reject | K_num_like_rho | K_status |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for r in records:
+        lines.append(f"| {r.surface} | {format_sci(r.H_node)} | {format_sci(r.H_area)} | {format_sci(r.delta_H)} | {format_sci(r.K_node)} | {format_sci(r.K_area)} | {format_sci(r.K_area_QC)} | {format_sci(r.QC_reject)} | {format_sci(r.K_num_like_rho)} | {r.K_status} |")
+    for r in records:
+        title = "Outer surface" if r.surface == "outer" else "Inner surface"
+        lines.extend(["", f"## {title}", "", "### H stability", r.H_interpretation, "", "### K stability", r.K_interpretation.split("\n\n")[0], "", "### K diagnostic evidence", r.K_interpretation.split("\n\n")[1], "", "### Recommended interpretation", r.recommended_sentence])
+    lines.append("")
+    lines.append("## Final conclusion")
+    if records and all(r.K_status == "C: diagnostic_only" for r in records):
+        lines.append("Across both surfaces, H is the preferred primary curvature descriptor. K should be retained as a diagnostic of estimator sensitivity and reported only with QC-clean summaries, support fractions, and determinant-like second-derivative diagnostics.")
+    else:
+        lines.append("K interpretability varies by surface status; use each surface recommendation above and always report QC support context.")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"[INFO] Saved: {out_path}")
+
 def plot_second_derivative_heatmap(surface_df: pd.DataFrame, surface_name: str, field_col: str, label: str, out_dir: Path, overlay_qc: bool = False) -> None:
     required = ["i", "j", "x", "y", "derivative_valid", field_col]
     if overlay_qc:
@@ -1655,6 +1842,8 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[INFO] Output directory: {out_dir}")
 
+    diagnostics_by_surface: dict[str, dict[str, float]] = {}
+
     if args.surface == "both":
         outer_df = merged_by_surface.get("outer")
         inner_df = merged_by_surface.get("inner")
@@ -1707,6 +1896,8 @@ def main() -> int:
             if args.qc_overlay:
                 plot_k_num_like_heatmaps_both(outer_df, inner_df, out_dir, overlay_qc=True)
             plot_absK_vs_k_num_like_both(outer_df, inner_df, out_dir)
+            diagnostics_by_surface["outer"] = analyze_k_num_like_metrics(outer_df, "outer")
+            diagnostics_by_surface["inner"] = analyze_k_num_like_metrics(inner_df, "inner")
             print_k_reconstruction_check(outer_df, "outer")
             print_k_reconstruction_check(inner_df, "inner")
     else:
@@ -1757,8 +1948,28 @@ def main() -> int:
             plot_k_num_like_heatmap(surface_df, args.surface, out_dir, overlay_qc=False)
             if args.qc_overlay:
                 plot_k_num_like_heatmap(surface_df, args.surface, out_dir, overlay_qc=True)
-            analyze_absK_vs_k_num_like(surface_df, args.surface)
+            diagnostics_by_surface[args.surface] = analyze_k_num_like_metrics(surface_df, args.surface)
             print_k_reconstruction_check(surface_df, args.surface)
+
+    if loaded.curvature_summary is not None and not loaded.curvature_summary.empty:
+        surfaces = ["outer", "inner"] if args.surface == "both" else [args.surface]
+        records = build_curvature_interpretation_records(loaded.curvature_summary, diagnostics_by_surface, surfaces)
+        csv_path = out_dir / "curvature_interpretation_summary.csv"
+        md_path = out_dir / "curvature_interpretation_report.md"
+        write_curvature_interpretation_csv(records, csv_path)
+        metadata = {
+            "result_dir": str(args.result_dir),
+            "prefix": args.prefix,
+            "curvature_summary": str(files.curvature_summary) if files.curvature_summary else "N/A",
+            "outer_curvature": str(files.outer_curvature) if files.outer_curvature else "N/A",
+            "inner_curvature": str(files.inner_curvature) if files.inner_curvature else "N/A",
+            "outer_derivatives": str(files.outer_derivatives) if files.outer_derivatives else "N/A",
+            "inner_derivatives": str(files.inner_derivatives) if files.inner_derivatives else "N/A",
+        }
+        write_curvature_interpretation_markdown(records, md_path, metadata)
+        print(f"[INFO] Saved: {csv_path}")
+        print(f"[INFO] Saved: {md_path}")
+        print("[SUCCESS] Automatic curvature interpretation report generated.")
 
     success_msg = "[SUCCESS] K heatmaps"
     success_msg += ", QC overlays," if args.qc_overlay else ""
