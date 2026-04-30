@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-CapDAT geometry K diagnostics — Step 1
-File discovery and CSV loading foundation.
+CapDAT geometry K diagnostics.
+
+Includes CSV discovery/loading + merged-surface validation and basic
+Gaussian-curvature heatmap generation for --surface outer|inner|both.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -441,9 +444,84 @@ def merge_surface_geometry(
     return merged
 
 
-def run_surface_merges(loaded: LoadedGeometryCsvs) -> None:
-    _ = merge_surface_geometry(loaded.outer_curvature, loaded.outer_derivatives, surface="outer")
-    _ = merge_surface_geometry(loaded.inner_curvature, loaded.inner_derivatives, surface="inner")
+def dataframe_to_grid(df: pd.DataFrame, value_col: str) -> tuple[np.ndarray, list[float]]:
+    if value_col not in df.columns:
+        raise ValueError(f"Missing value column for grid conversion: {value_col}")
+
+    nx = int(df["i"].max()) + 1
+    ny = int(df["j"].max()) + 1
+    grid = np.full((ny, nx), np.nan, dtype=float)
+
+    i_idx = df["i"].to_numpy(dtype=int)
+    j_idx = df["j"].to_numpy(dtype=int)
+    values = df[value_col].to_numpy(dtype=float)
+    grid[j_idx, i_idx] = values
+
+    extent = [float(df["x"].min()), float(df["x"].max()), float(df["y"].min()), float(df["y"].max())]
+    return grid, extent
+
+
+def plot_k_heatmap(
+    surface_df: pd.DataFrame,
+    surface_name: str,
+    out_dir: Path,
+    k_percentile: float,
+) -> None:
+    required = ["i", "j", "x", "y", "k", "curvature_valid"]
+    missing = [col for col in required if col not in surface_df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for {surface_name} plot: {missing}")
+
+    plot_df = surface_df.copy()
+    plot_df["k_plot"] = plot_df["k"].astype(float)
+    invalid_mask = (plot_df["curvature_valid"].astype(int) == 0) | (~np.isfinite(plot_df["k_plot"]))
+    plot_df.loc[invalid_mask, "k_plot"] = np.nan
+
+    k_valid = plot_df["k_plot"].to_numpy(dtype=float)
+    k_valid = k_valid[np.isfinite(k_valid)]
+    if k_valid.size == 0:
+        print(f"[WARN] No valid finite K values for {surface_name}; skipping plot")
+        return
+
+    vlim = float(np.nanpercentile(np.abs(k_valid), k_percentile))
+    if not np.isfinite(vlim) or vlim <= 0:
+        vlim = float(np.nanmax(np.abs(k_valid)))
+    if not np.isfinite(vlim) or vlim <= 0:
+        print(f"[WARN] Non-positive color limit for {surface_name}; skipping plot")
+        return
+
+    grid, extent = dataframe_to_grid(plot_df, "k_plot")
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(
+        grid,
+        origin="lower",
+        interpolation="nearest",
+        aspect="equal",
+        cmap="coolwarm",
+        vmin=-vlim,
+        vmax=vlim,
+        extent=extent,
+    )
+
+    title_surface = "Outer" if surface_name == "outer" else "Inner"
+    ax.set_title(f"{title_surface} surface: Gaussian curvature K, all valid nodes")
+    ax.set_xlabel("x [Å]")
+    ax.set_ylabel("y [Å]")
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("K [Å^-2]")
+
+    out_path = out_dir / f"{surface_name}_K_heatmap_all_valid.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
+
+def run_surface_merges(loaded: LoadedGeometryCsvs) -> dict[str, Optional[pd.DataFrame]]:
+    return {
+        "outer": merge_surface_geometry(loaded.outer_curvature, loaded.outer_derivatives, surface="outer"),
+        "inner": merge_surface_geometry(loaded.inner_curvature, loaded.inner_derivatives, surface="inner"),
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -468,13 +546,30 @@ def parse_args() -> argparse.Namespace:
         "--surface",
         choices=["outer", "inner", "both"],
         default="both",
-        help="Surface to inspect.",
+        help=(
+            "Surface selection for heatmap generation: "
+            "outer (outer only), inner (inner only), both (default)."
+        ),
     )
 
     parser.add_argument(
         "--strict",
         action="store_true",
         help="Fail if required surface curvature/derivative CSVs are missing.",
+    )
+
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Directory for diagnostics output PNG files.",
+    )
+
+    parser.add_argument(
+        "--k-percentile",
+        type=float,
+        default=99.0,
+        help="Percentile for symmetric K color clipping per surface.",
     )
 
     return parser.parse_args()
@@ -491,9 +586,21 @@ def main() -> int:
     )
 
     loaded = load_geometry_csvs(files)
-    run_surface_merges(loaded)
+    merged_by_surface = run_surface_merges(loaded)
 
-    print("[SUCCESS] File discovery, loading, and surface merge checks completed.")
+    out_dir = args.out_dir if args.out_dir is not None else args.result_dir / "diagnostics_k"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[INFO] Output directory: {out_dir}")
+
+    selected_surfaces = [args.surface] if args.surface in {"outer", "inner"} else ["outer", "inner"]
+    for surface_name in selected_surfaces:
+        surface_df = merged_by_surface.get(surface_name)
+        if surface_df is None:
+            print(f"[WARN] Missing merged table for {surface_name}; skipping plot")
+            continue
+        plot_k_heatmap(surface_df, surface_name, out_dir, args.k_percentile)
+
+    print("[SUCCESS] Basic K heatmap generation completed.")
     return 0
 
 
