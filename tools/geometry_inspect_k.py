@@ -461,12 +461,10 @@ def dataframe_to_grid(df: pd.DataFrame, value_col: str) -> tuple[np.ndarray, lis
     return grid, extent
 
 
-def plot_k_heatmap(
+def _prepare_k_plot_df(
     surface_df: pd.DataFrame,
     surface_name: str,
-    out_dir: Path,
-    k_percentile: float,
-) -> None:
+) -> pd.DataFrame:
     required = ["i", "j", "x", "y", "k", "curvature_valid"]
     missing = [col for col in required if col not in surface_df.columns]
     if missing:
@@ -477,17 +475,33 @@ def plot_k_heatmap(
     invalid_mask = (plot_df["curvature_valid"].astype(int) == 0) | (~np.isfinite(plot_df["k_plot"]))
     plot_df.loc[invalid_mask, "k_plot"] = np.nan
 
+    return plot_df
+
+
+def _compute_vlim(plot_df: pd.DataFrame, k_percentile: float) -> Optional[float]:
     k_valid = plot_df["k_plot"].to_numpy(dtype=float)
     k_valid = k_valid[np.isfinite(k_valid)]
     if k_valid.size == 0:
-        print(f"[WARN] No valid finite K values for {surface_name}; skipping plot")
-        return
+        return None
 
     vlim = float(np.nanpercentile(np.abs(k_valid), k_percentile))
     if not np.isfinite(vlim) or vlim <= 0:
         vlim = float(np.nanmax(np.abs(k_valid)))
     if not np.isfinite(vlim) or vlim <= 0:
-        print(f"[WARN] Non-positive color limit for {surface_name}; skipping plot")
+        return None
+    return vlim
+
+
+def plot_k_heatmap(
+    surface_df: pd.DataFrame,
+    surface_name: str,
+    out_dir: Path,
+    k_percentile: float,
+) -> None:
+    plot_df = _prepare_k_plot_df(surface_df, surface_name)
+    vlim = _compute_vlim(plot_df, k_percentile)
+    if vlim is None:
+        print(f"[WARN] No valid finite K values for {surface_name}; skipping plot")
         return
 
     grid, extent = dataframe_to_grid(plot_df, "k_plot")
@@ -498,7 +512,7 @@ def plot_k_heatmap(
         origin="lower",
         interpolation="nearest",
         aspect="equal",
-        cmap="coolwarm",
+        cmap="coolwarm_r",
         vmin=-vlim,
         vmax=vlim,
         extent=extent,
@@ -512,6 +526,54 @@ def plot_k_heatmap(
     cbar.set_label("K [Å^-2]")
 
     out_path = out_dir / f"{surface_name}_K_heatmap_all_valid.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
+
+def plot_k_heatmap_both(
+    outer_df: pd.DataFrame,
+    inner_df: pd.DataFrame,
+    out_dir: Path,
+    k_percentile: float,
+) -> None:
+    plot_outer = _prepare_k_plot_df(outer_df, "outer")
+    plot_inner = _prepare_k_plot_df(inner_df, "inner")
+
+    outer_vlim = _compute_vlim(plot_outer, k_percentile)
+    inner_vlim = _compute_vlim(plot_inner, k_percentile)
+    if outer_vlim is None or inner_vlim is None:
+        print("[WARN] Missing valid K values for outer/inner; skipping combined plot")
+        return
+
+    vlim = max(outer_vlim, inner_vlim)
+    outer_grid, outer_extent = dataframe_to_grid(plot_outer, "k_plot")
+    inner_grid, inner_extent = dataframe_to_grid(plot_inner, "k_plot")
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+    panels = [
+        (axes[0], outer_grid, outer_extent, "Outer surface: Gaussian curvature K, all valid nodes"),
+        (axes[1], inner_grid, inner_extent, "Inner surface: Gaussian curvature K, all valid nodes"),
+    ]
+    for ax, grid, extent, title in panels:
+        im = ax.imshow(
+            grid,
+            origin="lower",
+            interpolation="nearest",
+            aspect="equal",
+            cmap="coolwarm_r",
+            vmin=-vlim,
+            vmax=vlim,
+            extent=extent,
+        )
+        ax.set_title(title)
+        ax.set_xlabel("x [Å]")
+        ax.set_ylabel("y [Å]")
+
+    cbar = fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.92)
+    cbar.set_label("K [Å^-2]")
+
+    out_path = out_dir / "K_heatmap_all_valid.png"
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"[INFO] Saved: {out_path}")
@@ -592,13 +654,19 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[INFO] Output directory: {out_dir}")
 
-    selected_surfaces = [args.surface] if args.surface in {"outer", "inner"} else ["outer", "inner"]
-    for surface_name in selected_surfaces:
-        surface_df = merged_by_surface.get(surface_name)
+    if args.surface == "both":
+        outer_df = merged_by_surface.get("outer")
+        inner_df = merged_by_surface.get("inner")
+        if outer_df is None or inner_df is None:
+            print("[WARN] Missing merged table for outer/inner; skipping combined plot")
+        else:
+            plot_k_heatmap_both(outer_df, inner_df, out_dir, args.k_percentile)
+    else:
+        surface_df = merged_by_surface.get(args.surface)
         if surface_df is None:
-            print(f"[WARN] Missing merged table for {surface_name}; skipping plot")
-            continue
-        plot_k_heatmap(surface_df, surface_name, out_dir, args.k_percentile)
+            print(f"[WARN] Missing merged table for {args.surface}; skipping plot")
+        else:
+            plot_k_heatmap(surface_df, args.surface, out_dir, args.k_percentile)
 
     print("[SUCCESS] Basic K heatmap generation completed.")
     return 0
