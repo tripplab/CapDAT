@@ -706,6 +706,84 @@ def plot_k_heatmap_with_qc_overlay_both(
     print(f"[INFO] Saved: {out_path}")
 
 
+def plot_condition_indicator_heatmap(
+    surface_df: pd.DataFrame,
+    surface_name: str,
+    out_dir: Path,
+) -> None:
+    required = ["i", "j", "x", "y", "fit_condition_indicator", "derivative_valid"]
+    missing = [col for col in required if col not in surface_df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for {surface_name} condition plot: {missing}")
+
+    plot_df = surface_df.copy()
+    plot_df["fit_condition_indicator"] = plot_df["fit_condition_indicator"].astype(float)
+    plot_df["derivative_valid"] = plot_df["derivative_valid"].astype(int)
+
+    invalid_mask = (
+        (plot_df["derivative_valid"] == 0)
+        | (~np.isfinite(plot_df["fit_condition_indicator"]))
+        | (plot_df["fit_condition_indicator"] <= 0.0)
+    )
+    plot_df.loc[invalid_mask, "fit_condition_indicator"] = np.nan
+
+    valid_condition = plot_df["fit_condition_indicator"].to_numpy(dtype=float)
+    finite_condition = valid_condition[np.isfinite(valid_condition)]
+    derivative_valid_count = int((plot_df["derivative_valid"] == 1).sum())
+    finite_count = int(finite_condition.size)
+    if finite_count == 0:
+        print(f"[WARN] No finite positive condition indicator values for {surface_name}; skipping plot")
+        return
+
+    median_val = float(np.nanmedian(finite_condition))
+    p95_val = float(np.nanpercentile(finite_condition, 95))
+    p99_val = float(np.nanpercentile(finite_condition, 99))
+    max_val = float(np.nanmax(finite_condition))
+    print(
+        f"[INFO] {surface_name} condition indicator: "
+        f"derivative_valid={derivative_valid_count}, finite={finite_count}, "
+        f"median={median_val:.6g}, p95={p95_val:.6g}, p99={p99_val:.6g}, max={max_val:.6g}"
+    )
+
+    plot_df["log10_condition_indicator"] = np.nan
+    finite_mask = np.isfinite(plot_df["fit_condition_indicator"].to_numpy(dtype=float))
+    plot_df.loc[finite_mask, "log10_condition_indicator"] = np.log10(
+        plot_df.loc[finite_mask, "fit_condition_indicator"]
+    )
+
+    log_values = plot_df["log10_condition_indicator"].to_numpy(dtype=float)
+    log_values = log_values[np.isfinite(log_values)]
+    vmin = float(np.nanpercentile(log_values, 1))
+    vmax = float(np.nanpercentile(log_values, 99))
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+        vmin = float(np.nanmin(log_values))
+        vmax = float(np.nanmax(log_values))
+
+    grid, extent = dataframe_to_grid(plot_df, "log10_condition_indicator")
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(
+        grid,
+        origin="lower",
+        interpolation="nearest",
+        aspect="equal",
+        cmap="viridis",
+        vmin=vmin,
+        vmax=vmax,
+        extent=extent,
+    )
+    title_surface = "Outer" if surface_name == "outer" else "Inner"
+    ax.set_title(f"{title_surface} surface: Stage 8 fit condition indicator")
+    ax.set_xlabel("x [Å]")
+    ax.set_ylabel("y [Å]")
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("log10(condition indicator)")
+
+    out_path = out_dir / f"{surface_name}_S8_condition_indicator_heatmap.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
+
 def run_surface_merges(loaded: LoadedGeometryCsvs) -> dict[str, Optional[pd.DataFrame]]:
     return {
         "outer": merge_surface_geometry(loaded.outer_curvature, loaded.outer_derivatives, surface="outer"),
@@ -809,6 +887,8 @@ def main() -> int:
                     args.k_percentile,
                     strict=args.strict,
                 )
+            plot_condition_indicator_heatmap(outer_df, "outer", out_dir)
+            plot_condition_indicator_heatmap(inner_df, "inner", out_dir)
     else:
         surface_df = merged_by_surface.get(args.surface)
         if surface_df is None:
@@ -823,9 +903,11 @@ def main() -> int:
                     args.k_percentile,
                     strict=args.strict,
                 )
+            plot_condition_indicator_heatmap(surface_df, args.surface, out_dir)
 
-    success_msg = "[SUCCESS] Basic K heatmaps"
-    success_msg += " and QC overlays generated." if args.qc_overlay else " generated."
+    success_msg = "[SUCCESS] K heatmaps"
+    success_msg += ", QC overlays," if args.qc_overlay else ""
+    success_msg += " and condition-indicator heatmaps generated."
     print(success_msg)
     return 0
 
