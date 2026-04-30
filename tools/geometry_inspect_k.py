@@ -1530,7 +1530,13 @@ def _infer_grid_spacing(surface_df: pd.DataFrame, surface_name: str) -> float:
     return h
 
 
-def compute_radial_integral_profile(surface_df: pd.DataFrame, surface_name: str, radial_bins: int, grid_spacing: Optional[float]) -> pd.DataFrame:
+def compute_radial_integral_profile(
+    surface_df: pd.DataFrame,
+    surface_name: str,
+    radial_bins: int,
+    grid_spacing: Optional[float],
+    radial_r_max: Optional[float],
+) -> pd.DataFrame:
     h_col = _resolve_h_oriented_column(surface_df)
     h = float(grid_spacing) if grid_spacing is not None else _infer_grid_spacing(surface_df, surface_name)
     h2 = h * h
@@ -1560,7 +1566,17 @@ def compute_radial_integral_profile(surface_df: pd.DataFrame, surface_name: str,
             k_qc_clean = bool(k_valid and np.all(qc_warn == 0))
             cells.append({"r_c": float(np.hypot(np.mean(x_vals), np.mean(y_vals))), "H_valid": h_valid, "K_valid": k_valid, "K_qc_clean": k_qc_clean, "H_c": float(np.mean(h_vals)), "K_c": float(np.mean(k_vals)), "J_c": float(np.mean(j_vals))})
     cell_df = pd.DataFrame(cells)
-    edges = np.linspace(0.0, float(np.nanmax(cell_df["r_c"])), radial_bins + 1)
+    valid_any = cell_df["H_valid"] | cell_df["K_valid"]
+    valid_radii = cell_df.loc[valid_any, "r_c"].to_numpy(dtype=float)
+    if valid_radii.size == 0:
+        return pd.DataFrame()
+    r_max_effective = float(np.nanmax(valid_radii))
+    if radial_r_max is not None:
+        r_max_effective = min(float(radial_r_max), r_max_effective)
+    if not np.isfinite(r_max_effective) or r_max_effective <= 0.0:
+        return pd.DataFrame()
+    cell_df = cell_df.loc[cell_df["r_c"] <= r_max_effective].copy()
+    edges = np.linspace(0.0, r_max_effective, radial_bins + 1)
     bin_idx = np.digitize(cell_df["r_c"].to_numpy(dtype=float), edges, right=False) - 1
     bin_idx = np.where(bin_idx == radial_bins, radial_bins - 1, bin_idx)
     cell_df["bin_idx"] = bin_idx
@@ -1570,33 +1586,68 @@ def compute_radial_integral_profile(surface_df: pd.DataFrame, surface_name: str,
         h_sub, k_sub, kq_sub = sub.loc[sub["H_valid"]], sub.loc[sub["K_valid"]], sub.loc[sub["K_qc_clean"]]
         h_w, k_w, kq_w = h_sub["J_c"].to_numpy(dtype=float) * h2, k_sub["J_c"].to_numpy(dtype=float) * h2, kq_sub["J_c"].to_numpy(dtype=float) * h2
         kv, kqc = int(len(k_sub)), int(len(kq_sub))
-        rows.append({"surface": surface_name, "r_min": float(edges[b]), "r_max": float(edges[b + 1]), "r_center": float((edges[b] + edges[b + 1]) * 0.5), "candidate_cells": int(len(sub)), "H_valid_cells": int(len(h_sub)), "K_valid_cells": kv, "K_qc_clean_cells": kqc, "H_surface_area": float(np.nansum(h_w)), "K_surface_area": float(np.nansum(k_w)), "K_qc_clean_surface_area": float(np.nansum(kq_w)), "H_projected_area": float(len(h_sub) * h2), "K_projected_area": float(kv * h2), "K_qc_clean_projected_area": float(kqc * h2), "H_area": float(np.nansum(h_sub["H_c"] * h_w) / np.nansum(h_w)) if len(h_w) and np.nansum(h_w) > 0 else np.nan, "K_area": float(np.nansum(k_sub["K_c"] * k_w) / np.nansum(k_w)) if len(k_w) and np.nansum(k_w) > 0 else np.nan, "K_area_QC_clean": float(np.nansum(kq_sub["K_c"] * kq_w) / np.nansum(kq_w)) if len(kq_w) and np.nansum(kq_w) > 0 else np.nan, "K_qc_rejected_cells": kv - kqc, "K_qc_rejected_fraction": float((kv - kqc) / kv) if kv > 0 else np.nan})
+        rows.append({"surface": surface_name, "r_min": float(edges[b]), "r_max": float(edges[b + 1]), "r_center": float((edges[b] + edges[b + 1]) * 0.5), "candidate_cells": int(len(sub)), "H_valid_cells": int(len(h_sub)), "K_valid_cells": kv, "K_qc_clean_cells": kqc, "H_surface_area": float(np.nansum(h_w)), "K_surface_area": float(np.nansum(k_w)), "K_qc_clean_surface_area": float(np.nansum(kq_w)), "H_projected_area": float(len(h_sub) * h2), "K_projected_area": float(kv * h2), "K_qc_clean_projected_area": float(kqc * h2), "H_area": float(np.nansum(h_sub["H_c"] * h_w) / np.nansum(h_w)) if len(h_w) and np.nansum(h_w) > 0 else np.nan, "K_area": float(np.nansum(k_sub["K_c"] * k_w) / np.nansum(k_w)) if len(k_w) and np.nansum(k_w) > 0 else np.nan, "K_area_QC_clean": float(np.nansum(kq_sub["K_c"] * kq_w) / np.nansum(kq_w)) if len(kq_w) and np.nansum(kq_w) > 0 else np.nan, "K_qc_rejected_cells": kv - kqc, "K_qc_rejected_fraction": float((kv - kqc) / kv) if kv > 0 else np.nan, "effective_r_max": r_max_effective})
     return pd.DataFrame(rows)
 
 
-def plot_radial_integral_curvature_profile(profile_df: pd.DataFrame, out_dir: Path, min_radial_cells: int) -> None:
+def apply_radial_support_masking(profile_df: pd.DataFrame, min_radial_cells: int, min_radial_cell_fraction: float) -> pd.DataFrame:
+    masked = profile_df.copy()
+    masked["support_threshold_cells"] = np.nan
+    for surface in masked["surface"].dropna().unique():
+        sidx = masked["surface"] == surface
+        s = masked.loc[sidx]
+        h_thr = max(min_radial_cells, int(np.ceil(min_radial_cell_fraction * max(1, int(s["H_valid_cells"].max())))))
+        k_thr = max(min_radial_cells, int(np.ceil(min_radial_cell_fraction * max(1, int(s["K_valid_cells"].max())))))
+        kqc_thr = max(min_radial_cells, int(np.ceil(min_radial_cell_fraction * max(1, int(s["K_qc_clean_cells"].max())))))
+        h_sup = s["H_valid_cells"] >= h_thr
+        k_sup = s["K_valid_cells"] >= k_thr
+        kqc_sup = s["K_qc_clean_cells"] >= kqc_thr
+        masked.loc[sidx, "H_area_plot"] = s["H_area"].where(h_sup, np.nan)
+        masked.loc[sidx, "K_area_plot"] = s["K_area"].where(k_sup, np.nan)
+        masked.loc[sidx, "K_area_QC_clean_plot"] = s["K_area_QC_clean"].where(kqc_sup, np.nan)
+        masked.loc[sidx, "K_qc_rejected_fraction_plot"] = s["K_qc_rejected_fraction"].where(k_sup, np.nan)
+        masked.loc[sidx, "support_threshold_cells"] = k_thr
+    return masked
+
+
+def plot_radial_integral_curvature_profile(profile_df: pd.DataFrame, out_dir: Path) -> None:
     fig, axes = plt.subplots(3, 1, figsize=(10, 10), sharex=True, dpi=300)
+    unreliable_intervals: list[tuple[float, float]] = []
+    for _, row in profile_df.iterrows():
+        k_support = row["K_valid_cells"] >= row["support_threshold_cells"]
+        qc_bad = pd.notna(row["K_qc_rejected_fraction"]) and row["K_qc_rejected_fraction"] > 0.25
+        if (not k_support) or qc_bad:
+            unreliable_intervals.append((float(row["r_min"]), float(row["r_max"])))
+    for r0, r1 in unreliable_intervals:
+        axes[1].axvspan(r0, r1, color="grey", alpha=0.10, linewidth=0)
+        axes[2].axvspan(r0, r1, color="grey", alpha=0.10, linewidth=0)
     for surface, color in (("outer", "tab:blue"), ("inner", "tab:orange")):
         sdf = profile_df.loc[profile_df["surface"] == surface]
         if sdf.empty:
             continue
         x = sdf["r_center"]
-        axes[0].plot(x, sdf["H_area"].where(sdf["H_valid_cells"] >= min_radial_cells, np.nan), color=color, label=surface)
-        axes[1].plot(x, sdf["K_area"].where(sdf["K_valid_cells"] >= min_radial_cells, np.nan), color=color, linestyle="-", label=f"{surface} K")
-        axes[1].plot(x, sdf["K_area_QC_clean"].where(sdf["K_qc_clean_cells"] >= min_radial_cells, np.nan), color=color, linestyle="--", label=f"{surface} K QC-clean")
-        axes[2].plot(x, sdf["K_valid_cells"], color=color, linestyle="-", label=f"{surface} valid cells")
+        h_bad = sdf["H_valid_cells"] < sdf["support_threshold_cells"]
+        for _, row in sdf.loc[h_bad].iterrows():
+            axes[0].axvspan(float(row["r_min"]), float(row["r_max"]), color="grey", alpha=0.10, linewidth=0)
+        axes[0].plot(x, sdf["H_area_plot"], color=color, label=surface)
+        axes[1].plot(x, sdf["K_area_plot"], color=color, linestyle="-", label=f"{surface} K")
+        axes[1].plot(x, sdf["K_area_QC_clean_plot"], color=color, linestyle="--", label=f"{surface} K QC-clean")
+        axes[2].plot(x, sdf["K_valid_cells"], color=color, linestyle="-", label=f"{surface} K cells")
+        axes[2].plot(x, sdf["K_qc_clean_cells"], color=color, linestyle="--", label=f"{surface} K QC-clean cells")
     ax2r = axes[2].twinx()
     for surface, color in (("outer", "tab:blue"), ("inner", "tab:orange")):
         sdf = profile_df.loc[profile_df["surface"] == surface]
         if sdf.empty:
             continue
-        ax2r.plot(sdf["r_center"], sdf["K_qc_rejected_fraction"], color=color, linestyle=":", label=f"{surface} QC rejected")
+        ax2r.plot(sdf["r_center"], sdf["K_qc_rejected_fraction_plot"], color=color, linestyle=":", label=f"{surface} QC rejected")
+    ax2r.axhline(0.25, color="grey", linestyle="--", linewidth=0.9)
+    ax2r.text(0.99, 0.25, "QC caution threshold", transform=ax2r.get_yaxis_transform(), ha="right", va="bottom", fontsize=8, color="grey")
     axes[0].axhline(0.0, color="black", linewidth=0.8)
     axes[1].axhline(0.0, color="black", linewidth=0.8)
-    axes[0].set_title("Radial integral curvature profile")
+    axes[0].set_title("Radial surface-area-weighted curvature profile\nunsupported bins masked; dashed K curves are QC-clean")
     axes[0].set_ylabel("H_A(R) [Å^-1]")
     axes[1].set_ylabel("K_A(R) [Å^-2]")
-    axes[2].set_ylabel("valid cells")
+    axes[2].set_ylabel("cell count")
     ax2r.set_ylabel("K QC rejected fraction")
     axes[2].set_xlabel("r [Å]")
     axes[0].legend(loc="best")
@@ -1972,8 +2023,10 @@ def parse_args() -> argparse.Namespace:
         help="Disable K heatmap QC-warning overlay plots.",
     )
     parser.add_argument("--grid-spacing", type=float, default=None, help="Grid spacing h in Å for cell projected area h^2 (default: infer from x/y).")
-    parser.add_argument("--radial-bins", type=int, default=20, help="Number of equal-width radial bins for cell-based integral profile.")
-    parser.add_argument("--min-radial-cells", type=int, default=3, help="Minimum valid cells per bin to show H/K values in radial profile plot.")
+    parser.add_argument("--radial-bins", type=int, default=12, help="Number of equal-width radial bins for cell-based integral profile.")
+    parser.add_argument("--min-radial-cells", type=int, default=5, help="Minimum valid cells per bin to support plotting in radial profile.")
+    parser.add_argument("--min-radial-cell-fraction", type=float, default=0.02, help="Minimum fraction of each surface max valid-cell bin required to support plotting.")
+    parser.add_argument("--radial-r-max", type=float, default=None, help="Optional radial max override (Å); effective max is min(override, data-supported max).")
 
     return parser.parse_args()
 
@@ -2104,28 +2157,43 @@ def main() -> int:
             diagnostics_by_surface[args.surface] = analyze_k_num_like_metrics(surface_df, args.surface)
             print_k_reconstruction_check(surface_df, args.surface)
 
+    print(f"[INFO] radial profile bins requested = {args.radial_bins}")
+    print(f"[INFO] radial profile min cells = {args.min_radial_cells}")
+    print(f"[INFO] radial profile min cell fraction = {args.min_radial_cell_fraction}")
     radial_profiles: list[pd.DataFrame] = []
     for surf in (["outer", "inner"] if args.surface == "both" else [args.surface]):
         sdf = merged_by_surface.get(surf)
         if sdf is None:
             continue
-        prof = compute_radial_integral_profile(sdf, surf, args.radial_bins, args.grid_spacing)
+        prof = compute_radial_integral_profile(sdf, surf, args.radial_bins, args.grid_spacing, args.radial_r_max)
+        if prof.empty:
+            print(f"[WARN] {surf} radial profile empty after effective range selection; skipping")
+            continue
+        print(f"[INFO] radial profile effective r_max = {float(prof['effective_r_max'].iloc[0]):.3f} Å")
+        prof["radial_bins_requested"] = args.radial_bins
+        prof["min_radial_cells"] = args.min_radial_cells
+        prof["min_radial_cell_fraction"] = args.min_radial_cell_fraction
         radial_profiles.append(prof)
-        supported_h = int((prof["H_valid_cells"] >= args.min_radial_cells).sum())
-        supported_k = int((prof["K_valid_cells"] >= args.min_radial_cells).sum())
-        supported = prof.loc[prof["K_valid_cells"] >= args.min_radial_cells]
+        prof = apply_radial_support_masking(prof, args.min_radial_cells, args.min_radial_cell_fraction)
+        radial_profiles[-1] = prof
+        h_supported = int(prof["H_area_plot"].notna().sum())
+        k_supported = int(prof["K_area_plot"].notna().sum())
+        kqc_supported = int(prof["K_area_QC_clean_plot"].notna().sum())
+        print(f"[INFO] {surf} radial support: bins={len(prof)}, H_supported={h_supported}, K_supported={k_supported}, K_qc_clean_supported={kqc_supported}")
+        print(f"[INFO] {surf} radial masked bins: H_masked={len(prof) - h_supported}, K_masked={len(prof) - k_supported}, K_qc_clean_masked={len(prof) - kqc_supported}")
+        supported = prof.loc[prof["K_qc_rejected_fraction_plot"].notna()]
         max_frac = float(supported["K_qc_rejected_fraction"].max()) if not supported.empty else np.nan
         max_idx = int(supported["K_qc_rejected_fraction"].idxmax()) if not supported.empty else -1
         max_r = float(prof.loc[max_idx, "r_center"]) if max_idx >= 0 else np.nan
         mean_frac = float(supported["K_qc_rejected_fraction"].mean()) if not supported.empty else np.nan
-        print(f"[INFO] {surf} radial profile: bins={len(prof)}, H_supported={supported_h}, K_supported={supported_k}, max_qc_frac={max_frac:.3f} at r={max_r:.3f} Å, mean_qc_frac={mean_frac:.3f}")
+        print(f"[INFO] {surf} radial QC: max_qc_frac={max_frac:.3f} at r={max_r:.3f} Å, mean_supported_qc_frac={mean_frac:.3f}")
     if radial_profiles:
         radial_df = pd.concat(radial_profiles, ignore_index=True)
         radial_csv = out_dir / "radial_integral_curvature_profile.csv"
         radial_df.to_csv(radial_csv, index=False)
         print(f"[INFO] Saved: {radial_csv}")
         if args.surface == "both":
-            plot_radial_integral_curvature_profile(radial_df, out_dir, args.min_radial_cells)
+            plot_radial_integral_curvature_profile(radial_df, out_dir)
 
     if loaded.curvature_summary is not None and not loaded.curvature_summary.empty:
         surfaces = ["outer", "inner"] if args.surface == "both" else [args.surface]
