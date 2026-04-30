@@ -1148,6 +1148,85 @@ def _build_residual_k_analysis_subset(surface_df: pd.DataFrame) -> pd.DataFrame:
     return analysis_df
 
 
+def _build_second_derivative_subset(surface_df: pd.DataFrame, deriv_col: str) -> pd.DataFrame:
+    analysis_mask = (
+        (surface_df["curvature_valid"].astype(int) == 1)
+        & (surface_df["derivative_valid"].astype(int) == 1)
+        & np.isfinite(pd.to_numeric(surface_df["k"], errors="coerce"))
+        & np.isfinite(pd.to_numeric(surface_df["abs_K"], errors="coerce"))
+        & np.isfinite(pd.to_numeric(surface_df[deriv_col], errors="coerce"))
+    )
+    analysis_df = surface_df.loc[analysis_mask].copy()
+    analysis_df["abs_K"] = pd.to_numeric(analysis_df["abs_K"], errors="coerce")
+    analysis_df[deriv_col] = pd.to_numeric(analysis_df[deriv_col], errors="coerce")
+    abs_col = f"abs_{deriv_col}"
+    analysis_df[abs_col] = np.abs(analysis_df[deriv_col].to_numpy(dtype=float))
+    return analysis_df
+
+
+def analyze_absK_vs_second_derivative(surface_df: pd.DataFrame, surface_name: str, deriv_col: str, out_dir: Path) -> tuple[pd.DataFrame, float, float]:
+    required = ["curvature_valid", "derivative_valid", "k", "abs_K", deriv_col, "K_qc_warn_flag"]
+    missing = [col for col in required if col not in surface_df.columns]
+    if missing:
+        print(f"[WARN] Missing required columns for {surface_name} abs(K)-vs-{deriv_col} analysis: {missing}; skipping")
+        return pd.DataFrame(), np.nan, np.nan
+    analysis_df = _build_second_derivative_subset(surface_df, deriv_col)
+    if len(analysis_df) < 2:
+        print(f"[WARN] {surface_name} abs(K)-vs-{deriv_col} subset has <2 rows; skipping")
+        return pd.DataFrame(), np.nan, np.nan
+    abs_col = f"abs_{deriv_col}"
+    x = analysis_df[abs_col].to_numpy(dtype=float)
+    y = analysis_df["abs_K"].to_numpy(dtype=float)
+    pearson_r = safe_corr(x, y)
+    spearman_rho = safe_rank_corr(x, y)
+    print(f"[INFO] {surface_name} abs(K) vs abs({deriv_col}): Pearson r={pearson_r:.6g}, Spearman rho={spearman_rho:.6g}, n={len(analysis_df)}")
+    qc_mask = analysis_df["K_qc_warn_flag"].astype(int) != 0
+    med_qc = describe_group(analysis_df.loc[qc_mask, abs_col].to_numpy(dtype=float))["median"]
+    med_nonqc = describe_group(analysis_df.loc[~qc_mask, abs_col].to_numpy(dtype=float))["median"]
+    print(f"[INFO] {surface_name} abs({deriv_col}) QC enrichment: median_qc={med_qc:.6g}, median_nonqc={med_nonqc:.6g}, ratio={safe_ratio(med_qc, med_nonqc):.6g}")
+    return analysis_df, pearson_r, spearman_rho
+
+
+def plot_second_derivative_heatmap(surface_df: pd.DataFrame, surface_name: str, field_col: str, label: str, out_dir: Path, overlay_qc: bool = False) -> None:
+    required = ["i", "j", "x", "y", "derivative_valid", field_col]
+    if overlay_qc:
+        required += ["curvature_valid", "K_qc_warn_flag"]
+    missing = [c for c in required if c not in surface_df.columns]
+    if missing:
+        print(f"[WARN] Missing columns for {surface_name} {field_col} heatmap: {missing}; skipping")
+        return
+    plot_df = surface_df[required].copy()
+    plot_df[field_col] = pd.to_numeric(plot_df[field_col], errors="coerce")
+    invalid = (plot_df["derivative_valid"].astype(int) != 1) | (~np.isfinite(plot_df[field_col]))
+    plot_df.loc[invalid, field_col] = np.nan
+    valid = plot_df[field_col].to_numpy(dtype=float)
+    finite = valid[np.isfinite(valid)]
+    if finite.size == 0:
+        print(f"[WARN] No finite derivative-valid values for {surface_name} {field_col}; skipping")
+        return
+    vlim = float(np.nanpercentile(np.abs(finite), 99))
+    if not np.isfinite(vlim) or vlim <= 0.0:
+        print(f"[WARN] Invalid vlim for {surface_name} {field_col}; skipping")
+        return
+    grid, extent = dataframe_to_grid(plot_df, field_col)
+    fig, ax = plt.subplots(figsize=(6.2, 5.2))
+    im = ax.imshow(grid, origin="lower", extent=extent, cmap="coolwarm", vmin=-vlim, vmax=vlim, interpolation="nearest")
+    if overlay_qc:
+        qc_df = plot_df.loc[(plot_df["curvature_valid"].astype(int) == 1) & (plot_df["K_qc_warn_flag"].astype(int) != 0)]
+        if len(qc_df) > 0:
+            ax.scatter(qc_df["x"], qc_df["y"], marker="s", color="black", s=8, alpha=0.6, linewidths=0)
+    ax.set_xlabel("x [Å]")
+    ax.set_ylabel("y [Å]")
+    title_surface = "Outer" if surface_name == "outer" else "Inner"
+    ax.set_title(f"{title_surface} surface: {field_col}" + (" + K QC warnings" if overlay_qc else ""))
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(label)
+    suffix = "_qc_overlay" if overlay_qc else ""
+    out_path = out_dir / f"{surface_name}_{field_col}_heatmap{suffix}.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
 def analyze_absK_vs_residual(surface_df: pd.DataFrame, surface_name: str, out_dir: Path, *, save_plot: bool = True) -> None:
     required = ["curvature_valid", "derivative_valid", "abs_K", "fit_rms_residual", "K_qc_warn_flag"]
     missing = [col for col in required if col not in surface_df.columns]
@@ -1266,6 +1345,83 @@ def plot_absK_vs_residual_both(outer_df: pd.DataFrame, inner_df: pd.DataFrame, o
     plt.close(fig)
     print(f"[INFO] Saved: {out_path}")
 
+
+def plot_absK_vs_second_derivative_both(outer_df: pd.DataFrame, inner_df: pd.DataFrame, out_dir: Path) -> None:
+    deriv_cols = ["d2z_dx2", "d2z_dy2", "d2z_dxdy"]
+    fig, axes = plt.subplots(2, 3, figsize=(15, 9), constrained_layout=True)
+    for row, (surface_name, surface_df) in enumerate((("outer", outer_df), ("inner", inner_df))):
+        for col, deriv_col in enumerate(deriv_cols):
+            ax = axes[row, col]
+            analysis_df, pearson_r, spearman_rho = analyze_absK_vs_second_derivative(surface_df, surface_name, deriv_col, out_dir)
+            if len(analysis_df) < 2:
+                ax.set_title(f"{surface_name} {deriv_col}: insufficient data")
+                ax.axis("off")
+                continue
+            qc_mask = analysis_df["K_qc_warn_flag"].astype(int) != 0
+            nonqc_df = analysis_df.loc[~qc_mask]
+            qc_df = analysis_df.loc[qc_mask]
+            ax.scatter(nonqc_df[f"abs_{deriv_col}"], nonqc_df["abs_K"], s=10, alpha=0.35, c="steelblue", linewidths=0, label="non-QC")
+            if len(qc_df) > 0:
+                ax.scatter(qc_df[f"abs_{deriv_col}"], qc_df["abs_K"], s=18, alpha=0.75, c="crimson", linewidths=0, label="QC warning")
+            ax.set_xlabel(f"abs({deriv_col}) [Å^-1]")
+            ax.set_ylabel("abs(K) [Å^-2]")
+            title_surface = "Outer" if surface_name == "outer" else "Inner"
+            ax.set_title(f"{title_surface}: abs(K) vs abs({deriv_col})")
+            qc_fraction = float(qc_mask.mean()) if len(analysis_df) > 0 else np.nan
+            annotation = f"n={len(analysis_df)}\nPearson r={pearson_r:.3g}\nSpearman rho={spearman_rho:.3g}\nQC frac={qc_fraction:.3g}"
+            ax.text(0.98, 0.02, annotation, transform=ax.transAxes, ha="right", va="bottom", fontsize=8,
+                    bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85, "edgecolor": "0.6"})
+            ax.legend(loc="upper left", fontsize=8)
+    out_path = out_dir / "absK_vs_abs_d2z_dxdy.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
+
+def plot_second_derivative_heatmaps_both(outer_df: pd.DataFrame, inner_df: pd.DataFrame, out_dir: Path, overlay_qc: bool = False) -> None:
+    fields = [("d2z_dx2", "d2z/dx2 [Å^-1]"), ("d2z_dy2", "d2z/dy2 [Å^-1]"), ("d2z_dxdy", "d2z/dxdy [Å^-1]")]
+    fig, axes = plt.subplots(2, 3, figsize=(15, 9), constrained_layout=True)
+    for row, (surface_name, surface_df) in enumerate((("outer", outer_df), ("inner", inner_df))):
+        for col, (field_col, label) in enumerate(fields):
+            ax = axes[row, col]
+            req = ["i", "j", "x", "y", "derivative_valid", field_col]
+            if overlay_qc:
+                req += ["curvature_valid", "K_qc_warn_flag"]
+            if any(c not in surface_df.columns for c in req):
+                ax.set_title(f"{surface_name} {field_col}: missing cols")
+                ax.axis("off")
+                continue
+            df = surface_df[req].copy()
+            df[field_col] = pd.to_numeric(df[field_col], errors="coerce")
+            df.loc[(df["derivative_valid"].astype(int) != 1) | (~np.isfinite(df[field_col])), field_col] = np.nan
+            finite = df[field_col].to_numpy(dtype=float)
+            finite = finite[np.isfinite(finite)]
+            if finite.size == 0:
+                ax.set_title(f"{surface_name} {field_col}: no data")
+                ax.axis("off")
+                continue
+            vlim = float(np.nanpercentile(np.abs(finite), 99))
+            if not np.isfinite(vlim) or vlim <= 0.0:
+                print(f"[WARN] Invalid vlim for {surface_name} {field_col}; panel skipped")
+                ax.set_title(f"{surface_name} {field_col}: invalid vlim")
+                ax.axis("off")
+                continue
+            grid, extent = dataframe_to_grid(df, field_col)
+            im = ax.imshow(grid, origin="lower", extent=extent, cmap="coolwarm", vmin=-vlim, vmax=vlim, interpolation="nearest")
+            if overlay_qc:
+                qc_df = df.loc[(df["curvature_valid"].astype(int) == 1) & (df["K_qc_warn_flag"].astype(int) != 0)]
+                if len(qc_df) > 0:
+                    ax.scatter(qc_df["x"], qc_df["y"], marker="s", color="black", s=8, alpha=0.6, linewidths=0)
+            ax.set_title((("Outer" if surface_name == "outer" else "Inner") + f": {field_col}"))
+            ax.set_xlabel("x [Å]")
+            ax.set_ylabel("y [Å]")
+            cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label(label)
+    out_name = "d2z_dxdy_qc_overlay.png" if overlay_qc else "d2z_dxdy_heatmap.png"
+    out_path = out_dir / out_name
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
 
 def run_surface_merges(loaded: LoadedGeometryCsvs) -> dict[str, Optional[pd.DataFrame]]:
     return {
@@ -1403,6 +1559,10 @@ def main() -> int:
                 compute_scale_enrichment(surf_df, surf_name)
                 analyze_absK_vs_residual(surf_df, surf_name, out_dir, save_plot=False)
             plot_absK_vs_residual_both(outer_df, inner_df, out_dir)
+            plot_second_derivative_heatmaps_both(outer_df, inner_df, out_dir, overlay_qc=False)
+            if args.qc_overlay:
+                plot_second_derivative_heatmaps_both(outer_df, inner_df, out_dir, overlay_qc=True)
+            plot_absK_vs_second_derivative_both(outer_df, inner_df, out_dir)
     else:
         surface_df = merged_by_surface.get(args.surface)
         if surface_df is None:
@@ -1438,6 +1598,15 @@ def main() -> int:
             plot_scale_radial_profiles(surface_df, args.surface, out_dir)
             compute_scale_enrichment(surface_df, args.surface)
             analyze_absK_vs_residual(surface_df, args.surface, out_dir)
+            for deriv_col, label in (
+                ("d2z_dx2", "d2z/dx2 [Å^-1]"),
+                ("d2z_dy2", "d2z/dy2 [Å^-1]"),
+                ("d2z_dxdy", "d2z/dxdy [Å^-1]"),
+            ):
+                plot_second_derivative_heatmap(surface_df, args.surface, deriv_col, label, out_dir, overlay_qc=False)
+                if args.qc_overlay:
+                    plot_second_derivative_heatmap(surface_df, args.surface, deriv_col, label, out_dir, overlay_qc=True)
+                analyze_absK_vs_second_derivative(surface_df, args.surface, deriv_col, out_dir)
 
     success_msg = "[SUCCESS] K heatmaps"
     success_msg += ", QC overlays," if args.qc_overlay else ""
@@ -1445,6 +1614,7 @@ def main() -> int:
     print(success_msg)
     print("[SUCCESS] Scale mismatch diagnostics generated.")
     print("[SUCCESS] Residual-vs-K quantitative diagnostics generated.")
+    print("[SUCCESS] Second-derivative K-driver diagnostics generated.")
     return 0
 
 
