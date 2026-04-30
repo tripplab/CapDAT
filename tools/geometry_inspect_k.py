@@ -492,31 +492,62 @@ def _compute_vlim(plot_df: pd.DataFrame, k_percentile: float) -> Optional[float]
     return vlim
 
 
-def plot_k_heatmap(
+def _compute_shared_vlim(
+    surface_dfs: list[pd.DataFrame],
+    surface_names: list[str],
+    k_percentile: float,
+) -> Optional[float]:
+    vlms: list[float] = []
+    for df, name in zip(surface_dfs, surface_names):
+        plot_df = _prepare_k_plot_df(df, name)
+        vlim = _compute_vlim(plot_df, k_percentile)
+        if vlim is not None:
+            vlms.append(vlim)
+    if not vlms:
+        return None
+    return float(max(vlms))
+
+
+def plot_k_heatmap_base(
+    ax: plt.Axes,
     surface_df: pd.DataFrame,
     surface_name: str,
-    out_dir: Path,
     k_percentile: float,
-) -> None:
+    *,
+    vlim: Optional[float] = None,
+) -> tuple[plt.AxesImage, pd.DataFrame]:
     plot_df = _prepare_k_plot_df(surface_df, surface_name)
-    vlim = _compute_vlim(plot_df, k_percentile)
-    if vlim is None:
-        print(f"[WARN] No valid finite K values for {surface_name}; skipping plot")
-        return
+    resolved_vlim = vlim if vlim is not None else _compute_vlim(plot_df, k_percentile)
+    if resolved_vlim is None:
+        raise ValueError(f"No valid finite K values for {surface_name}; cannot render base heatmap")
 
     grid, extent = dataframe_to_grid(plot_df, "k_plot")
-
-    fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(
         grid,
         origin="lower",
         interpolation="nearest",
         aspect="equal",
         cmap="coolwarm_r",
-        vmin=-vlim,
-        vmax=vlim,
+        vmin=-resolved_vlim,
+        vmax=resolved_vlim,
         extent=extent,
     )
+    return im, plot_df
+
+
+def plot_k_heatmap(
+    surface_df: pd.DataFrame,
+    surface_name: str,
+    out_dir: Path,
+    k_percentile: float,
+) -> None:
+    vlim = _compute_shared_vlim([surface_df], [surface_name], k_percentile)
+    if vlim is None:
+        print(f"[WARN] No valid finite K values for {surface_name}; skipping plot")
+        return
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im, _ = plot_k_heatmap_base(ax, surface_df, surface_name, k_percentile, vlim=vlim)
 
     title_surface = "Outer" if surface_name == "outer" else "Inner"
     ax.set_title(f"{title_surface} surface: Gaussian curvature K, all valid nodes")
@@ -537,35 +568,18 @@ def plot_k_heatmap_both(
     out_dir: Path,
     k_percentile: float,
 ) -> None:
-    plot_outer = _prepare_k_plot_df(outer_df, "outer")
-    plot_inner = _prepare_k_plot_df(inner_df, "inner")
-
-    outer_vlim = _compute_vlim(plot_outer, k_percentile)
-    inner_vlim = _compute_vlim(plot_inner, k_percentile)
-    if outer_vlim is None or inner_vlim is None:
+    vlim = _compute_shared_vlim([outer_df, inner_df], ["outer", "inner"], k_percentile)
+    if vlim is None:
         print("[WARN] Missing valid K values for outer/inner; skipping combined plot")
         return
 
-    vlim = max(outer_vlim, inner_vlim)
-    outer_grid, outer_extent = dataframe_to_grid(plot_outer, "k_plot")
-    inner_grid, inner_extent = dataframe_to_grid(plot_inner, "k_plot")
-
     fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
     panels = [
-        (axes[0], outer_grid, outer_extent, "Outer surface: Gaussian curvature K, all valid nodes"),
-        (axes[1], inner_grid, inner_extent, "Inner surface: Gaussian curvature K, all valid nodes"),
+        (axes[0], outer_df, "outer", "Outer surface: Gaussian curvature K, all valid nodes"),
+        (axes[1], inner_df, "inner", "Inner surface: Gaussian curvature K, all valid nodes"),
     ]
-    for ax, grid, extent, title in panels:
-        im = ax.imshow(
-            grid,
-            origin="lower",
-            interpolation="nearest",
-            aspect="equal",
-            cmap="coolwarm_r",
-            vmin=-vlim,
-            vmax=vlim,
-            extent=extent,
-        )
+    for ax, surface_df, surface_name, title in panels:
+        im, _ = plot_k_heatmap_base(ax, surface_df, surface_name, k_percentile, vlim=vlim)
         ax.set_title(title)
         ax.set_xlabel("x [Å]")
         ax.set_ylabel("y [Å]")
@@ -574,6 +588,119 @@ def plot_k_heatmap_both(
     cbar.set_label("K [Å^-2]")
 
     out_path = out_dir / "K_heatmap_all_valid.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
+
+def _plot_qc_overlay_points(ax: plt.Axes, plot_df: pd.DataFrame) -> tuple[int, int]:
+    qc_warn = (plot_df["curvature_valid"].astype(int) == 1) & (plot_df["K_qc_warn_flag"].astype(int) != 0)
+    qc_df = plot_df.loc[qc_warn]
+    valid_nodes = int((plot_df["curvature_valid"].astype(int) == 1).sum())
+    warn_nodes = int(len(qc_df))
+    if warn_nodes > 0:
+        ax.scatter(
+            qc_df["x"],
+            qc_df["y"],
+            marker="s",
+            color="black",
+            s=8,
+            alpha=0.65,
+            linewidths=0,
+            label="K QC warn",
+        )
+        ax.legend(loc="upper right", fontsize=8)
+    return warn_nodes, valid_nodes
+
+
+def plot_k_heatmap_with_qc_overlay(
+    surface_df: pd.DataFrame,
+    surface_name: str,
+    out_dir: Path,
+    k_percentile: float,
+    *,
+    strict: bool,
+    vlim: Optional[float] = None,
+) -> None:
+    required = ["i", "j", "x", "y", "k", "curvature_valid"]
+    missing = [col for col in required if col not in surface_df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for {surface_name} QC overlay plot: {missing}")
+    if "K_qc_warn_flag" not in surface_df.columns:
+        msg = f"[WARN] Missing K_qc_warn_flag for {surface_name}; skipping QC overlay plot"
+        if strict:
+            raise ValueError(msg)
+        print(msg)
+        return
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im, plot_df = plot_k_heatmap_base(ax, surface_df, surface_name, k_percentile, vlim=vlim)
+    warn_nodes, valid_nodes = _plot_qc_overlay_points(ax, plot_df)
+
+    title_surface = "Outer" if surface_name == "outer" else "Inner"
+    ax.set_title(f"{title_surface} surface: K heatmap with QC warnings")
+    ax.set_xlabel("x [Å]")
+    ax.set_ylabel("y [Å]")
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("K [Å^-2]")
+
+    out_path = out_dir / f"{surface_name}_K_heatmap_qc_overlay.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    fraction = (warn_nodes / valid_nodes) if valid_nodes > 0 else 0.0
+    print(f"[INFO] Saved: {out_path}")
+    print(
+        f"[INFO] {surface_name} QC overlay: "
+        f"qc_warn_nodes={warn_nodes}, curvature_valid_nodes={valid_nodes}, fraction={fraction:.2e}"
+    )
+
+
+def plot_k_heatmap_with_qc_overlay_both(
+    outer_df: pd.DataFrame,
+    inner_df: pd.DataFrame,
+    out_dir: Path,
+    k_percentile: float,
+    *,
+    strict: bool,
+) -> None:
+    if "K_qc_warn_flag" not in outer_df.columns or "K_qc_warn_flag" not in inner_df.columns:
+        missing_surfaces = [
+            name for name, df in (("outer", outer_df), ("inner", inner_df)) if "K_qc_warn_flag" not in df.columns
+        ]
+        msg = (
+            "[WARN] Missing K_qc_warn_flag for "
+            + ",".join(missing_surfaces)
+            + "; skipping combined QC overlay plot"
+        )
+        if strict:
+            raise ValueError(msg)
+        print(msg)
+        return
+
+    vlim = _compute_shared_vlim([outer_df, inner_df], ["outer", "inner"], k_percentile)
+    if vlim is None:
+        print("[WARN] Missing valid K values for outer/inner; skipping combined QC overlay plot")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+    for ax, surface_df, surface_name, title in (
+        (axes[0], outer_df, "outer", "Outer surface: K heatmap with QC warnings"),
+        (axes[1], inner_df, "inner", "Inner surface: K heatmap with QC warnings"),
+    ):
+        im, plot_df = plot_k_heatmap_base(ax, surface_df, surface_name, k_percentile, vlim=vlim)
+        warn_nodes, valid_nodes = _plot_qc_overlay_points(ax, plot_df)
+        fraction = (warn_nodes / valid_nodes) if valid_nodes > 0 else 0.0
+        print(
+            f"[INFO] {surface_name} QC overlay: "
+            f"qc_warn_nodes={warn_nodes}, curvature_valid_nodes={valid_nodes}, fraction={fraction:.2e}"
+        )
+        ax.set_title(title)
+        ax.set_xlabel("x [Å]")
+        ax.set_ylabel("y [Å]")
+
+    cbar = fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.92)
+    cbar.set_label("K [Å^-2]")
+    out_path = out_dir / "K_heatmap_qc_overlay.png"
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"[INFO] Saved: {out_path}")
@@ -633,6 +760,19 @@ def parse_args() -> argparse.Namespace:
         default=99.0,
         help="Percentile for symmetric K color clipping per surface.",
     )
+    parser.add_argument(
+        "--qc-overlay",
+        dest="qc_overlay",
+        action="store_true",
+        default=True,
+        help="Enable K heatmap QC-warning overlay plots (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-qc-overlay",
+        dest="qc_overlay",
+        action="store_false",
+        help="Disable K heatmap QC-warning overlay plots.",
+    )
 
     return parser.parse_args()
 
@@ -661,14 +801,32 @@ def main() -> int:
             print("[WARN] Missing merged table for outer/inner; skipping combined plot")
         else:
             plot_k_heatmap_both(outer_df, inner_df, out_dir, args.k_percentile)
+            if args.qc_overlay:
+                plot_k_heatmap_with_qc_overlay_both(
+                    outer_df,
+                    inner_df,
+                    out_dir,
+                    args.k_percentile,
+                    strict=args.strict,
+                )
     else:
         surface_df = merged_by_surface.get(args.surface)
         if surface_df is None:
             print(f"[WARN] Missing merged table for {args.surface}; skipping plot")
         else:
             plot_k_heatmap(surface_df, args.surface, out_dir, args.k_percentile)
+            if args.qc_overlay:
+                plot_k_heatmap_with_qc_overlay(
+                    surface_df,
+                    args.surface,
+                    out_dir,
+                    args.k_percentile,
+                    strict=args.strict,
+                )
 
-    print("[SUCCESS] Basic K heatmap generation completed.")
+    success_msg = "[SUCCESS] Basic K heatmaps"
+    success_msg += " and QC overlays generated." if args.qc_overlay else " generated."
+    print(success_msg)
     return 0
 
 
