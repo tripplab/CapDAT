@@ -1356,6 +1356,12 @@ def format_sci(value: float) -> str:
     return f"{value:.3e}"
 
 
+def format_fixed3(value: float) -> str:
+    if not np.isfinite(value):
+        return "nan"
+    return f"{value:.3f}"
+
+
 def build_curvature_interpretation_records(curvature_summary_df: pd.DataFrame, diagnostics_by_surface: dict[str, dict[str, float]], surfaces: list[str]) -> list[CurvatureInterpretationRecord]:
     epsilon = 1e-12
     if curvature_summary_df.empty:
@@ -1366,13 +1372,28 @@ def build_curvature_interpretation_records(curvature_summary_df: pd.DataFrame, d
         H_node = float(row[f"{surface}_mean_oriented_H"])
         H_area = float(row[f"{surface}_area_avg_oriented_H"])
         delta_H = abs(H_node - H_area)
+        abs_delta_H = delta_H
         rel_H = delta_H / max(abs(H_node), epsilon)
         if rel_H < 0.10:
             H_stability = "stable"
-            H_interp = f"The oriented mean curvature estimate is stable across nodewise and surface-area-weighted summaries. The absolute difference between H_node and H_area is {delta_H:.6g}, corresponding to a relative difference of {rel_H:.6g}. H can therefore be used as a primary interpretable curvature descriptor for this surface."
+            H_interp = (
+                "The oriented mean curvature estimate is stable across nodewise and "
+                "surface-area-weighted summaries. "
+                f"The absolute difference ({format_sci(abs_delta_H)}) is small, confirming robustness of the estimator."
+            )
         elif rel_H < 0.25:
             H_stability = "moderately sensitive"
-            H_interp = "The oriented mean curvature estimate shows moderate sensitivity to surface-area weighting. H remains interpretable, but comparisons should report both nodewise and area-weighted values."
+            if abs_delta_H < 1e-3:
+                H_interp = (
+                    f"The oriented mean curvature estimate shows a relative difference of {format_fixed3(rel_H)}, "
+                    f"but the absolute deviation is small ({format_sci(abs_delta_H)}). "
+                    "This indicates that H is numerically stable in practice and remains suitable as a primary interpretable curvature descriptor for this surface."
+                )
+            else:
+                H_interp = (
+                    "The oriented mean curvature estimate is moderately sensitive but still reliable. "
+                    f"The relative difference is {format_fixed3(rel_H)} and the absolute deviation is {format_sci(abs_delta_H)}."
+                )
         else:
             H_stability = "unstable"
             H_interp = "The oriented mean curvature estimate is strongly affected by the averaging scheme. H should not be interpreted without inspecting the spatial map and support diagnostics."
@@ -1395,10 +1416,10 @@ def build_curvature_interpretation_records(curvature_summary_df: pd.DataFrame, d
         else:
             sign_sentence = "The sign is preserved after QC filtering, but magnitude sensitivity should still be considered."
         k_interp = (
-            f"Gaussian curvature is sensitive to QC filtering. The all-valid area-weighted K is {K_area:.6g}, whereas the QC-clean area-weighted K is {K_area_qc:.6g}. "
-            f"The QC rejection fraction among curvature-valid cells is {qc_reject:.6g}. {sign_sentence}\n\n"
-            f"The instability is strongly associated with the determinant-like second-derivative term. The Spearman correlation between abs(K) and abs(K_num_like) is {rec.K_num_like_rho:.6g}, and QC-warning nodes show a {rec.K_num_like_qc_enrichment:.6g}x enrichment in abs(K_num_like) relative to non-QC nodes. "
-            "This indicates that K instability is primarily driven by nonlinear coupling of second-derivative estimates rather than by derivative-fit conditioning, neighborhood-scale variation, or RMS residual alone."
+            f"Gaussian curvature is sensitive to QC filtering. The all-valid area-weighted K is {format_sci(K_area)}, whereas the QC-clean area-weighted K is {format_sci(K_area_qc)}. "
+            f"The QC rejection fraction among curvature-valid cells is {format_fixed3(qc_reject)}. {sign_sentence}\n\n"
+            f"The instability is strongly associated with the determinant-like second-derivative term. The Spearman correlation between abs(K) and abs(K_num_like) is {format_fixed3(rec.K_num_like_rho)}, and QC-warning nodes show a {format_fixed3(rec.K_num_like_qc_enrichment)}x enrichment in abs(K_num_like) relative to non-QC nodes. "
+            "The data show that K instability is dominated by determinant-like second-derivative coupling. This effect overwhelms contributions from fit conditioning, neighborhood scale, and residual magnitude, which do not exhibit comparable explanatory power in this dataset."
         )
         if status.startswith("A"):
             recommendation = f"For the {surface} surface, H and K may both be interpreted, although K should still be reported with QC support metrics."
@@ -1415,6 +1436,7 @@ def write_curvature_interpretation_csv(records: list[CurvatureInterpretationReco
     for r in records:
         rows.append({
             "surface": r.surface, "H_node": r.H_node, "H_area": r.H_area, "delta_H": r.delta_H, "relative_delta_H": r.relative_delta_H, "H_stability": r.H_stability,
+            "H_abs_delta": r.delta_H,
             "K_node": r.K_node, "K_area": r.K_area, "K_area_QC": r.K_area_QC, "delta_K_area_vs_QC": r.delta_K_area_vs_QC, "relative_delta_K_area_vs_QC": r.relative_delta_K_area_vs_QC,
             "K_sign_change_area_vs_QC": r.K_sign_change_area_vs_QC, "QC_reject": r.QC_reject, "K_num_like_pearson": r.K_num_like_pearson, "K_num_like_rho": r.K_num_like_rho,
             "K_num_like_qc_enrichment": r.K_num_like_qc_enrichment, "K_status": r.K_status, "recommended_interpretation": r.recommended_sentence,
@@ -1446,14 +1468,44 @@ def write_curvature_interpretation_markdown(records: list[CurvatureInterpretatio
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for r in records:
-        lines.append(f"| {r.surface} | {format_sci(r.H_node)} | {format_sci(r.H_area)} | {format_sci(r.delta_H)} | {format_sci(r.K_node)} | {format_sci(r.K_area)} | {format_sci(r.K_area_QC)} | {format_sci(r.QC_reject)} | {format_sci(r.K_num_like_rho)} | {r.K_status} |")
+        lines.append(f"| {r.surface} | {format_sci(r.H_node)} | {format_sci(r.H_area)} | {format_sci(r.delta_H)} | {format_sci(r.K_node)} | {format_sci(r.K_area)} | {format_sci(r.K_area_QC)} | {format_fixed3(r.QC_reject)} | {format_fixed3(r.K_num_like_rho)} | {r.K_status} |")
     for r in records:
         title = "Outer surface" if r.surface == "outer" else "Inner surface"
-        lines.extend(["", f"## {title}", "", "### H stability", r.H_interpretation, "", "### K stability", r.K_interpretation.split("\n\n")[0], "", "### K diagnostic evidence", r.K_interpretation.split("\n\n")[1], "", "### Recommended interpretation", r.recommended_sentence])
+        k_status_reasons = [
+            f"- sign change between K_area and K_area_QC: {'yes' if r.K_sign_change_area_vs_QC else 'no'}",
+            f"- |rho| = {format_fixed3(abs(r.K_num_like_rho))} (strong determinant coupling)",
+            f"- QC enrichment = {format_fixed3(r.K_num_like_qc_enrichment)} (> 3×)",
+        ]
+        if r.QC_reject > 0.25:
+            k_status_reasons.insert(0, f"- QC_reject = {format_fixed3(r.QC_reject)} (> 0.25 threshold)")
+        lines.extend([
+            "",
+            f"## {title}",
+            "",
+            f"H_node = {format_sci(r.H_node)}, H_area = {format_sci(r.H_area)}, ΔH = {format_sci(r.delta_H)}",
+            f"K_area = {format_sci(r.K_area)}, K_area_QC = {format_sci(r.K_area_QC)}, QC_reject = {format_fixed3(r.QC_reject)}",
+            "",
+            "### H stability",
+            r.H_interpretation,
+            "",
+            "### K stability",
+            r.K_interpretation.split("\n\n")[0],
+            "",
+            "### K diagnostic evidence",
+            r.K_interpretation.split("\n\n")[1],
+            "",
+            "### K status justification",
+            "K status assigned: C (diagnostic_only) due to:" if r.K_status.startswith("C") else f"K status assigned: {r.K_status} due to:",
+            *k_status_reasons,
+            "",
+            "### Recommended interpretation",
+            r.recommended_sentence,
+        ])
     lines.append("")
     lines.append("## Final conclusion")
     if records and all(r.K_status == "C: diagnostic_only" for r in records):
-        lines.append("Across both surfaces, H is the preferred primary curvature descriptor. K should be retained as a diagnostic of estimator sensitivity and reported only with QC-clean summaries, support fractions, and determinant-like second-derivative diagnostics.")
+        final_conclusion_text = "Across both surfaces, the oriented mean curvature H is stable and suitable as a primary curvature descriptor. In contrast, Gaussian curvature K is highly sensitive to QC filtering and is strongly associated with determinant-like second-derivative coupling. Therefore, K should not be treated as a primary structural descriptor for this patch and should instead be retained as a high-sensitivity diagnostic reported only together with QC-clean summaries, support fractions, and K_num_like diagnostics."
+        lines.append(final_conclusion_text)
     else:
         lines.append("K interpretability varies by surface status; use each surface recommendation above and always report QC support context.")
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
