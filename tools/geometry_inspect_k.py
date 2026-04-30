@@ -982,7 +982,11 @@ def plot_neighbor_heatmap(
         vmin = float(np.nanmin(finite))
         vmax = float(np.nanmax(finite))
     if (not np.isfinite(vmin)) or (not np.isfinite(vmax)) or (vmax <= vmin):
-        print(f"[WARN] Invalid color scaling for {surface_name} {value_col}; skipping plot")
+        const_value = float(np.nanmedian(finite))
+        if value_col == "neighbor_max_radius":
+            print(f"[INFO] {surface_name} {value_col} is constant (={const_value:.6g} Å); heatmap skipped.")
+        else:
+            print(f"[INFO] {surface_name} {value_col} is constant (={const_value:.6g}); heatmap skipped.")
         return
     grid, extent = dataframe_to_grid(plot_df, value_col)
     fig, ax = plt.subplots(figsize=(6, 5))
