@@ -17,6 +17,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+try:
+    from scipy.stats import spearmanr as scipy_spearmanr
+except Exception:  # pragma: no cover - optional dependency
+    scipy_spearmanr = None
+
 
 @dataclass(frozen=True)
 class GeometryCsvFiles:
@@ -1092,6 +1097,176 @@ def compute_scale_enrichment(surface_df: pd.DataFrame, surface_name: str) -> Non
         print(f"[INFO] {surface_name} {label} enrichment: median_qc={med_qc:.6g}, median_nonqc={med_nonqc:.6g}, ratio={ratio:.6g}")
 
 
+def safe_corr(x: np.ndarray, y: np.ndarray) -> float:
+    if x.size < 2 or y.size < 2:
+        return np.nan
+    if np.allclose(x, x[0]) or np.allclose(y, y[0]):
+        return np.nan
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def safe_rank_corr(x: np.ndarray, y: np.ndarray) -> float:
+    if x.size < 2 or y.size < 2:
+        return np.nan
+    if scipy_spearmanr is not None:
+        rho, _ = scipy_spearmanr(x, y)
+        return float(rho)
+    x_rank = pd.Series(x).rank(method="average").to_numpy(dtype=float)
+    y_rank = pd.Series(y).rank(method="average").to_numpy(dtype=float)
+    return safe_corr(x_rank, y_rank)
+
+
+def describe_group(values: np.ndarray) -> dict[str, float]:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return {"median": np.nan, "mean": np.nan, "p95": np.nan, "max": np.nan}
+    return {
+        "median": float(np.nanmedian(finite)),
+        "mean": float(np.nanmean(finite)),
+        "p95": float(np.nanpercentile(finite, 95)),
+        "max": float(np.nanmax(finite)),
+    }
+
+
+def safe_ratio(a: float, b: float) -> float:
+    if not np.isfinite(a) or not np.isfinite(b) or b == 0.0:
+        return np.nan
+    return float(a / b)
+
+
+def _build_residual_k_analysis_subset(surface_df: pd.DataFrame) -> pd.DataFrame:
+    analysis_mask = (
+        (surface_df["curvature_valid"].astype(int) == 1)
+        & (surface_df["derivative_valid"].astype(int) == 1)
+        & np.isfinite(pd.to_numeric(surface_df["abs_K"], errors="coerce"))
+        & np.isfinite(pd.to_numeric(surface_df["fit_rms_residual"], errors="coerce"))
+        & (pd.to_numeric(surface_df["fit_rms_residual"], errors="coerce") >= 0.0)
+    )
+    analysis_df = surface_df.loc[analysis_mask].copy()
+    analysis_df["abs_K"] = pd.to_numeric(analysis_df["abs_K"], errors="coerce")
+    analysis_df["fit_rms_residual"] = pd.to_numeric(analysis_df["fit_rms_residual"], errors="coerce")
+    return analysis_df
+
+
+def analyze_absK_vs_residual(surface_df: pd.DataFrame, surface_name: str, out_dir: Path, *, save_plot: bool = True) -> None:
+    required = ["curvature_valid", "derivative_valid", "abs_K", "fit_rms_residual", "K_qc_warn_flag"]
+    missing = [col for col in required if col not in surface_df.columns]
+    if missing:
+        print(f"[WARN] Missing required columns for {surface_name} residual-vs-K analysis: {missing}; skipping")
+        return
+
+    total_rows = len(surface_df)
+    analysis_df = _build_residual_k_analysis_subset(surface_df)
+    qc_mask = analysis_df["K_qc_warn_flag"].astype(int) != 0
+    qc_count = int(qc_mask.sum())
+    non_qc_count = int((~qc_mask).sum())
+    print(f"[INFO] {surface_name} residual-vs-K subset: total={total_rows}, n={len(analysis_df)}, qc={qc_count}, non_qc={non_qc_count}")
+
+    if len(analysis_df) < 2:
+        print(f"[WARN] {surface_name} analysis subset has <2 rows; skipping residual-vs-K correlation/plot")
+        return
+
+    x = analysis_df["fit_rms_residual"].to_numpy(dtype=float)
+    y = analysis_df["abs_K"].to_numpy(dtype=float)
+    pearson_r = safe_corr(x, y)
+    spearman_rho = safe_rank_corr(x, y)
+    print(
+        f"[INFO] {surface_name} abs(K) vs RMS residual: "
+        f"Pearson r={pearson_r:.6g}, Spearman rho={spearman_rho:.6g}, n={len(analysis_df)}"
+    )
+
+    qc_rms = describe_group(analysis_df.loc[qc_mask, "fit_rms_residual"].to_numpy(dtype=float))
+    nonqc_rms = describe_group(analysis_df.loc[~qc_mask, "fit_rms_residual"].to_numpy(dtype=float))
+    qc_absk = describe_group(analysis_df.loc[qc_mask, "abs_K"].to_numpy(dtype=float))
+    nonqc_absk = describe_group(analysis_df.loc[~qc_mask, "abs_K"].to_numpy(dtype=float))
+    print(
+        f"[INFO] {surface_name} RMS residual median: "
+        f"qc={qc_rms['median']:.6g}, nonqc={nonqc_rms['median']:.6g}, "
+        f"ratio={safe_ratio(qc_rms['median'], nonqc_rms['median']):.6g}"
+    )
+    print(
+        f"[INFO] {surface_name} abs(K) median: "
+        f"qc={qc_absk['median']:.6g}, nonqc={nonqc_absk['median']:.6g}, "
+        f"ratio={safe_ratio(qc_absk['median'], nonqc_absk['median']):.6g}"
+    )
+
+    p90 = float(np.nanpercentile(x, 90))
+    high_residual = x >= p90
+    qc_fraction = float(np.mean(high_residual[qc_mask.to_numpy()])) if qc_count > 0 else np.nan
+    nonqc_fraction = float(np.mean(high_residual[(~qc_mask).to_numpy()])) if non_qc_count > 0 else np.nan
+    print(
+        f"[INFO] {surface_name} high-residual enrichment: "
+        f"qc_fraction={qc_fraction:.6g}, nonqc_fraction={nonqc_fraction:.6g}, "
+        f"ratio={safe_ratio(qc_fraction, nonqc_fraction):.6g}"
+    )
+
+    if not save_plot:
+        return
+    fig, ax = plt.subplots(figsize=(6, 5))
+    nonqc_df = analysis_df.loc[~qc_mask]
+    qc_df = analysis_df.loc[qc_mask]
+    ax.scatter(nonqc_df["fit_rms_residual"], nonqc_df["abs_K"], s=10, alpha=0.35, c="steelblue", linewidths=0, label="non-QC")
+    if len(qc_df) > 0:
+        ax.scatter(qc_df["fit_rms_residual"], qc_df["abs_K"], s=18, alpha=0.75, c="crimson", linewidths=0, label="QC warning")
+    ax.set_xlabel("fit_rms_residual [Å]")
+    ax.set_ylabel("abs(K) [Å^-2]")
+    ax.set_title(("Outer" if surface_name == "outer" else "Inner") + " surface: abs(K) vs fit RMS residual")
+    ax.legend(loc="upper left", fontsize=8)
+    annotation = "\n".join(
+        [
+            f"n={len(analysis_df)}",
+            f"Pearson r={pearson_r:.3g}",
+            f"Spearman rho={spearman_rho:.3g}",
+            f"QC frac={qc_count / len(analysis_df):.3g}",
+        ]
+    )
+    ax.text(0.98, 0.02, annotation, transform=ax.transAxes, ha="right", va="bottom", fontsize=8,
+            bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85, "edgecolor": "0.6"})
+    out_path = out_dir / f"{surface_name}_absK_vs_fit_rms_residual.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
+
+def plot_absK_vs_residual_both(outer_df: pd.DataFrame, inner_df: pd.DataFrame, out_dir: Path) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+    panels = [("outer", outer_df, axes[0]), ("inner", inner_df, axes[1])]
+    has_points = False
+    for surface_name, surface_df, ax in panels:
+        analysis_df = _build_residual_k_analysis_subset(surface_df)
+        if len(analysis_df) < 2:
+            ax.set_title(f"{surface_name}: insufficient valid data")
+            ax.axis("off")
+            continue
+        has_points = True
+        qc_mask = analysis_df["K_qc_warn_flag"].astype(int) != 0
+        x = analysis_df["fit_rms_residual"].to_numpy(dtype=float)
+        y = analysis_df["abs_K"].to_numpy(dtype=float)
+        pearson_r = safe_corr(x, y)
+        spearman_rho = safe_rank_corr(x, y)
+        nonqc_df = analysis_df.loc[~qc_mask]
+        qc_df = analysis_df.loc[qc_mask]
+        ax.scatter(nonqc_df["fit_rms_residual"], nonqc_df["abs_K"], s=10, alpha=0.35, c="steelblue", linewidths=0, label="non-QC")
+        if len(qc_df) > 0:
+            ax.scatter(qc_df["fit_rms_residual"], qc_df["abs_K"], s=18, alpha=0.75, c="crimson", linewidths=0, label="QC warning")
+        ax.set_xlabel("fit_rms_residual [Å]")
+        ax.set_ylabel("abs(K) [Å^-2]")
+        ax.set_title(("Outer" if surface_name == "outer" else "Inner") + " surface")
+        ax.legend(loc="upper left", fontsize=8)
+        qc_fraction = float(qc_mask.mean()) if len(analysis_df) > 0 else np.nan
+        annotation = f"n={len(analysis_df)}\nPearson r={pearson_r:.3g}\nSpearman rho={spearman_rho:.3g}\nQC frac={qc_fraction:.3g}"
+        ax.text(0.98, 0.02, annotation, transform=ax.transAxes, ha="right", va="bottom", fontsize=8,
+                bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85, "edgecolor": "0.6"})
+    if not has_points:
+        plt.close(fig)
+        print("[WARN] No valid outer/inner data for combined abs(K)-vs-residual plot")
+        return
+    out_path = out_dir / "absK_vs_fit_rms_residual.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
+
 def run_surface_merges(loaded: LoadedGeometryCsvs) -> dict[str, Optional[pd.DataFrame]]:
     return {
         "outer": merge_surface_geometry(loaded.outer_curvature, loaded.outer_derivatives, surface="outer"),
@@ -1226,6 +1401,8 @@ def main() -> int:
                     plot_neighbor_heatmap(surf_df, surf_name, "neighbor_max_radius", "neighbor max radius [Å]", out_dir, 99.0, overlay_qc=True)
                 plot_scale_radial_profiles(surf_df, surf_name, out_dir)
                 compute_scale_enrichment(surf_df, surf_name)
+                analyze_absK_vs_residual(surf_df, surf_name, out_dir, save_plot=False)
+            plot_absK_vs_residual_both(outer_df, inner_df, out_dir)
     else:
         surface_df = merged_by_surface.get(args.surface)
         if surface_df is None:
@@ -1260,12 +1437,14 @@ def main() -> int:
                 plot_neighbor_heatmap(surface_df, args.surface, "neighbor_max_radius", "neighbor max radius [Å]", out_dir, 99.0, overlay_qc=True)
             plot_scale_radial_profiles(surface_df, args.surface, out_dir)
             compute_scale_enrichment(surface_df, args.surface)
+            analyze_absK_vs_residual(surface_df, args.surface, out_dir)
 
     success_msg = "[SUCCESS] K heatmaps"
     success_msg += ", QC overlays," if args.qc_overlay else ""
     success_msg += " condition indicators, residual diagnostics, and scale mismatch diagnostics generated."
     print(success_msg)
     print("[SUCCESS] Scale mismatch diagnostics generated.")
+    print("[SUCCESS] Residual-vs-K quantitative diagnostics generated.")
     return 0
 
 
