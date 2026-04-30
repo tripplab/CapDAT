@@ -784,6 +784,170 @@ def plot_condition_indicator_heatmap(
     print(f"[INFO] Saved: {out_path}")
 
 
+def _prepare_residual_plot_df(surface_df: pd.DataFrame, surface_name: str, residual_col: str) -> pd.DataFrame:
+    required = ["i", "j", "x", "y", "derivative_valid", residual_col]
+    missing = [col for col in required if col not in surface_df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for {surface_name} residual plot: {missing}")
+    plot_df = surface_df.copy()
+    plot_df["derivative_valid"] = plot_df["derivative_valid"].astype(int)
+    plot_df[residual_col] = plot_df[residual_col].astype(float)
+    invalid_mask = (
+        (plot_df["derivative_valid"] == 0)
+        | (~np.isfinite(plot_df[residual_col]))
+        | (plot_df[residual_col] < 0.0)
+    )
+    plot_df.loc[invalid_mask, residual_col] = np.nan
+    return plot_df
+
+
+def _compute_residual_vmax(values: np.ndarray, residual_percentile: float) -> Optional[float]:
+    if values.size == 0:
+        return None
+    vmax = float(np.nanpercentile(values, residual_percentile))
+    if (not np.isfinite(vmax)) or (vmax <= 0.0):
+        vmax = float(np.nanmax(values))
+    if (not np.isfinite(vmax)) or (vmax <= 0.0):
+        return None
+    return vmax
+
+
+def plot_residual_heatmap(
+    surface_df: pd.DataFrame,
+    surface_name: str,
+    residual_col: str,
+    residual_label: str,
+    out_dir: Path,
+    residual_percentile: float,
+    overlay_qc: bool = False,
+) -> None:
+    plot_df = _prepare_residual_plot_df(surface_df, surface_name, residual_col)
+    values = plot_df[residual_col].to_numpy(dtype=float)
+    finite_values = values[np.isfinite(values)]
+    derivative_valid_count = int((plot_df["derivative_valid"] == 1).sum())
+    finite_count = int(finite_values.size)
+    if finite_count == 0:
+        print(f"[WARN] No finite residual values for {surface_name} {residual_col}; skipping plot")
+        return
+    mean_val = float(np.nanmean(finite_values))
+    median_val = float(np.nanmedian(finite_values))
+    p95_val = float(np.nanpercentile(finite_values, 95))
+    p99_val = float(np.nanpercentile(finite_values, 99))
+    max_val = float(np.nanmax(finite_values))
+    print(
+        f"[INFO] {surface_name} {residual_col}: derivative_valid={derivative_valid_count}, "
+        f"finite={finite_count}, mean={mean_val:.6g}, median={median_val:.6g}, "
+        f"p95={p95_val:.6g}, p99={p99_val:.6g}, max={max_val:.6g}"
+    )
+    vmax = _compute_residual_vmax(finite_values, residual_percentile)
+    if vmax is None:
+        print(f"[WARN] Invalid residual scaling for {surface_name} {residual_col}; skipping plot")
+        return
+    grid, extent = dataframe_to_grid(plot_df, residual_col)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(
+        grid, origin="lower", interpolation="nearest", aspect="equal",
+        cmap="magma", vmin=0.0, vmax=vmax, extent=extent
+    )
+    title_surface = "Outer" if surface_name == "outer" else "Inner"
+    title_suffix = " + K QC warnings" if overlay_qc else ""
+    ax.set_title(f"{title_surface} surface: Stage 8 {residual_col.replace('_', ' ')}{title_suffix}")
+    ax.set_xlabel("x [Å]")
+    ax.set_ylabel("y [Å]")
+    if overlay_qc and "K_qc_warn_flag" in plot_df.columns and "curvature_valid" in plot_df.columns:
+        qc_df = plot_df.loc[(plot_df["curvature_valid"].astype(int) == 1) & (plot_df["K_qc_warn_flag"].astype(int) != 0)]
+        if len(qc_df) > 0:
+            ax.scatter(qc_df["x"], qc_df["y"], marker="s", color="black", s=8, alpha=0.65, linewidths=0)
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(residual_label)
+    suffix = "_qc_overlay" if overlay_qc else ""
+    out_path = out_dir / f"{surface_name}_{residual_col}_heatmap{suffix}.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
+
+def plot_residual_heatmaps_combined(
+    surface_frames: list[tuple[str, pd.DataFrame]],
+    out_dir: Path,
+    residual_percentile: float,
+    overlay_qc: bool,
+) -> None:
+    panels: list[tuple[str, str, str, pd.DataFrame, float]] = []
+    for surface_name, surface_df in surface_frames:
+        for residual_col, residual_label in (
+            ("fit_rms_residual", "fit RMS residual [Å]"),
+            ("fit_max_abs_residual", "fit max abs residual [Å]"),
+        ):
+            plot_df = _prepare_residual_plot_df(surface_df, surface_name, residual_col)
+            values = plot_df[residual_col].to_numpy(dtype=float)
+            finite_values = values[np.isfinite(values)]
+            if finite_values.size == 0:
+                print(f"[WARN] No finite residual values for {surface_name} {residual_col}; skipping panel")
+                continue
+            vmax = _compute_residual_vmax(finite_values, residual_percentile)
+            if vmax is None:
+                print(f"[WARN] Invalid residual scaling for {surface_name} {residual_col}; skipping panel")
+                continue
+            panels.append((surface_name, residual_col, residual_label, plot_df, vmax))
+    if not panels:
+        return
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10), constrained_layout=True)
+    axes_list = axes.ravel()
+    for idx, (surface_name, residual_col, residual_label, plot_df, vmax) in enumerate(panels[:4]):
+        ax = axes_list[idx]
+        grid, extent = dataframe_to_grid(plot_df, residual_col)
+        im = ax.imshow(grid, origin="lower", interpolation="nearest", aspect="equal", cmap="magma", vmin=0.0, vmax=vmax, extent=extent)
+        title_surface = "Outer" if surface_name == "outer" else "Inner"
+        title_suffix = " + QC warnings" if overlay_qc else ""
+        ax.set_title(f"{title_surface} surface: Stage 8 {residual_col.replace('_', ' ')}{title_suffix}")
+        ax.set_xlabel("x [Å]")
+        ax.set_ylabel("y [Å]")
+        if overlay_qc and "K_qc_warn_flag" in plot_df.columns and "curvature_valid" in plot_df.columns:
+            qc_df = plot_df.loc[(plot_df["curvature_valid"].astype(int) == 1) & (plot_df["K_qc_warn_flag"].astype(int) != 0)]
+            if len(qc_df) > 0:
+                ax.scatter(qc_df["x"], qc_df["y"], marker="s", color="black", s=8, alpha=0.65, linewidths=0)
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label(residual_label)
+    for idx in range(len(panels), 4):
+        axes_list[idx].axis("off")
+    out_name = "fit_rms_max_abs_residual_qc_overlay.png" if overlay_qc else "fit_rms_max_abs_residual_heatmap.png"
+    out_path = out_dir / out_name
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
+
+def print_residual_summary_stats(surface_df: pd.DataFrame, surface_name: str) -> None:
+    for residual_col in ("fit_rms_residual", "fit_max_abs_residual"):
+        plot_df = _prepare_residual_plot_df(surface_df, surface_name, residual_col)
+        values = plot_df[residual_col].to_numpy(dtype=float)
+        finite_values = values[np.isfinite(values)]
+        derivative_valid_count = int((plot_df["derivative_valid"] == 1).sum())
+        finite_count = int(finite_values.size)
+        if finite_count == 0:
+            print(f"[WARN] {surface_name} {residual_col}: no finite derivative-valid residual values")
+            continue
+        print(
+            f"[INFO] {surface_name} {residual_col}: derivative_valid={derivative_valid_count}, "
+            f"finite={finite_count}, mean={np.nanmean(finite_values):.6g}, median={np.nanmedian(finite_values):.6g}, "
+            f"p95={np.nanpercentile(finite_values,95):.6g}, p99={np.nanpercentile(finite_values,99):.6g}, "
+            f"max={np.nanmax(finite_values):.6g}"
+        )
+        if "curvature_valid" in plot_df.columns and "K_qc_warn_flag" in plot_df.columns:
+            qc_mask = (plot_df["curvature_valid"].astype(int) == 1) & (plot_df["K_qc_warn_flag"].astype(int) != 0)
+            qc_values = plot_df.loc[qc_mask, residual_col].to_numpy(dtype=float)
+            qc_values = qc_values[np.isfinite(qc_values)]
+            median_all = float(np.nanmedian(finite_values))
+            median_qc = float(np.nanmedian(qc_values)) if qc_values.size > 0 else np.nan
+            ratio = (median_qc / median_all) if (np.isfinite(median_qc) and median_all > 0.0) else np.nan
+            short = "RMS" if residual_col == "fit_rms_residual" else "max-abs"
+            print(
+                f"[INFO] {surface_name} {short} residual QC enrichment: "
+                f"median_all={median_all:.6g}, median_qc={median_qc:.6g}, ratio={ratio:.6g}"
+            )
+
+
 def run_surface_merges(loaded: LoadedGeometryCsvs) -> dict[str, Optional[pd.DataFrame]]:
     return {
         "outer": merge_surface_geometry(loaded.outer_curvature, loaded.outer_derivatives, surface="outer"),
@@ -839,6 +1003,12 @@ def parse_args() -> argparse.Namespace:
         help="Percentile for symmetric K color clipping per surface.",
     )
     parser.add_argument(
+        "--residual-percentile",
+        type=float,
+        default=99.0,
+        help="Percentile for residual color clipping with vmin fixed at 0.",
+    )
+    parser.add_argument(
         "--qc-overlay",
         dest="qc_overlay",
         action="store_true",
@@ -889,6 +1059,21 @@ def main() -> int:
                 )
             plot_condition_indicator_heatmap(outer_df, "outer", out_dir)
             plot_condition_indicator_heatmap(inner_df, "inner", out_dir)
+            print_residual_summary_stats(outer_df, "outer")
+            print_residual_summary_stats(inner_df, "inner")
+            plot_residual_heatmaps_combined(
+                [("outer", outer_df), ("inner", inner_df)],
+                out_dir,
+                args.residual_percentile,
+                overlay_qc=False,
+            )
+            if args.qc_overlay:
+                plot_residual_heatmaps_combined(
+                    [("outer", outer_df), ("inner", inner_df)],
+                    out_dir,
+                    args.residual_percentile,
+                    overlay_qc=True,
+                )
     else:
         surface_df = merged_by_surface.get(args.surface)
         if surface_df is None:
@@ -904,10 +1089,22 @@ def main() -> int:
                     strict=args.strict,
                 )
             plot_condition_indicator_heatmap(surface_df, args.surface, out_dir)
+            print_residual_summary_stats(surface_df, args.surface)
+            for residual_col, residual_label in (
+                ("fit_rms_residual", "fit RMS residual [Å]"),
+                ("fit_max_abs_residual", "fit max abs residual [Å]"),
+            ):
+                plot_residual_heatmap(
+                    surface_df, args.surface, residual_col, residual_label, out_dir, args.residual_percentile, False
+                )
+                if args.qc_overlay:
+                    plot_residual_heatmap(
+                        surface_df, args.surface, residual_col, residual_label, out_dir, args.residual_percentile, True
+                    )
 
     success_msg = "[SUCCESS] K heatmaps"
     success_msg += ", QC overlays," if args.qc_overlay else ""
-    success_msg += " and condition-indicator heatmaps generated."
+    success_msg += " condition indicators, and residual diagnostics generated."
     print(success_msg)
     return 0
 
