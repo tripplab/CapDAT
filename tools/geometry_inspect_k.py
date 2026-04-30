@@ -128,16 +128,6 @@ def validate_required_columns(
     resolved_aliases = resolve_column_aliases(df)
     missing = [name for name in required_columns if name not in resolved_aliases]
 
-    print(f"[INFO] {label} discovered columns: {list(df.columns)}")
-
-    if resolved_aliases:
-        mapping_str = ", ".join(
-            f"{canonical}->{actual}" for canonical, actual in sorted(resolved_aliases.items())
-        )
-        print(f"[INFO] {label} alias resolution: {mapping_str}")
-    else:
-        print(f"[WARN] {label} alias resolution: no known aliases found")
-
     if missing:
         raise ValueError(
             f"Missing required columns for {label}: {missing}. "
@@ -371,7 +361,6 @@ def _build_rename_map(df: pd.DataFrame) -> dict[str, str]:
 def _standardize_columns(df: pd.DataFrame, *, label: str) -> pd.DataFrame:
     rename_map = _build_rename_map(df)
     if rename_map:
-        print(f"[INFO] {label} renaming columns: {rename_map}")
         return df.rename(columns=rename_map).copy()
     return df.copy()
 
@@ -1187,6 +1176,102 @@ def analyze_absK_vs_second_derivative(surface_df: pd.DataFrame, surface_name: st
     return analysis_df, pearson_r, spearman_rho
 
 
+def compute_k_num_like(surface_df: pd.DataFrame) -> pd.DataFrame:
+    needed = ["d2z_dx2", "d2z_dy2", "d2z_dxdy"]
+    missing = [c for c in needed if c not in surface_df.columns]
+    if missing:
+        raise ValueError(f"Missing second-derivative columns for K_num_like: {missing}")
+    out = surface_df.copy()
+    dxx = pd.to_numeric(out["d2z_dx2"], errors="coerce")
+    dyy = pd.to_numeric(out["d2z_dy2"], errors="coerce")
+    dxy = pd.to_numeric(out["d2z_dxdy"], errors="coerce")
+    out["K_num_like"] = dxx * dyy - (dxy ** 2)
+    out["abs_K_num_like"] = np.abs(out["K_num_like"].to_numpy(dtype=float))
+    return out
+
+
+def plot_k_num_like_heatmaps_both(outer_df: pd.DataFrame, inner_df: pd.DataFrame, out_dir: Path, overlay_qc: bool = False) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+    any_plotted = False
+    for ax, (surface_name, df) in zip(axes, (("outer", outer_df), ("inner", inner_df))):
+        req = ["i", "j", "x", "y", "derivative_valid", "K_num_like"]
+        if overlay_qc:
+            req += ["curvature_valid", "K_qc_warn_flag"]
+        if any(c not in df.columns for c in req):
+            ax.set_title(f"{surface_name}: missing cols")
+            ax.axis("off")
+            continue
+        plot_df = df[req].copy()
+        plot_df["K_num_like"] = pd.to_numeric(plot_df["K_num_like"], errors="coerce")
+        plot_df.loc[(plot_df["derivative_valid"].astype(int) != 1) | (~np.isfinite(plot_df["K_num_like"])), "K_num_like"] = np.nan
+        finite = plot_df["K_num_like"].to_numpy(dtype=float)
+        finite = finite[np.isfinite(finite)]
+        if finite.size == 0:
+            ax.set_title(f"{surface_name}: no valid values")
+            ax.axis("off")
+            continue
+        any_plotted = True
+        vlim = float(np.nanpercentile(np.abs(finite), 99))
+        if not np.isfinite(vlim) or vlim <= 0:
+            ax.set_title(f"{surface_name}: invalid vlim")
+            ax.axis("off")
+            continue
+        grid, extent = dataframe_to_grid(plot_df, "K_num_like")
+        im = ax.imshow(grid, origin="lower", extent=extent, cmap="coolwarm", vmin=-vlim, vmax=vlim, interpolation="nearest")
+        if overlay_qc:
+            qc_df = plot_df.loc[(plot_df["curvature_valid"].astype(int) == 1) & (plot_df["K_qc_warn_flag"].astype(int) != 0)]
+            if len(qc_df) > 0:
+                ax.scatter(qc_df["x"], qc_df["y"], marker="s", color="black", s=8, alpha=0.6, linewidths=0)
+        ax.set_title(("Outer" if surface_name == "outer" else "Inner") + " surface: K numerator-like term" + (" + K QC warnings" if overlay_qc else ""))
+        ax.set_xlabel("x [Å]")
+        ax.set_ylabel("y [Å]")
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label("K numerator-like term [Å^-2]")
+    if not any_plotted:
+        plt.close(fig)
+        print("[WARN] No valid data for K_num_like heatmaps")
+        return
+    out_path = out_dir / ("K_num_like_qc_overlay.png" if overlay_qc else "K_num_like_heatmap.png")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
+
+def plot_k_num_like_heatmap(surface_df: pd.DataFrame, surface_name: str, out_dir: Path, overlay_qc: bool = False) -> None:
+    if surface_name == "outer":
+        plot_k_num_like_heatmaps_both(surface_df, pd.DataFrame(), out_dir, overlay_qc=overlay_qc)
+    else:
+        plot_k_num_like_heatmaps_both(pd.DataFrame(), surface_df, out_dir, overlay_qc=overlay_qc)
+
+
+def analyze_absK_vs_k_num_like(surface_df: pd.DataFrame, surface_name: str) -> pd.DataFrame:
+    required = ["curvature_valid", "derivative_valid", "abs_K", "abs_K_num_like", "K_qc_warn_flag"]
+    if any(c not in surface_df.columns for c in required):
+        return pd.DataFrame()
+    mask = (
+        (surface_df["curvature_valid"].astype(int) == 1)
+        & (surface_df["derivative_valid"].astype(int) == 1)
+        & np.isfinite(pd.to_numeric(surface_df["abs_K"], errors="coerce"))
+        & np.isfinite(pd.to_numeric(surface_df["abs_K_num_like"], errors="coerce"))
+    )
+    analysis_df = surface_df.loc[mask].copy()
+    if len(analysis_df) < 2:
+        print(f"[WARN] {surface_name} abs(K)-vs-abs(K_num_like) subset has <2 rows")
+        return pd.DataFrame()
+    x = pd.to_numeric(analysis_df["abs_K_num_like"], errors="coerce").to_numpy(dtype=float)
+    y = pd.to_numeric(analysis_df["abs_K"], errors="coerce").to_numpy(dtype=float)
+    print(f"[INFO] {surface_name} abs(K) vs abs(K_num_like): Pearson r={safe_corr(x, y):.6g}, Spearman rho={safe_rank_corr(x, y):.6g}, n={len(analysis_df)}")
+    qc_mask = (analysis_df["curvature_valid"].astype(int) == 1) & (analysis_df["K_qc_warn_flag"].astype(int) != 0)
+    nonqc_mask = (analysis_df["curvature_valid"].astype(int) == 1) & (analysis_df["K_qc_warn_flag"].astype(int) == 0)
+    qc_vals = pd.to_numeric(analysis_df.loc[qc_mask, "abs_K_num_like"], errors="coerce").to_numpy(dtype=float)
+    nonqc_vals = pd.to_numeric(analysis_df.loc[nonqc_mask, "abs_K_num_like"], errors="coerce").to_numpy(dtype=float)
+    med_qc = float(np.nanmedian(qc_vals)) if np.isfinite(qc_vals).any() else np.nan
+    med_nonqc = float(np.nanmedian(nonqc_vals)) if np.isfinite(nonqc_vals).any() else np.nan
+    p95_qc = float(np.nanpercentile(qc_vals[np.isfinite(qc_vals)], 95)) if np.isfinite(qc_vals).any() else np.nan
+    p95_nonqc = float(np.nanpercentile(nonqc_vals[np.isfinite(nonqc_vals)], 95)) if np.isfinite(nonqc_vals).any() else np.nan
+    print(f"[INFO] {surface_name} abs(K_num_like) QC enrichment: median_qc={med_qc:.6g}, median_nonqc={med_nonqc:.6g}, ratio={safe_ratio(med_qc, med_nonqc):.6g}, p95_qc={p95_qc:.6g}, p95_nonqc={p95_nonqc:.6g}")
+    return analysis_df
+
 def plot_second_derivative_heatmap(surface_df: pd.DataFrame, surface_name: str, field_col: str, label: str, out_dir: Path, overlay_qc: bool = False) -> None:
     required = ["i", "j", "x", "y", "derivative_valid", field_col]
     if overlay_qc:
@@ -1378,6 +1463,59 @@ def plot_absK_vs_second_derivative_both(outer_df: pd.DataFrame, inner_df: pd.Dat
     print(f"[INFO] Saved: {out_path}")
 
 
+def plot_absK_vs_k_num_like_both(outer_df: pd.DataFrame, inner_df: pd.DataFrame, out_dir: Path) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+    any_points = False
+    for ax, (surface_name, df) in zip(axes, (("outer", outer_df), ("inner", inner_df))):
+        analysis_df = analyze_absK_vs_k_num_like(df, surface_name)
+        if len(analysis_df) < 2:
+            ax.set_title(f"{surface_name}: insufficient data")
+            ax.axis("off")
+            continue
+        any_points = True
+        qc_mask = analysis_df["K_qc_warn_flag"].astype(int) != 0
+        nonqc_df = analysis_df.loc[~qc_mask]
+        qc_df = analysis_df.loc[qc_mask]
+        ax.scatter(nonqc_df["abs_K_num_like"], nonqc_df["abs_K"], s=10, alpha=0.3, c="steelblue", linewidths=0, label="non-QC")
+        if len(qc_df) > 0:
+            ax.scatter(qc_df["abs_K_num_like"], qc_df["abs_K"], s=18, alpha=0.75, c="crimson", linewidths=0, label="QC warning")
+        ax.set_xlabel("abs(K_num_like) [Å^-2]")
+        ax.set_ylabel("abs(K) [Å^-2]")
+        ax.set_title(("Outer" if surface_name == "outer" else "Inner") + " surface: abs(K) vs abs(K_num_like)")
+        ax.legend(loc="upper left", fontsize=8)
+    if not any_points:
+        plt.close(fig)
+        print("[WARN] No valid data for abs(K) vs abs(K_num_like) plot")
+        return
+    out_path = out_dir / "absK_vs_abs_K_num_like.png"
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] Saved: {out_path}")
+
+
+def print_k_reconstruction_check(surface_df: pd.DataFrame, surface_name: str) -> None:
+    needed = ["dz_dx", "dz_dy", "K_num_like", "k", "curvature_valid", "derivative_valid"]
+    if any(c not in surface_df.columns for c in needed):
+        return
+    df = surface_df.copy()
+    mask = (
+        (df["curvature_valid"].astype(int) == 1)
+        & (df["derivative_valid"].astype(int) == 1)
+        & np.isfinite(pd.to_numeric(df["dz_dx"], errors="coerce"))
+        & np.isfinite(pd.to_numeric(df["dz_dy"], errors="coerce"))
+        & np.isfinite(pd.to_numeric(df["K_num_like"], errors="coerce"))
+        & np.isfinite(pd.to_numeric(df["k"], errors="coerce"))
+    )
+    df = df.loc[mask].copy()
+    if len(df) < 2:
+        return
+    denom = (1.0 + pd.to_numeric(df["dz_dx"]) ** 2 + pd.to_numeric(df["dz_dy"]) ** 2) ** 2
+    k_from = pd.to_numeric(df["K_num_like"]) / denom
+    k = pd.to_numeric(df["k"])
+    diff = np.abs((k_from - k).to_numpy(dtype=float))
+    print(f"[INFO] {surface_name} K reconstruction check: median_abs_diff={np.nanmedian(diff):.6g}, max_abs_diff={np.nanmax(diff):.6g}, corr={safe_corr(k_from.to_numpy(dtype=float), k.to_numpy(dtype=float)):.6g}")
+
+
 def plot_second_derivative_heatmaps_both(outer_df: pd.DataFrame, inner_df: pd.DataFrame, out_dir: Path, overlay_qc: bool = False) -> None:
     fields = [("d2z_dx2", "d2z/dx2 [Å^-1]"), ("d2z_dy2", "d2z/dy2 [Å^-1]"), ("d2z_dxdy", "d2z/dxdy [Å^-1]")]
     fig, axes = plt.subplots(2, 3, figsize=(15, 9), constrained_layout=True)
@@ -1563,6 +1701,14 @@ def main() -> int:
             if args.qc_overlay:
                 plot_second_derivative_heatmaps_both(outer_df, inner_df, out_dir, overlay_qc=True)
             plot_absK_vs_second_derivative_both(outer_df, inner_df, out_dir)
+            outer_df = compute_k_num_like(outer_df)
+            inner_df = compute_k_num_like(inner_df)
+            plot_k_num_like_heatmaps_both(outer_df, inner_df, out_dir, overlay_qc=False)
+            if args.qc_overlay:
+                plot_k_num_like_heatmaps_both(outer_df, inner_df, out_dir, overlay_qc=True)
+            plot_absK_vs_k_num_like_both(outer_df, inner_df, out_dir)
+            print_k_reconstruction_check(outer_df, "outer")
+            print_k_reconstruction_check(inner_df, "inner")
     else:
         surface_df = merged_by_surface.get(args.surface)
         if surface_df is None:
@@ -1607,6 +1753,12 @@ def main() -> int:
                 if args.qc_overlay:
                     plot_second_derivative_heatmap(surface_df, args.surface, deriv_col, label, out_dir, overlay_qc=True)
                 analyze_absK_vs_second_derivative(surface_df, args.surface, deriv_col, out_dir)
+            surface_df = compute_k_num_like(surface_df)
+            plot_k_num_like_heatmap(surface_df, args.surface, out_dir, overlay_qc=False)
+            if args.qc_overlay:
+                plot_k_num_like_heatmap(surface_df, args.surface, out_dir, overlay_qc=True)
+            analyze_absK_vs_k_num_like(surface_df, args.surface)
+            print_k_reconstruction_check(surface_df, args.surface)
 
     success_msg = "[SUCCESS] K heatmaps"
     success_msg += ", QC overlays," if args.qc_overlay else ""
@@ -1615,6 +1767,7 @@ def main() -> int:
     print("[SUCCESS] Scale mismatch diagnostics generated.")
     print("[SUCCESS] Residual-vs-K quantitative diagnostics generated.")
     print("[SUCCESS] Second-derivative K-driver diagnostics generated.")
+    print("[SUCCESS] K numerator-like diagnostics generated.")
     return 0
 
 
