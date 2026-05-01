@@ -1445,7 +1445,12 @@ def write_curvature_interpretation_csv(records: list[CurvatureInterpretationReco
     print(f"[INFO] Saved: {out_path}")
 
 
-def write_curvature_interpretation_markdown(records: list[CurvatureInterpretationRecord], out_path: Path, metadata: dict[str, str]) -> None:
+def write_curvature_interpretation_markdown(
+    records: list[CurvatureInterpretationRecord],
+    out_path: Path,
+    metadata: dict[str, str],
+    radial_reliability_summary: Optional[dict[str, dict[str, float | int | list[str] | bool]]] = None,
+) -> None:
     surfaces = [r.surface for r in records]
     lines = [
         "# CapDAT curvature interpretation report",
@@ -1501,6 +1506,25 @@ def write_curvature_interpretation_markdown(records: list[CurvatureInterpretatio
             "### Recommended interpretation",
             r.recommended_sentence,
         ])
+    lines.append("")
+    if radial_reliability_summary:
+        lines.append("## Radial K reliability")
+        for surface, summary in radial_reliability_summary.items():
+            lines.extend([
+                "",
+                f"### {surface.title()} surface",
+                f"- supported bins: {summary['supported']}",
+                f"- stable bins: {summary['stable']}",
+                f"- cautious bins: {summary['cautious']}",
+                f"- diagnostic-only bins: {summary['diagnostic_only']}",
+                f"- unsupported bins: {summary['unsupported']}",
+                f"- max relative QC shift: {summary['max_relative_shift']:.3f}" if np.isfinite(float(summary["max_relative_shift"])) else "- max relative QC shift: N/A",
+                f"- sign-change bins: {summary['sign_changes']}",
+                f"- near-zero-shift bins: {summary['near_zero_shifts']}",
+                f"- diagnostic radial ranges: {', '.join(summary['diagnostic_ranges']) if summary['diagnostic_ranges'] else 'none'}",
+                f"- sign changes after QC cleaning: {'yes' if summary['has_sign_changes'] else 'no'}",
+                "Radial K reliability was not uniform. K was stable in some annuli but became diagnostic-only where QC-clean filtering changed sign or magnitude, so K should be interpreted only in locally supported radial zones.",
+            ])
     lines.append("")
     lines.append("## Final conclusion")
     if records and all(r.K_status == "C: diagnostic_only" for r in records):
@@ -1590,9 +1614,30 @@ def compute_radial_integral_profile(
     return pd.DataFrame(rows)
 
 
-def apply_radial_support_masking(profile_df: pd.DataFrame, min_radial_cells: int, min_radial_cell_fraction: float) -> pd.DataFrame:
+def _k_sign_with_floor(value: float, floor: float) -> int:
+    if not np.isfinite(value) or abs(value) < floor:
+        return 0
+    return 1 if value > 0 else -1
+
+
+def apply_radial_support_masking(
+    profile_df: pd.DataFrame,
+    min_radial_cells: int,
+    min_radial_cell_fraction: float,
+    *,
+    k_relative_floor: float,
+    k_stable_relative_shift: float,
+    k_caution_relative_shift: float,
+    k_absolute_shift_threshold: Optional[float],
+) -> pd.DataFrame:
     masked = profile_df.copy()
     masked["support_threshold_cells"] = np.nan
+    masked["K_abs_QC_shift"] = np.nan
+    masked["K_relative_QC_shift"] = np.nan
+    masked["K_QC_sign_change"] = False
+    masked["K_QC_near_zero_shift"] = False
+    masked["K_radial_status"] = "unsupported"
+    masked["K_reliability_rule"] = "unsupported_low_cells"
     for surface in masked["surface"].dropna().unique():
         sidx = masked["surface"] == surface
         s = masked.loc[sidx]
@@ -1607,20 +1652,80 @@ def apply_radial_support_masking(profile_df: pd.DataFrame, min_radial_cells: int
         masked.loc[sidx, "K_area_QC_clean_plot"] = s["K_area_QC_clean"].where(kqc_sup, np.nan)
         masked.loc[sidx, "K_qc_rejected_fraction_plot"] = s["K_qc_rejected_fraction"].where(k_sup, np.nan)
         masked.loc[sidx, "support_threshold_cells"] = k_thr
+        support_ok = k_sup & kqc_sup
+        for idx, row in s.iterrows():
+            if not bool(support_ok.loc[idx]):
+                continue
+            k_area = float(row["K_area"]) if pd.notna(row["K_area"]) else np.nan
+            k_qc = float(row["K_area_QC_clean"]) if pd.notna(row["K_area_QC_clean"]) else np.nan
+            if not (np.isfinite(k_area) and np.isfinite(k_qc)):
+                continue
+            abs_shift = abs(k_area - k_qc)
+            both_near_zero = abs(k_area) < k_relative_floor and abs(k_qc) < k_relative_floor
+            if both_near_zero:
+                rel_shift = 0.0
+            else:
+                rel_shift = abs_shift / max(abs(k_area), k_relative_floor)
+            sign_k = _k_sign_with_floor(k_area, k_relative_floor)
+            sign_qc = _k_sign_with_floor(k_qc, k_relative_floor)
+            sign_change = (sign_k * sign_qc) == -1
+            near_zero_shift = (sign_k == 0) ^ (sign_qc == 0)
+            status = "stable"
+            rule = "stable_relative_shift"
+            if both_near_zero:
+                status = "stable"
+                rule = "stable_both_near_zero"
+            elif abs(k_area) < k_relative_floor and abs(k_qc) >= k_relative_floor:
+                status = "cautious"
+                rule = "near_zero_to_nonzero"
+                if k_absolute_shift_threshold is not None and abs_shift > k_absolute_shift_threshold:
+                    status = "diagnostic_only"
+                    rule = "diagnostic_absolute_shift"
+            else:
+                if rel_shift <= k_stable_relative_shift:
+                    status = "stable"
+                    rule = "stable_relative_shift"
+                elif rel_shift <= k_caution_relative_shift:
+                    status = "cautious"
+                    rule = "cautious_relative_shift"
+                else:
+                    status = "diagnostic_only"
+                    rule = "diagnostic_relative_shift"
+                if k_absolute_shift_threshold is not None:
+                    if abs_shift <= k_absolute_shift_threshold:
+                        status = "stable"
+                        rule = "stable_absolute_shift"
+                    else:
+                        status = "diagnostic_only"
+                        rule = "diagnostic_absolute_shift"
+            if sign_change:
+                status = "diagnostic_only"
+                rule = "diagnostic_sign_change"
+            elif near_zero_shift and status != "diagnostic_only":
+                status = "cautious"
+                rule = "cautious_near_zero_shift"
+            masked.loc[idx, "K_abs_QC_shift"] = abs_shift
+            masked.loc[idx, "K_relative_QC_shift"] = rel_shift
+            masked.loc[idx, "K_QC_sign_change"] = bool(sign_change)
+            masked.loc[idx, "K_QC_near_zero_shift"] = bool(near_zero_shift)
+            masked.loc[idx, "K_radial_status"] = status
+            masked.loc[idx, "K_reliability_rule"] = rule
     return masked
 
 
 def plot_radial_integral_curvature_profile(profile_df: pd.DataFrame, out_dir: Path) -> None:
     fig, axes = plt.subplots(3, 1, figsize=(10, 10), sharex=True, dpi=300)
-    unreliable_intervals: list[tuple[float, float]] = []
+    status_style = {
+        "stable": {"color": "#d9f2d9", "alpha": 0.25, "hatch": None},
+        "cautious": {"color": "#fff3b0", "alpha": 0.30, "hatch": None},
+        "diagnostic_only": {"color": "#ffd6d6", "alpha": 0.30, "hatch": None},
+        "unsupported": {"color": "#e6e6e6", "alpha": 0.35, "hatch": "///"},
+    }
     for _, row in profile_df.iterrows():
-        k_support = row["K_valid_cells"] >= row["support_threshold_cells"]
-        qc_bad = pd.notna(row["K_qc_rejected_fraction"]) and row["K_qc_rejected_fraction"] > 0.25
-        if (not k_support) or qc_bad:
-            unreliable_intervals.append((float(row["r_min"]), float(row["r_max"])))
-    for r0, r1 in unreliable_intervals:
-        axes[1].axvspan(r0, r1, color="grey", alpha=0.10, linewidth=0)
-        axes[2].axvspan(r0, r1, color="grey", alpha=0.10, linewidth=0)
+        status = str(row.get("K_radial_status", "unsupported"))
+        style = status_style.get(status, status_style["unsupported"])
+        for ax in (axes[1], axes[2]):
+            ax.axvspan(float(row["r_min"]), float(row["r_max"]), color=style["color"], alpha=style["alpha"], linewidth=0, hatch=style["hatch"])
     for surface, color in (("outer", "tab:blue"), ("inner", "tab:orange")):
         sdf = profile_df.loc[profile_df["surface"] == surface]
         if sdf.empty:
@@ -1632,6 +1737,10 @@ def plot_radial_integral_curvature_profile(profile_df: pd.DataFrame, out_dir: Pa
         axes[0].plot(x, sdf["H_area_plot"], color=color, label=surface)
         axes[1].plot(x, sdf["K_area_plot"], color=color, linestyle="-", label=f"{surface} K")
         axes[1].plot(x, sdf["K_area_QC_clean_plot"], color=color, linestyle="--", label=f"{surface} K QC-clean")
+        cautious = sdf["K_radial_status"] == "cautious"
+        diagnostic = sdf["K_radial_status"] == "diagnostic_only"
+        axes[1].plot(sdf.loc[cautious, "r_center"], sdf.loc[cautious, "K_area_QC_clean_plot"], linestyle="none", marker="o", markersize=4, markerfacecolor="none", markeredgecolor=color, label=f"{surface} cautious")
+        axes[1].plot(sdf.loc[diagnostic, "r_center"], sdf.loc[diagnostic, "K_area_QC_clean_plot"], linestyle="none", marker="x", markersize=4, color=color, label=f"{surface} diagnostic")
         axes[2].plot(x, sdf["K_valid_cells"], color=color, linestyle="-", label=f"{surface} K cells")
         axes[2].plot(x, sdf["K_qc_clean_cells"], color=color, linestyle="--", label=f"{surface} K QC-clean cells")
     ax2r = axes[2].twinx()
@@ -1640,11 +1749,9 @@ def plot_radial_integral_curvature_profile(profile_df: pd.DataFrame, out_dir: Pa
         if sdf.empty:
             continue
         ax2r.plot(sdf["r_center"], sdf["K_qc_rejected_fraction_plot"], color=color, linestyle=":", label=f"{surface} QC rejected")
-    ax2r.axhline(0.25, color="grey", linestyle="--", linewidth=0.9)
-    ax2r.text(0.99, 0.25, "QC caution threshold", transform=ax2r.get_yaxis_transform(), ha="right", va="bottom", fontsize=8, color="grey")
     axes[0].axhline(0.0, color="black", linewidth=0.8)
     axes[1].axhline(0.0, color="black", linewidth=0.8)
-    axes[0].set_title("Radial surface-area-weighted curvature profile\nunsupported bins masked; dashed K curves are QC-clean")
+    axes[0].set_title("Radial surface-area-weighted curvature profile\nPanel shading shows K radial reliability status")
     axes[0].set_ylabel("H_A(R) [Å^-1]")
     axes[1].set_ylabel("K_A(R) [Å^-2]")
     axes[2].set_ylabel("cell count")
@@ -2027,6 +2134,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-radial-cells", type=int, default=5, help="Minimum valid cells per bin to support plotting in radial profile.")
     parser.add_argument("--min-radial-cell-fraction", type=float, default=0.02, help="Minimum fraction of each surface max valid-cell bin required to support plotting.")
     parser.add_argument("--radial-r-max", type=float, default=None, help="Optional radial max override (Å); effective max is min(override, data-supported max).")
+    parser.add_argument("--k-relative-floor", type=float, default=1e-6, help="Denominator floor for radial K relative QC shift.")
+    parser.add_argument("--k-stable-relative-shift", type=float, default=0.20, help="Relative QC shift threshold for stable radial K bins.")
+    parser.add_argument("--k-caution-relative-shift", type=float, default=0.50, help="Relative QC shift threshold for cautious radial K bins.")
+    parser.add_argument("--k-absolute-shift-threshold", type=float, default=None, help="Optional absolute QC shift threshold for radial K reliability.")
 
     return parser.parse_args()
 
@@ -2160,7 +2271,9 @@ def main() -> int:
     print(f"[INFO] radial profile bins requested = {args.radial_bins}")
     print(f"[INFO] radial profile min cells = {args.min_radial_cells}")
     print(f"[INFO] radial profile min cell fraction = {args.min_radial_cell_fraction}")
+    print(f"[INFO] radial K relative floor = {args.k_relative_floor}")
     radial_profiles: list[pd.DataFrame] = []
+    radial_reliability_summary: dict[str, dict[str, float | int | list[str] | bool]] = {}
     for surf in (["outer", "inner"] if args.surface == "both" else [args.surface]):
         sdf = merged_by_surface.get(surf)
         if sdf is None:
@@ -2174,7 +2287,15 @@ def main() -> int:
         prof["min_radial_cells"] = args.min_radial_cells
         prof["min_radial_cell_fraction"] = args.min_radial_cell_fraction
         radial_profiles.append(prof)
-        prof = apply_radial_support_masking(prof, args.min_radial_cells, args.min_radial_cell_fraction)
+        prof = apply_radial_support_masking(
+            prof,
+            args.min_radial_cells,
+            args.min_radial_cell_fraction,
+            k_relative_floor=args.k_relative_floor,
+            k_stable_relative_shift=args.k_stable_relative_shift,
+            k_caution_relative_shift=args.k_caution_relative_shift,
+            k_absolute_shift_threshold=args.k_absolute_shift_threshold,
+        )
         radial_profiles[-1] = prof
         h_supported = int(prof["H_area_plot"].notna().sum())
         k_supported = int(prof["K_area_plot"].notna().sum())
@@ -2187,6 +2308,28 @@ def main() -> int:
         max_r = float(prof.loc[max_idx, "r_center"]) if max_idx >= 0 else np.nan
         mean_frac = float(supported["K_qc_rejected_fraction"].mean()) if not supported.empty else np.nan
         print(f"[INFO] {surf} radial QC: max_qc_frac={max_frac:.3f} at r={max_r:.3f} Å, mean_supported_qc_frac={mean_frac:.3f}")
+        supported_k = prof.loc[prof["K_radial_status"] != "unsupported"]
+        stable_n = int((prof["K_radial_status"] == "stable").sum())
+        cautious_n = int((prof["K_radial_status"] == "cautious").sum())
+        diagnostic_n = int((prof["K_radial_status"] == "diagnostic_only").sum())
+        unsupported_n = int((prof["K_radial_status"] == "unsupported").sum())
+        max_rel_shift = float(supported_k["K_relative_QC_shift"].max()) if not supported_k.empty else np.nan
+        sign_changes = int(prof["K_QC_sign_change"].fillna(False).astype(bool).sum())
+        near_zero_shifts = int(prof["K_QC_near_zero_shift"].fillna(False).astype(bool).sum())
+        diag_ranges = [f"[{row.r_min:.2f},{row.r_max:.2f}]" for row in prof.loc[prof["K_radial_status"] == "diagnostic_only"].itertuples(index=False)]
+        radial_reliability_summary[surf] = {
+            "supported": int(len(supported_k)),
+            "stable": stable_n,
+            "cautious": cautious_n,
+            "diagnostic_only": diagnostic_n,
+            "unsupported": unsupported_n,
+            "max_relative_shift": max_rel_shift,
+            "sign_changes": sign_changes,
+            "near_zero_shifts": near_zero_shifts,
+            "diagnostic_ranges": diag_ranges,
+            "has_sign_changes": sign_changes > 0,
+        }
+        print(f"[INFO] {surf} radial K reliability: supported={len(supported_k)}, stable={stable_n}, cautious={cautious_n}, diagnostic={diagnostic_n}, unsupported={unsupported_n}, sign_changes={sign_changes}, near_zero_shifts={near_zero_shifts}, max_relative_shift={max_rel_shift:.3f}")
     if radial_profiles:
         radial_df = pd.concat(radial_profiles, ignore_index=True)
         radial_csv = out_dir / "radial_integral_curvature_profile.csv"
@@ -2210,7 +2353,7 @@ def main() -> int:
             "outer_derivatives": str(files.outer_derivatives) if files.outer_derivatives else "N/A",
             "inner_derivatives": str(files.inner_derivatives) if files.inner_derivatives else "N/A",
         }
-        write_curvature_interpretation_markdown(records, md_path, metadata)
+        write_curvature_interpretation_markdown(records, md_path, metadata, radial_reliability_summary if radial_reliability_summary else None)
         print(f"[INFO] Saved: {csv_path}")
         print(f"[INFO] Saved: {md_path}")
         print("[SUCCESS] Automatic curvature interpretation report generated.")
