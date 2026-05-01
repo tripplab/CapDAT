@@ -1758,10 +1758,18 @@ def plot_radial_integral_curvature_profile(profile_df: pd.DataFrame, out_dir: Pa
     ax2r.set_ylabel("K QC rejected fraction")
     axes[2].set_xlabel("r [Å]")
     axes[0].legend(loc="best")
-    axes[1].legend(loc="best")
+    axes[1].legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8, framealpha=0.85)
     h1, l1 = axes[2].get_legend_handles_labels()
     h2, l2 = ax2r.get_legend_handles_labels()
     axes[2].legend(h1 + h2, l1 + l2, loc="best")
+    fig.text(
+        0.5,
+        0.01,
+        "Shading: green=K stable, yellow=cautious, red=diagnostic-only, gray=unsupported.",
+        ha="center",
+        va="bottom",
+        fontsize=8,
+    )
     out_path = out_dir / "radial_integral_curvature_profile.png"
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -2332,6 +2340,8 @@ def main() -> int:
         print(f"[INFO] {surf} radial K reliability: supported={len(supported_k)}, stable={stable_n}, cautious={cautious_n}, diagnostic={diagnostic_n}, unsupported={unsupported_n}, sign_changes={sign_changes}, near_zero_shifts={near_zero_shifts}, max_relative_shift={max_rel_shift:.3f}")
     if radial_profiles:
         radial_df = pd.concat(radial_profiles, ignore_index=True)
+        radial_df["K_sign_change_area_vs_qc_clean"] = radial_df["K_QC_sign_change"]
+        radial_df["K_relative_shift_area_vs_qc_clean"] = radial_df["K_relative_QC_shift"]
         radial_csv = out_dir / "radial_integral_curvature_profile.csv"
         radial_df.to_csv(radial_csv, index=False)
         print(f"[INFO] Saved: {radial_csv}")
@@ -2356,16 +2366,8 @@ def main() -> int:
         write_curvature_interpretation_markdown(records, md_path, metadata, radial_reliability_summary if radial_reliability_summary else None)
         print(f"[INFO] Saved: {csv_path}")
         print(f"[INFO] Saved: {md_path}")
-        print("[SUCCESS] Automatic curvature interpretation report generated.")
 
-    success_msg = "[SUCCESS] K heatmaps"
-    success_msg += ", QC overlays," if args.qc_overlay else ""
-    success_msg += " condition indicators, residual diagnostics, and scale mismatch diagnostics generated."
-    print(success_msg)
-    print("[SUCCESS] Scale mismatch diagnostics generated.")
-    print("[SUCCESS] Residual-vs-K quantitative diagnostics generated.")
-    print("[SUCCESS] Second-derivative K-driver diagnostics generated.")
-    print("[SUCCESS] K numerator-like diagnostics generated.")
+    print("[SUCCESS] geometry_inspect_k diagnostics completed.")
     return 0
 
 
