@@ -5287,13 +5287,17 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
             ((inner_zxx * inner_zyy) - (inner_zxy * inner_zxy)) / (inner_denom_base * inner_denom_base);
 
         // Monge-patch mean curvature formula:
-        // H = ((1+z_x^2) z_yy - 2 z_x z_y z_xy + (1+z_y^2) z_xx) / (2(1+z_x^2+z_y^2)^(3/2))
+        // H_graph = ((1+z_x^2) z_yy - 2 z_x z_y z_xy + (1+z_y^2) z_xx) / (2(1+z_x^2+z_y^2)^(3/2))
+        //
+        // We then store H_raw using the opposite sign of H_graph so that oriented H follows the
+        // intuitive convention adopted by this branch:
+        // outward-facing convex sphere -> H > 0.
         const double outer_H_num = ((1.0 + (outer_zx * outer_zx)) * outer_zyy) - (2.0 * outer_zx * outer_zy * outer_zxy) +
                                    ((1.0 + (outer_zy * outer_zy)) * outer_zxx);
         const double inner_H_num = ((1.0 + (inner_zx * inner_zx)) * inner_zyy) - (2.0 * inner_zx * inner_zy * inner_zxy) +
                                    ((1.0 + (inner_zy * inner_zy)) * inner_zxx);
-        const double outer_H = outer_H_num / (2.0 * std::pow(outer_denom_base, 1.5));
-        const double inner_H = inner_H_num / (2.0 * std::pow(inner_denom_base, 1.5));
+        const double outer_H = -(outer_H_num / (2.0 * std::pow(outer_denom_base, 1.5)));
+        const double inner_H = -(inner_H_num / (2.0 * std::pow(inner_denom_base, 1.5)));
 
         const std::size_t i = idx % result.grid.nx;
         const std::size_t j = idx / result.grid.nx;
