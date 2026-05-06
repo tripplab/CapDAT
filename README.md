@@ -22,6 +22,30 @@ The executable currently supports:
 - optional geometry-analysis execution through `--geometry-analysis`,
 - geometry-stage tuning parameters for patch selection, surface reconstruction, and smoothing.
 
+
+## Visualization Utility: PLY to VMD
+
+CapDAT now includes a helper script for VMD workflows where PLY vertex colors are not rendered directly by the mesh importer.
+
+- Script: `tools/ply2vmd.py`
+- Purpose: convert an ASCII PLY mesh with per-vertex RGB into a VMD TCL script that draws flat-colored triangles (per-face color = average of the 3 vertex colors).
+
+Usage:
+
+`python3 tools/ply2vmd.py <input_mesh.ply> <output_mesh.vmd> [--quantize-levels 64]`
+
+Typical VMD usage:
+
+1. Load your PDB in VMD.
+2. In the VMD Tk Console, run:
+
+`source output_mesh.vmd`
+
+Notes:
+- The script expects ASCII PLY input with `red`, `green`, and `blue` vertex properties.
+- Non-triangle faces are skipped.
+- `--quantize-levels` reduces color count to stay within VMD color-ID limits for large meshes.
+
 The current code base on this branch builds:
 - the main executable `capsid_analyzer`,
 - structural summary tests,

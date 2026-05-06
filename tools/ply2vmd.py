@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Convert an ASCII PLY mesh with per-vertex RGB into flat-colored VMD graphics TCL.
+
+This script approximates per-vertex color by assigning each face a single color,
+computed as the arithmetic mean of its three vertex colors.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Tuple
+
+
+@dataclass(frozen=True)
+class PlyMesh:
+    vertices: List[Tuple[float, float, float]]
+    colors: List[Tuple[int, int, int]]
+    faces: List[Tuple[int, int, int]]
+
+
+@dataclass(frozen=True)
+class FaceColor:
+    r: int
+    g: int
+    b: int
+
+
+def _parse_header(lines: List[str]) -> tuple[int, int, int, int, int]:
+    if not lines or lines[0].strip() != "ply":
+        raise ValueError("Input is not a PLY file (missing 'ply' magic).")
+
+    vertex_count = None
+    face_count = None
+    in_vertex_props = False
+    vertex_prop_count = 0
+    r_idx = g_idx = b_idx = None
+
+    end_idx = None
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if i == 0:
+            continue
+        if line == "end_header":
+            end_idx = i
+            break
+
+        if line.startswith("element vertex "):
+            vertex_count = int(line.split()[2])
+            in_vertex_props = True
+            vertex_prop_count = 0
+            continue
+
+        if line.startswith("element face "):
+            face_count = int(line.split()[2])
+            in_vertex_props = False
+            continue
+
+        if line.startswith("element "):
+            in_vertex_props = False
+            continue
+
+        if in_vertex_props and line.startswith("property "):
+            parts = line.split()
+            prop_name = parts[-1]
+            if prop_name == "red":
+                r_idx = vertex_prop_count
+            elif prop_name == "green":
+                g_idx = vertex_prop_count
+            elif prop_name == "blue":
+                b_idx = vertex_prop_count
+            vertex_prop_count += 1
+
+    if end_idx is None:
+        raise ValueError("PLY header missing 'end_header'.")
+    if vertex_count is None or face_count is None:
+        raise ValueError("PLY header missing element vertex/face declarations.")
+    if r_idx is None or g_idx is None or b_idx is None:
+        raise ValueError("PLY vertex colors not found (expected red/green/blue properties).")
+
+    return end_idx, vertex_count, face_count, r_idx, g_idx, b_idx
+
+
+def read_ascii_ply(path: Path) -> PlyMesh:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    end_idx, vertex_count, face_count, r_idx, g_idx, b_idx = _parse_header(lines)
+
+    cursor = end_idx + 1
+    vertices: List[Tuple[float, float, float]] = []
+    colors: List[Tuple[int, int, int]] = []
+
+    for _ in range(vertex_count):
+        if cursor >= len(lines):
+            raise ValueError("Unexpected EOF while reading vertices.")
+        parts = lines[cursor].split()
+        cursor += 1
+        if len(parts) < 6:
+            raise ValueError("Vertex record too short; expected at least x y z red green blue.")
+
+        x = float(parts[0])
+        y = float(parts[1])
+        z = float(parts[2])
+
+        r = int(parts[r_idx])
+        g = int(parts[g_idx])
+        b = int(parts[b_idx])
+
+        vertices.append((x, y, z))
+        colors.append((r, g, b))
+
+    faces: List[Tuple[int, int, int]] = []
+    for _ in range(face_count):
+        if cursor >= len(lines):
+            raise ValueError("Unexpected EOF while reading faces.")
+        parts = lines[cursor].split()
+        cursor += 1
+        if not parts:
+            continue
+        n = int(parts[0])
+        if n != 3:
+            continue
+        if len(parts) < 4:
+            raise ValueError("Malformed triangle face record.")
+        i0, i1, i2 = int(parts[1]), int(parts[2]), int(parts[3])
+        faces.append((i0, i1, i2))
+
+    return PlyMesh(vertices=vertices, colors=colors, faces=faces)
+
+
+def quantize_color(c: FaceColor, levels: int) -> FaceColor:
+    if levels <= 1:
+        return c
+    step = 255.0 / float(levels - 1)
+    def q(v: int) -> int:
+        return int(round(v / step) * step)
+    return FaceColor(q(c.r), q(c.g), q(c.b))
+
+
+def build_face_colors(mesh: PlyMesh, levels: int) -> List[FaceColor]:
+    out: List[FaceColor] = []
+    for i0, i1, i2 in mesh.faces:
+        r = int(round((mesh.colors[i0][0] + mesh.colors[i1][0] + mesh.colors[i2][0]) / 3.0))
+        g = int(round((mesh.colors[i0][1] + mesh.colors[i1][1] + mesh.colors[i2][1]) / 3.0))
+        b = int(round((mesh.colors[i0][2] + mesh.colors[i1][2] + mesh.colors[i2][2]) / 3.0))
+        out.append(quantize_color(FaceColor(r, g, b), levels=levels))
+    return out
+
+
+def write_vmd_tcl(mesh: PlyMesh, face_colors: List[FaceColor], out_path: Path) -> None:
+    color_to_id: dict[FaceColor, int] = {}
+    next_id = 32
+
+    with out_path.open("w", encoding="utf-8") as out:
+        out.write("# Autogenerated by ply2vmd.py\n")
+        out.write("# Usage in VMD: source this file after loading your PDB.\n")
+        out.write("set molid top\n")
+        out.write("graphics $molid material Opaque\n")
+
+        for color in face_colors:
+            if color not in color_to_id:
+                if next_id > 1056:
+                    raise RuntimeError("Exceeded VMD color ID range while assigning unique face colors.")
+                color_to_id[color] = next_id
+                out.write(
+                    f"color change rgb {next_id} {color.r/255.0:.6f} {color.g/255.0:.6f} {color.b/255.0:.6f}\n"
+                )
+                next_id += 1
+
+        out.write("\n")
+        for face, color in zip(mesh.faces, face_colors):
+            color_id = color_to_id[color]
+            i0, i1, i2 = face
+            v0 = mesh.vertices[i0]
+            v1 = mesh.vertices[i1]
+            v2 = mesh.vertices[i2]
+            out.write(f"graphics $molid color {color_id}\n")
+            out.write(
+                "graphics $molid triangle "
+                f"{{{v0[0]:.6f} {v0[1]:.6f} {v0[2]:.6f}}} "
+                f"{{{v1[0]:.6f} {v1[1]:.6f} {v1[2]:.6f}}} "
+                f"{{{v2[0]:.6f} {v2[1]:.6f} {v2[2]:.6f}}}\n"
+            )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input_ply", type=Path, help="Input ASCII PLY with vertex RGB")
+    parser.add_argument("output_vmd", type=Path, help="Output VMD TCL script (.vmd or .tcl)")
+    parser.add_argument(
+        "--quantize-levels",
+        type=int,
+        default=64,
+        help="Quantize each RGB channel to this many levels (default: 64) to reduce unique VMD colors.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if args.quantize_levels < 2 or args.quantize_levels > 256:
+        raise ValueError("--quantize-levels must be in [2, 256].")
+
+    mesh = read_ascii_ply(args.input_ply)
+    face_colors = build_face_colors(mesh, levels=args.quantize_levels)
+    write_vmd_tcl(mesh, face_colors, args.output_vmd)
+
+    unique_colors = len(set(face_colors))
+    print(f"[OK] Read vertices={len(mesh.vertices)} faces={len(mesh.faces)}")
+    print(f"[OK] Wrote: {args.output_vmd}")
+    print(f"[OK] Face colors after quantization: {unique_colors}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
