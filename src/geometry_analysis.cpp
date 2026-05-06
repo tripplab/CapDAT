@@ -4,6 +4,7 @@
 #include "timer.hpp"
 
 #include <cmath>
+#include <array>
 #include <filesystem>
 #include <cctype>
 #include <chrono>
@@ -94,7 +95,15 @@ std::string jsonEscape(const std::string& input) {
 }
 
 std::string meshFormatLabel(FoldPatchAnalysisConfig::MeshExportFormat format) {
-    return format == FoldPatchAnalysisConfig::MeshExportFormat::stl ? "stl" : "obj";
+    switch (format) {
+    case FoldPatchAnalysisConfig::MeshExportFormat::obj:
+        return "obj";
+    case FoldPatchAnalysisConfig::MeshExportFormat::stl:
+        return "stl";
+    case FoldPatchAnalysisConfig::MeshExportFormat::ply:
+        return "ply";
+    }
+    return "obj";
 }
 
 std::string formatScientific(double value) {
@@ -135,8 +144,19 @@ const char* stage10ThicknessMethodLabel(FoldPatchAnalysisConfig::Stage10Thicknes
     return "unknown";
 }
 
+const char* stage9ColorHFieldLabel(FoldPatchAnalysisConfig::Stage9ColorHField field) {
+    switch (field) {
+    case FoldPatchAnalysisConfig::Stage9ColorHField::oriented_h:
+        return "oriented_h";
+    case FoldPatchAnalysisConfig::Stage9ColorHField::raw_h:
+        return "raw_h";
+    }
+    return "oriented_h";
+}
+
 bool writeGeometryRunSummaryJson(const FoldPatchAnalysisConfig& config,
                                  const ParserConfig& parser_config,
+                                 const GeometryAnalysisResult* analysis_result,
                                  const std::string& path) {
     std::ofstream out(path);
     if (!out) {
@@ -207,10 +227,31 @@ bool writeGeometryRunSummaryJson(const FoldPatchAnalysisConfig& config,
     out << "  \"stage9\": {\n";
     out << "    \"enabled\": " << (config.stage9_enabled ? "true" : "false") << ",\n";
     out << "    \"export_csv\": " << (config.stage9_export_csv ? "true" : "false") << ",\n";
+    out << "    \"color_h_field\": \"" << stage9ColorHFieldLabel(config.stage9_color_h_field) << "\",\n";
     out << "    \"qc_n_tail\": " << config.stage9_qc_n_tail << ",\n";
     out << "    \"qc_n_spike\": " << config.stage9_qc_n_spike << ",\n";
     out << "    \"qc_min_neighbors\": " << config.stage9_qc_min_neighbors << ",\n";
     out << "    \"qc_abs_scale_floor\": " << config.stage9_qc_abs_scale_floor << "\n";
+    out << "  },\n";
+    out << "  \"stage9_artifacts\": {\n";
+    if (analysis_result != nullptr) {
+        const auto& s9 = analysis_result->stage9_curvature;
+        out << "    \"outer_curvature_ply_path\": \"" << jsonEscape(s9.outer_curvature_ply_path) << "\",\n";
+        out << "    \"inner_curvature_ply_path\": \"" << jsonEscape(s9.inner_curvature_ply_path) << "\",\n";
+        out << "    \"outer_curvature_ply_vertex_count\": " << s9.outer_curvature_ply_vertex_count << ",\n";
+        out << "    \"outer_curvature_ply_face_count\": " << s9.outer_curvature_ply_face_count << ",\n";
+        out << "    \"inner_curvature_ply_vertex_count\": " << s9.inner_curvature_ply_vertex_count << ",\n";
+        out << "    \"inner_curvature_ply_face_count\": " << s9.inner_curvature_ply_face_count << ",\n";
+        out << "    \"curvature_ply_h_field_label\": \"" << jsonEscape(s9.curvature_ply_h_field_label) << "\"\n";
+    } else {
+        out << "    \"outer_curvature_ply_path\": \"\",\n";
+        out << "    \"inner_curvature_ply_path\": \"\",\n";
+        out << "    \"outer_curvature_ply_vertex_count\": 0,\n";
+        out << "    \"outer_curvature_ply_face_count\": 0,\n";
+        out << "    \"inner_curvature_ply_vertex_count\": 0,\n";
+        out << "    \"inner_curvature_ply_face_count\": 0,\n";
+        out << "    \"curvature_ply_h_field_label\": \"\"\n";
+    }
     out << "  },\n";
     out << "  \"stage10\": {\n";
     out << "    \"enabled\": " << (config.stage10_enabled ? "true" : "false") << ",\n";
@@ -1244,6 +1285,170 @@ bool writeStage7SummaryCsv(const GeometryStage7SmoothedSurfaceResult& result, co
     return out.good();
 }
 
+struct CurvaturePlyExportResult {
+    std::size_t vertex_count = 0;
+    std::size_t face_count = 0;
+};
+
+CurvaturePlyExportResult writeCurvaturePlyMesh(const Stage4GridDescriptor& grid,
+                                               const std::vector<uint8_t>& domain_mask,
+                                               const std::vector<uint8_t>& curvature_valid_mask,
+                                               const std::vector<double>& z_values,
+                                               const std::vector<double>& oriented_mean_curvature_h,
+                                               const std::string& path) {
+    if (domain_mask.size() != grid.nx * grid.ny || curvature_valid_mask.size() != grid.nx * grid.ny ||
+        z_values.size() != grid.nx * grid.ny || oriented_mean_curvature_h.size() != grid.nx * grid.ny) {
+        throw std::runtime_error("Curvature PLY export requires vectors sized to grid node count.");
+    }
+
+    std::vector<uint8_t> color_valid_mask(grid.nx * grid.ny, 0);
+    for (std::size_t idx = 0; idx < color_valid_mask.size(); ++idx) {
+        color_valid_mask[idx] = static_cast<uint8_t>(
+            domain_mask[idx] != 0 && curvature_valid_mask[idx] != 0 && std::isfinite(z_values[idx]) &&
+            std::isfinite(oriented_mean_curvature_h[idx]));
+    }
+    const double h_scale = computeCurvatureColorScaleMaxAbs(oriented_mean_curvature_h, color_valid_mask);
+
+    std::vector<int> vertex_indices(grid.nx * grid.ny, -1);
+    std::vector<std::array<double, 3>> vertices;
+    std::vector<CurvatureRgbColor> colors;
+    std::vector<std::array<int, 3>> faces;
+    for (std::size_t j = 0; j < grid.ny; ++j) {
+        for (std::size_t i = 0; i < grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, grid.nx);
+            if (color_valid_mask[idx] == 0) {
+                continue;
+            }
+            vertex_indices[idx] = static_cast<int>(vertices.size());
+            vertices.push_back({grid.x_values[i], grid.y_values[j], z_values[idx]});
+            colors.push_back(mapCurvatureToDivergingRgb(oriented_mean_curvature_h[idx], h_scale));
+        }
+    }
+    for (std::size_t j = 0; (j + 1) < grid.ny; ++j) {
+        for (std::size_t i = 0; (i + 1) < grid.nx; ++i) {
+            const std::size_t idx00 = stage4NodeIndex(i, j, grid.nx);
+            const std::size_t idx10 = stage4NodeIndex(i + 1, j, grid.nx);
+            const std::size_t idx01 = stage4NodeIndex(i, j + 1, grid.nx);
+            const std::size_t idx11 = stage4NodeIndex(i + 1, j + 1, grid.nx);
+            if (color_valid_mask[idx00] == 0 || color_valid_mask[idx10] == 0 || color_valid_mask[idx01] == 0 ||
+                color_valid_mask[idx11] == 0) {
+                continue;
+            }
+            faces.push_back({vertex_indices[idx00], vertex_indices[idx10], vertex_indices[idx01]});
+            faces.push_back({vertex_indices[idx10], vertex_indices[idx11], vertex_indices[idx01]});
+        }
+    }
+
+    std::ofstream out(path);
+    if (!out) {
+        throw std::runtime_error("Failed to open curvature PLY path for writing: " + path);
+    }
+    out << "ply\nformat ascii 1.0\n";
+    out << "comment generated by CapDAT Stage 9 curvature mesh export\n";
+    out << "element vertex " << vertices.size() << '\n';
+    out << "property float x\nproperty float y\nproperty float z\n";
+    out << "property uchar red\nproperty uchar green\nproperty uchar blue\n";
+    out << "element face " << faces.size() << '\n';
+    out << "property list uchar int vertex_indices\nend_header\n";
+    for (std::size_t i = 0; i < vertices.size(); ++i) {
+        out << vertices[i][0] << ' ' << vertices[i][1] << ' ' << vertices[i][2] << ' ' << static_cast<int>(colors[i].r) << ' '
+            << static_cast<int>(colors[i].g) << ' ' << static_cast<int>(colors[i].b) << '\n';
+    }
+    for (const auto& f : faces) {
+        out << "3 " << f[0] << ' ' << f[1] << ' ' << f[2] << '\n';
+    }
+    if (!out.good()) {
+        throw std::runtime_error("Failed while writing curvature PLY mesh: " + path);
+    }
+    return CurvaturePlyExportResult{vertices.size(), faces.size()};
+}
+
+CurvaturePlyExportResult writeCurvaturePlyMeshesCombined(const Stage4GridDescriptor& grid,
+                                                         const std::vector<uint8_t>& domain_mask,
+                                                         const std::vector<uint8_t>& curvature_valid_mask,
+                                                         const std::vector<double>& outer_z_values,
+                                                         const std::vector<double>& inner_z_values,
+                                                         const std::vector<double>& outer_oriented_mean_curvature_h,
+                                                         const std::vector<double>& inner_oriented_mean_curvature_h,
+                                                         const std::string& path) {
+    if (domain_mask.size() != grid.nx * grid.ny || curvature_valid_mask.size() != grid.nx * grid.ny ||
+        outer_z_values.size() != grid.nx * grid.ny || inner_z_values.size() != grid.nx * grid.ny ||
+        outer_oriented_mean_curvature_h.size() != grid.nx * grid.ny ||
+        inner_oriented_mean_curvature_h.size() != grid.nx * grid.ny) {
+        throw std::runtime_error("Combined curvature PLY export requires vectors sized to grid node count.");
+    }
+
+    CurvaturePlyExportResult total;
+    std::vector<std::array<double, 3>> vertices;
+    std::vector<CurvatureRgbColor> colors;
+    std::vector<std::array<int, 3>> faces;
+    const auto add_surface = [&](const std::vector<double>& z_values, const std::vector<double>& h_values) {
+        std::vector<uint8_t> surface_valid_mask(grid.nx * grid.ny, 0);
+        for (std::size_t idx = 0; idx < surface_valid_mask.size(); ++idx) {
+            surface_valid_mask[idx] = static_cast<uint8_t>(
+                domain_mask[idx] != 0 && curvature_valid_mask[idx] != 0 && std::isfinite(z_values[idx]) && std::isfinite(h_values[idx]));
+        }
+        const double h_scale = computeCurvatureColorScaleMaxAbs(h_values, surface_valid_mask);
+        const int vertex_base = static_cast<int>(vertices.size());
+        std::vector<int> vertex_indices(grid.nx * grid.ny, -1);
+        for (std::size_t j = 0; j < grid.ny; ++j) {
+            for (std::size_t i = 0; i < grid.nx; ++i) {
+                const std::size_t idx = stage4NodeIndex(i, j, grid.nx);
+                if (surface_valid_mask[idx] == 0) {
+                    continue;
+                }
+                vertex_indices[idx] = static_cast<int>(vertices.size()) - vertex_base;
+                vertices.push_back({grid.x_values[i], grid.y_values[j], z_values[idx]});
+                colors.push_back(mapCurvatureToDivergingRgb(h_values[idx], h_scale));
+                ++total.vertex_count;
+            }
+        }
+        for (std::size_t j = 0; (j + 1) < grid.ny; ++j) {
+            for (std::size_t i = 0; (i + 1) < grid.nx; ++i) {
+                const std::size_t idx00 = stage4NodeIndex(i, j, grid.nx);
+                const std::size_t idx10 = stage4NodeIndex(i + 1, j, grid.nx);
+                const std::size_t idx01 = stage4NodeIndex(i, j + 1, grid.nx);
+                const std::size_t idx11 = stage4NodeIndex(i + 1, j + 1, grid.nx);
+                if (surface_valid_mask[idx00] == 0 || surface_valid_mask[idx10] == 0 || surface_valid_mask[idx01] == 0 ||
+                    surface_valid_mask[idx11] == 0) {
+                    continue;
+                }
+                faces.push_back(
+                    {vertex_base + vertex_indices[idx00], vertex_base + vertex_indices[idx10], vertex_base + vertex_indices[idx01]});
+                faces.push_back(
+                    {vertex_base + vertex_indices[idx10], vertex_base + vertex_indices[idx11], vertex_base + vertex_indices[idx01]});
+                total.face_count += 2;
+            }
+        }
+    };
+
+    add_surface(outer_z_values, outer_oriented_mean_curvature_h);
+    add_surface(inner_z_values, inner_oriented_mean_curvature_h);
+
+    std::ofstream out(path);
+    if (!out) {
+        throw std::runtime_error("Failed to open combined curvature PLY path for writing: " + path);
+    }
+    out << "ply\nformat ascii 1.0\n";
+    out << "comment generated by CapDAT Stage 9 combined curvature mesh export\n";
+    out << "element vertex " << vertices.size() << '\n';
+    out << "property float x\nproperty float y\nproperty float z\n";
+    out << "property uchar red\nproperty uchar green\nproperty uchar blue\n";
+    out << "element face " << faces.size() << '\n';
+    out << "property list uchar int vertex_indices\nend_header\n";
+    for (std::size_t i = 0; i < vertices.size(); ++i) {
+        out << vertices[i][0] << ' ' << vertices[i][1] << ' ' << vertices[i][2] << ' ' << static_cast<int>(colors[i].r) << ' '
+            << static_cast<int>(colors[i].g) << ' ' << static_cast<int>(colors[i].b) << '\n';
+    }
+    for (const auto& f : faces) {
+        out << "3 " << f[0] << ' ' << f[1] << ' ' << f[2] << '\n';
+    }
+    if (!out.good()) {
+        throw std::runtime_error("Failed while writing combined curvature PLY mesh: " + path);
+    }
+    return total;
+}
+
 std::size_t countStage6ReconstructedScalarNodes(const Stage4GridDescriptor& grid,
                                                 const std::vector<uint8_t>& obj_vertex_mask,
                                                 const std::vector<double>& values) {
@@ -1428,6 +1633,76 @@ Stage6StlExportResult writeStage6StlMesh(const Stage4GridDescriptor& grid,
     return export_result;
 }
 
+Stage6ObjExportResult writeStage6PlyMesh(const Stage4GridDescriptor& grid,
+                                         const std::vector<uint8_t>& obj_vertex_mask,
+                                         const std::vector<double>& values,
+                                         const std::string& path) {
+    std::vector<int> vertex_indices(grid.nx * grid.ny, -1);
+    std::vector<std::array<int, 3>> faces;
+    std::vector<std::array<double, 3>> vertices;
+    vertices.reserve(grid.nx * grid.ny);
+
+    for (std::size_t j = 0; j < grid.ny; ++j) {
+        for (std::size_t i = 0; i < grid.nx; ++i) {
+            const std::size_t idx = stage4NodeIndex(i, j, grid.nx);
+            if (obj_vertex_mask[idx] == 0 || !std::isfinite(values[idx])) {
+                continue;
+            }
+            vertex_indices[idx] = static_cast<int>(vertices.size());
+            vertices.push_back({grid.x_values[i], grid.y_values[j], values[idx]});
+        }
+    }
+
+    for (std::size_t j = 0; (j + 1) < grid.ny; ++j) {
+        for (std::size_t i = 0; (i + 1) < grid.nx; ++i) {
+            const std::size_t idx00 = stage4NodeIndex(i, j, grid.nx);
+            const std::size_t idx10 = stage4NodeIndex(i + 1, j, grid.nx);
+            const std::size_t idx01 = stage4NodeIndex(i, j + 1, grid.nx);
+            const std::size_t idx11 = stage4NodeIndex(i + 1, j + 1, grid.nx);
+            if (obj_vertex_mask[idx00] == 0 || obj_vertex_mask[idx10] == 0 || obj_vertex_mask[idx01] == 0 ||
+                obj_vertex_mask[idx11] == 0 || !std::isfinite(values[idx00]) || !std::isfinite(values[idx10]) ||
+                !std::isfinite(values[idx01]) || !std::isfinite(values[idx11])) {
+                continue;
+            }
+            const int v00 = vertex_indices[idx00];
+            const int v10 = vertex_indices[idx10];
+            const int v01 = vertex_indices[idx01];
+            const int v11 = vertex_indices[idx11];
+            faces.push_back({v00, v10, v01});
+            faces.push_back({v10, v11, v01});
+        }
+    }
+
+    std::ofstream out(path);
+    if (!out) {
+        throw std::runtime_error("Failed to open Stage 6 PLY path for writing: " + path);
+    }
+    out << "ply\n";
+    out << "format ascii 1.0\n";
+    out << "comment generated by CapDAT Stage 6 mesh export\n";
+    out << "element vertex " << vertices.size() << '\n';
+    out << "property float x\n";
+    out << "property float y\n";
+    out << "property float z\n";
+    out << "element face " << faces.size() << '\n';
+    out << "property list uchar int vertex_indices\n";
+    out << "end_header\n";
+    for (const auto& v : vertices) {
+        out << v[0] << ' ' << v[1] << ' ' << v[2] << '\n';
+    }
+    for (const auto& f : faces) {
+        out << "3 " << f[0] << ' ' << f[1] << ' ' << f[2] << '\n';
+    }
+    if (!out.good()) {
+        throw std::runtime_error("Failed while writing Stage 6 PLY mesh: " + path);
+    }
+
+    Stage6ObjExportResult export_result;
+    export_result.vertex_count = vertices.size();
+    export_result.face_count = faces.size();
+    return export_result;
+}
+
 Stage6DualMeshExportResult writeStage6ObjMeshesCombined(const Stage4GridDescriptor& grid,
                                                         const std::vector<uint8_t>& obj_vertex_mask,
                                                         const std::vector<double>& outer_values,
@@ -1579,6 +1854,80 @@ Stage6DualMeshExportResult writeStage6StlMeshesCombined(const Stage4GridDescript
     return export_result;
 }
 
+Stage6DualMeshExportResult writeStage6PlyMeshesCombined(const Stage4GridDescriptor& grid,
+                                                        const std::vector<uint8_t>& obj_vertex_mask,
+                                                        const std::vector<double>& outer_values,
+                                                        const std::vector<double>& inner_values,
+                                                        const std::string& path) {
+    Stage6DualMeshExportResult export_result;
+    std::vector<std::array<double, 3>> vertices;
+    std::vector<std::array<int, 3>> faces;
+    vertices.reserve(2 * grid.nx * grid.ny);
+
+    const auto addSurface = [&](const std::vector<double>& values, std::size_t& vertex_count, std::size_t& face_count) {
+        const int vertex_base = static_cast<int>(vertices.size());
+        std::vector<int> vertex_indices(grid.nx * grid.ny, -1);
+        for (std::size_t j = 0; j < grid.ny; ++j) {
+            for (std::size_t i = 0; i < grid.nx; ++i) {
+                const std::size_t idx = stage4NodeIndex(i, j, grid.nx);
+                if (obj_vertex_mask[idx] == 0 || !std::isfinite(values[idx])) {
+                    continue;
+                }
+                vertex_indices[idx] = static_cast<int>(vertices.size()) - vertex_base;
+                vertices.push_back({grid.x_values[i], grid.y_values[j], values[idx]});
+                ++vertex_count;
+            }
+        }
+
+        for (std::size_t j = 0; (j + 1) < grid.ny; ++j) {
+            for (std::size_t i = 0; (i + 1) < grid.nx; ++i) {
+                const std::size_t idx00 = stage4NodeIndex(i, j, grid.nx);
+                const std::size_t idx10 = stage4NodeIndex(i + 1, j, grid.nx);
+                const std::size_t idx01 = stage4NodeIndex(i, j + 1, grid.nx);
+                const std::size_t idx11 = stage4NodeIndex(i + 1, j + 1, grid.nx);
+                if (obj_vertex_mask[idx00] == 0 || obj_vertex_mask[idx10] == 0 || obj_vertex_mask[idx01] == 0 ||
+                    obj_vertex_mask[idx11] == 0 || !std::isfinite(values[idx00]) || !std::isfinite(values[idx10]) ||
+                    !std::isfinite(values[idx01]) || !std::isfinite(values[idx11])) {
+                    continue;
+                }
+                faces.push_back(
+                    {vertex_base + vertex_indices[idx00], vertex_base + vertex_indices[idx10], vertex_base + vertex_indices[idx01]});
+                faces.push_back(
+                    {vertex_base + vertex_indices[idx10], vertex_base + vertex_indices[idx11], vertex_base + vertex_indices[idx01]});
+                face_count += 2;
+            }
+        }
+    };
+
+    addSurface(outer_values, export_result.outer_vertex_count, export_result.outer_face_count);
+    addSurface(inner_values, export_result.inner_vertex_count, export_result.inner_face_count);
+
+    std::ofstream out(path);
+    if (!out) {
+        throw std::runtime_error("Failed to open combined Stage 6 PLY path for writing: " + path);
+    }
+    out << "ply\n";
+    out << "format ascii 1.0\n";
+    out << "comment generated by CapDAT Stage 6 combined mesh export\n";
+    out << "element vertex " << vertices.size() << '\n';
+    out << "property float x\n";
+    out << "property float y\n";
+    out << "property float z\n";
+    out << "element face " << faces.size() << '\n';
+    out << "property list uchar int vertex_indices\n";
+    out << "end_header\n";
+    for (const auto& v : vertices) {
+        out << v[0] << ' ' << v[1] << ' ' << v[2] << '\n';
+    }
+    for (const auto& f : faces) {
+        out << "3 " << f[0] << ' ' << f[1] << ' ' << f[2] << '\n';
+    }
+    if (!out.good()) {
+        throw std::runtime_error("Failed while writing combined Stage 6 PLY mesh: " + path);
+    }
+    return export_result;
+}
+
 const char* toVdwSourceLabel(VdwResolutionSource source) {
     switch (source) {
     case VdwResolutionSource::explicit_element:
@@ -1670,6 +2019,52 @@ VdwResolution resolveVdwElement(const Atom& atom) {
 }
 
 } // namespace
+
+double computeCurvatureColorScaleMaxAbs(const std::vector<double>& curvature_values,
+                                        const std::vector<uint8_t>& value_valid_mask) {
+    const std::size_t n = curvature_values.size();
+    if (!value_valid_mask.empty() && value_valid_mask.size() != n) {
+        throw std::runtime_error("Curvature color scale computation requires matching value/mask vector sizes.");
+    }
+
+    double max_abs = 0.0;
+    for (std::size_t idx = 0; idx < n; ++idx) {
+        if (!value_valid_mask.empty() && value_valid_mask[idx] == 0) {
+            continue;
+        }
+        const double h = curvature_values[idx];
+        if (!std::isfinite(h)) {
+            continue;
+        }
+        max_abs = std::max(max_abs, std::fabs(h));
+    }
+    return max_abs;
+}
+
+CurvatureRgbColor mapCurvatureToDivergingRgb(double curvature_value,
+                                             double max_abs_curvature_scale) {
+    CurvatureRgbColor color;
+    if (!std::isfinite(curvature_value) || !std::isfinite(max_abs_curvature_scale) || max_abs_curvature_scale <= 0.0) {
+        return color;
+    }
+
+    const double t = std::clamp(curvature_value / max_abs_curvature_scale, -1.0, 1.0);
+    if (t < 0.0) {
+        const double w = 1.0 + t; // [-1,0] -> [0,1]
+        color.r = 255;
+        color.g = static_cast<uint8_t>(std::lround(255.0 * w));
+        color.b = static_cast<uint8_t>(std::lround(255.0 * w));
+        return color;
+    }
+    if (t > 0.0) {
+        const double w = 1.0 - t; // [0,1] -> [1,0]
+        color.r = static_cast<uint8_t>(std::lround(255.0 * w));
+        color.g = static_cast<uint8_t>(std::lround(255.0 * w));
+        color.b = 255;
+        return color;
+    }
+    return color;
+}
 
 CylinderMembership classifyPatchCylinder(const geometry_symmetry::Vector3& position, double cylinder_radius) {
     const double radial_xy = std::sqrt((position.x * position.x) + (position.y * position.y));
@@ -2921,8 +3316,9 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
     }
 
     if (config.stage6_export_obj_meshes) {
+        const bool use_obj = config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::obj;
         const bool use_stl = config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl;
-        const std::string extension = use_stl ? ".stl" : ".obj";
+        const std::string extension = use_obj ? ".obj" : (use_stl ? ".stl" : ".ply");
         if (config.stage6_split_in_out_meshes) {
             result.outer_obj_path = geometryArtifactPath(config, "_outer_surface") + extension;
             result.inner_obj_path = geometryArtifactPath(config, "_inner_surface") + extension;
@@ -2935,7 +3331,7 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
                 result.outer_obj_face_count = outer_mesh.face_count;
                 result.inner_obj_vertex_count = inner_mesh.vertex_count;
                 result.inner_obj_face_count = inner_mesh.face_count;
-            } else {
+            } else if (use_obj) {
                 const Stage6ObjExportResult outer_obj =
                     writeStage6ObjMesh(result.grid, result.obj_vertex_mask, result.z_outer_reconstructed, result.outer_obj_path);
                 const Stage6ObjExportResult inner_obj =
@@ -2944,6 +3340,15 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
                 result.outer_obj_face_count = outer_obj.face_count;
                 result.inner_obj_vertex_count = inner_obj.vertex_count;
                 result.inner_obj_face_count = inner_obj.face_count;
+            } else {
+                const Stage6ObjExportResult outer_mesh =
+                    writeStage6PlyMesh(result.grid, result.obj_vertex_mask, result.z_outer_reconstructed, result.outer_obj_path);
+                const Stage6ObjExportResult inner_mesh =
+                    writeStage6PlyMesh(result.grid, result.obj_vertex_mask, result.z_inner_reconstructed, result.inner_obj_path);
+                result.outer_obj_vertex_count = outer_mesh.vertex_count;
+                result.outer_obj_face_count = outer_mesh.face_count;
+                result.inner_obj_vertex_count = inner_mesh.vertex_count;
+                result.inner_obj_face_count = inner_mesh.face_count;
             }
         } else {
             result.outer_obj_path = geometryArtifactPath(config, "_surface") + extension;
@@ -2959,9 +3364,20 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
                 result.outer_obj_face_count = combined.outer_face_count;
                 result.inner_obj_vertex_count = combined.inner_vertex_count;
                 result.inner_obj_face_count = combined.inner_face_count;
-            } else {
+            } else if (use_obj) {
                 const Stage6DualMeshExportResult combined =
                     writeStage6ObjMeshesCombined(result.grid,
+                                                 result.obj_vertex_mask,
+                                                 result.z_outer_reconstructed,
+                                                 result.z_inner_reconstructed,
+                                                 result.outer_obj_path);
+                result.outer_obj_vertex_count = combined.outer_vertex_count;
+                result.outer_obj_face_count = combined.outer_face_count;
+                result.inner_obj_vertex_count = combined.inner_vertex_count;
+                result.inner_obj_face_count = combined.inner_face_count;
+            } else {
+                const Stage6DualMeshExportResult combined =
+                    writeStage6PlyMeshesCombined(result.grid,
                                                  result.obj_vertex_mask,
                                                  result.z_outer_reconstructed,
                                                  result.z_inner_reconstructed,
@@ -3022,8 +3438,11 @@ GeometryStage6SurfaceReconstructionResult runGeometryAnalysisStage6SurfaceRecons
         result.messages.push_back("Geometry Stage 6 summary CSV: " + result.summary_csv_path);
     }
     if (config.stage6_export_obj_meshes) {
-        const std::string mesh_label =
-            config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl ? "STL" : "OBJ";
+        const std::string mesh_label = config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::obj
+                                           ? "OBJ"
+                                           : (config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl
+                                                  ? "STL"
+                                                  : "PLY");
         if (config.stage6_split_in_out_meshes) {
             result.messages.push_back("Geometry Stage 6 outer " + mesh_label + ": " + result.outer_obj_path +
                                       " (reconstructed scalar nodes=" +
@@ -3356,8 +3775,9 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
     }
 
     if (config.stage7_export_meshes) {
+        const bool use_obj = config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::obj;
         const bool use_stl = config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl;
-        const std::string extension = use_stl ? ".stl" : ".obj";
+        const std::string extension = use_obj ? ".obj" : (use_stl ? ".stl" : ".ply");
         const std::string mesh_prefix = config.stage7_method == FoldPatchAnalysisConfig::Stage7Method::thin_plate_grid_fit
                                             ? "_thin_plate"
                                             : "_smooth";
@@ -3373,11 +3793,20 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
                 result.outer_mesh_face_count = outer_mesh.face_count;
                 result.inner_mesh_vertex_count = inner_mesh.vertex_count;
                 result.inner_mesh_face_count = inner_mesh.face_count;
-            } else {
+            } else if (use_obj) {
                 const Stage6ObjExportResult outer_mesh =
                     writeStage6ObjMesh(result.grid, result.metric_domain_mask, result.z_outer_smooth, result.outer_mesh_path);
                 const Stage6ObjExportResult inner_mesh =
                     writeStage6ObjMesh(result.grid, result.metric_domain_mask, result.z_inner_smooth, result.inner_mesh_path);
+                result.outer_mesh_vertex_count = outer_mesh.vertex_count;
+                result.outer_mesh_face_count = outer_mesh.face_count;
+                result.inner_mesh_vertex_count = inner_mesh.vertex_count;
+                result.inner_mesh_face_count = inner_mesh.face_count;
+            } else {
+                const Stage6ObjExportResult outer_mesh =
+                    writeStage6PlyMesh(result.grid, result.metric_domain_mask, result.z_outer_smooth, result.outer_mesh_path);
+                const Stage6ObjExportResult inner_mesh =
+                    writeStage6PlyMesh(result.grid, result.metric_domain_mask, result.z_inner_smooth, result.inner_mesh_path);
                 result.outer_mesh_vertex_count = outer_mesh.vertex_count;
                 result.outer_mesh_face_count = outer_mesh.face_count;
                 result.inner_mesh_vertex_count = inner_mesh.vertex_count;
@@ -3393,8 +3822,15 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
                 result.outer_mesh_face_count = combined.outer_face_count;
                 result.inner_mesh_vertex_count = combined.inner_vertex_count;
                 result.inner_mesh_face_count = combined.inner_face_count;
-            } else {
+            } else if (use_obj) {
                 const Stage6DualMeshExportResult combined = writeStage6ObjMeshesCombined(
+                    result.grid, result.metric_domain_mask, result.z_outer_smooth, result.z_inner_smooth, result.outer_mesh_path);
+                result.outer_mesh_vertex_count = combined.outer_vertex_count;
+                result.outer_mesh_face_count = combined.outer_face_count;
+                result.inner_mesh_vertex_count = combined.inner_vertex_count;
+                result.inner_mesh_face_count = combined.inner_face_count;
+            } else {
+                const Stage6DualMeshExportResult combined = writeStage6PlyMeshesCombined(
                     result.grid, result.metric_domain_mask, result.z_outer_smooth, result.z_inner_smooth, result.outer_mesh_path);
                 result.outer_mesh_vertex_count = combined.outer_vertex_count;
                 result.outer_mesh_face_count = combined.outer_face_count;
@@ -3475,8 +3911,11 @@ GeometryStage7SmoothedSurfaceResult runGeometryAnalysisStage7SurfaceSmoothing(
         result.messages.push_back("Geometry Stage 7 summary CSV: " + result.summary_csv_path);
     }
     if (config.stage7_export_meshes) {
-        const std::string mesh_label =
-            config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl ? "STL" : "OBJ";
+        const std::string mesh_label = config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::obj
+                                           ? "OBJ"
+                                           : (config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::stl
+                                                  ? "STL"
+                                                  : "PLY");
         if (config.stage6_split_in_out_meshes) {
             result.messages.push_back("Geometry Stage 7 outer " + mesh_label + ": " + result.outer_mesh_path +
                                       " (mesh vertices emitted=" + std::to_string(result.outer_mesh_vertex_count) +
@@ -4010,7 +4449,9 @@ bool writeStage9SummaryCsv(const GeometryStage9CurvatureComputationResult& resul
            "inner_area_avg_K_qc_clean_surface_area,inner_area_avg_K_qc_clean_weighted_numerator,"
            "outer_K_qc_rejected_cells,outer_K_qc_rejected_fraction_of_curvature_valid_cells,"
            "outer_K_qc_clean_non_retained_fraction_of_candidate_cells,inner_K_qc_rejected_cells,"
-           "inner_K_qc_rejected_fraction_of_curvature_valid_cells,inner_K_qc_clean_non_retained_fraction_of_candidate_cells\n";
+           "inner_K_qc_rejected_fraction_of_curvature_valid_cells,inner_K_qc_clean_non_retained_fraction_of_candidate_cells,"
+           "outer_curvature_ply_path,inner_curvature_ply_path,outer_curvature_ply_vertex_count,outer_curvature_ply_face_count,"
+           "inner_curvature_ply_vertex_count,inner_curvature_ply_face_count,curvature_ply_h_field_label\n";
     std::size_t outer_qc_rejected_cells = 0;
     std::size_t inner_qc_rejected_cells = 0;
     if (result.outer_K_area.valid_cell_count >= result.outer_K_qc_clean_area.valid_cell_count) {
@@ -4081,7 +4522,11 @@ bool writeStage9SummaryCsv(const GeometryStage9CurvatureComputationResult& resul
         << result.outer_K_qc_rejected_fraction_of_candidate_cells << ','
         << inner_qc_rejected_cells << ','
         << result.inner_K_qc_rejected_fraction_of_curvature_valid_cells << ','
-        << result.inner_K_qc_rejected_fraction_of_candidate_cells << '\n';
+        << result.inner_K_qc_rejected_fraction_of_candidate_cells << ','
+        << result.outer_curvature_ply_path << ',' << result.inner_curvature_ply_path << ','
+        << result.outer_curvature_ply_vertex_count << ',' << result.outer_curvature_ply_face_count << ','
+        << result.inner_curvature_ply_vertex_count << ',' << result.inner_curvature_ply_face_count << ','
+        << result.curvature_ply_h_field_label << '\n';
     return out.good();
 }
 
@@ -5178,6 +5623,48 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
         }
     }
 
+    if (config.stage6_mesh_export_format == FoldPatchAnalysisConfig::MeshExportFormat::ply) {
+        const bool use_oriented_h = config.stage9_color_h_field == FoldPatchAnalysisConfig::Stage9ColorHField::oriented_h;
+        const std::vector<double>& outer_h_for_color = use_oriented_h ? result.outer_oriented_mean_curvature_H : result.outer_mean_curvature_H;
+        const std::vector<double>& inner_h_for_color = use_oriented_h ? result.inner_oriented_mean_curvature_H : result.inner_mean_curvature_H;
+        result.curvature_ply_h_field_label = use_oriented_h ? "oriented_h" : "raw_h";
+        if (config.stage6_split_in_out_meshes) {
+            result.outer_curvature_ply_path = geometryArtifactPath(config, "_stage9_outer_curvature_h.ply");
+            result.inner_curvature_ply_path = geometryArtifactPath(config, "_stage9_inner_curvature_h.ply");
+            const CurvaturePlyExportResult outer_export = writeCurvaturePlyMesh(stage7_result.grid,
+                                                                                 stage7_result.metric_domain_mask,
+                                                                                 result.curvature_valid_mask,
+                                                                                 stage7_result.z_outer_smooth,
+                                                                                 outer_h_for_color,
+                                                                                 result.outer_curvature_ply_path);
+            const CurvaturePlyExportResult inner_export = writeCurvaturePlyMesh(stage7_result.grid,
+                                                                                 stage7_result.metric_domain_mask,
+                                                                                 result.curvature_valid_mask,
+                                                                                 stage7_result.z_inner_smooth,
+                                                                                 inner_h_for_color,
+                                                                                 result.inner_curvature_ply_path);
+            result.outer_curvature_ply_vertex_count = outer_export.vertex_count;
+            result.outer_curvature_ply_face_count = outer_export.face_count;
+            result.inner_curvature_ply_vertex_count = inner_export.vertex_count;
+            result.inner_curvature_ply_face_count = inner_export.face_count;
+        } else {
+            result.outer_curvature_ply_path = geometryArtifactPath(config, "_stage9_curvature_h.ply");
+            result.inner_curvature_ply_path = result.outer_curvature_ply_path;
+            const CurvaturePlyExportResult combined_export = writeCurvaturePlyMeshesCombined(stage7_result.grid,
+                                                                                              stage7_result.metric_domain_mask,
+                                                                                              result.curvature_valid_mask,
+                                                                                              stage7_result.z_outer_smooth,
+                                                                                              stage7_result.z_inner_smooth,
+                                                                                              outer_h_for_color,
+                                                                                              inner_h_for_color,
+                                                                                              result.outer_curvature_ply_path);
+            result.outer_curvature_ply_vertex_count = combined_export.vertex_count;
+            result.outer_curvature_ply_face_count = combined_export.face_count;
+            result.inner_curvature_ply_vertex_count = combined_export.vertex_count;
+            result.inner_curvature_ply_face_count = combined_export.face_count;
+        }
+    }
+
     (void)tolerance;
     result.messages.push_back("Geometry Stage 9 metric-domain node count: " + std::to_string(result.metric_domain_node_count));
     result.messages.push_back("Geometry Stage 9 derivative-valid node count: " + std::to_string(result.derivative_valid_node_count));
@@ -5225,6 +5712,11 @@ GeometryStage9CurvatureComputationResult runGeometryAnalysisStage9CurvatureCompu
         result.messages.push_back("Geometry Stage 9 inner curvature CSV: " + result.inner_curvature_csv_path);
         result.messages.push_back("Geometry Stage 9 curvature-valid mask CSV: " + result.curvature_valid_mask_csv_path);
         result.messages.push_back("Geometry Stage 9 summary CSV: " + result.curvature_summary_csv_path);
+    }
+    if (!result.outer_curvature_ply_path.empty()) {
+        result.messages.push_back("Geometry Stage 9 outer curvature PLY: " + result.outer_curvature_ply_path);
+        result.messages.push_back("Geometry Stage 9 inner curvature PLY: " + result.inner_curvature_ply_path);
+        result.messages.push_back("Geometry Stage 9 curvature PLY H field: " + result.curvature_ply_h_field_label);
     }
     result.messages.push_back("Geometry analysis: completed Stage 9 curvature computation.");
     result.success = true;
@@ -5609,7 +6101,7 @@ GeometryAnalysisResult runFoldPatchGeometryAnalysis(Capsid& capsid,
                      result.stage7_smooth.success && result.stage8_derivatives.success && result.stage9_curvature.success &&
                      (!config.stage10_enabled || result.stage10_thickness.success);
     const std::string run_summary_json_path = geometryArtifactPath(config, "stage_run_summary.json");
-    if (!writeGeometryRunSummaryJson(config, parser_config, run_summary_json_path)) {
+    if (!writeGeometryRunSummaryJson(config, parser_config, &result, run_summary_json_path)) {
         throw std::runtime_error("Failed to write geometry run summary JSON: " + run_summary_json_path);
     }
     result.run_summary_json_path = run_summary_json_path;

@@ -40,7 +40,8 @@ struct FoldPatchAnalysisConfig {
     enum class Stage7Method : uint8_t { smooth = 0, thin_plate_grid_fit = 1 };
     enum class Stage7BoundaryConditionMode : uint8_t { free = 0, fixed_to_stage6 = 1, soft_to_stage6 = 2 };
     enum class Stage10ThicknessMethod : uint8_t { vertical = 0, radial = 1 };
-    enum class MeshExportFormat : uint8_t { obj = 0, stl = 1 };
+    enum class MeshExportFormat : uint8_t { obj = 0, stl = 1, ply = 2 };
+    enum class Stage9ColorHField : uint8_t { oriented_h = 0, raw_h = 1 };
 
     bool enabled = false;
     bool debug = false;
@@ -90,6 +91,7 @@ struct FoldPatchAnalysisConfig {
     bool stage8_export_csv = true;
     bool stage9_enabled = true;
     bool stage9_export_csv = true;
+    Stage9ColorHField stage9_color_h_field = Stage9ColorHField::oriented_h;
     double stage9_qc_n_tail = 4.0;
     double stage9_qc_n_spike = 4.0;
     std::size_t stage9_qc_min_neighbors = 3;
@@ -100,7 +102,7 @@ struct FoldPatchAnalysisConfig {
     bool stage10_use_curvature_valid_domain_only = false;
     double stage10_min_thickness = 0.0;
     double stage10_max_thickness = 0.0;
-    MeshExportFormat stage6_mesh_export_format = MeshExportFormat::stl;
+    MeshExportFormat stage6_mesh_export_format = MeshExportFormat::ply;
     bool stage6_split_in_out_meshes = false;
     bool export_rotated_capsid = false;
     std::string output_root_dir = "results/unknown/2_0";
@@ -615,6 +617,13 @@ struct GeometryStage9CurvatureComputationResult {
     std::string inner_curvature_csv_path;
     std::string curvature_valid_mask_csv_path;
     std::string curvature_summary_csv_path;
+    std::string outer_curvature_ply_path;
+    std::string inner_curvature_ply_path;
+    std::size_t outer_curvature_ply_vertex_count = 0;
+    std::size_t outer_curvature_ply_face_count = 0;
+    std::size_t inner_curvature_ply_vertex_count = 0;
+    std::size_t inner_curvature_ply_face_count = 0;
+    std::string curvature_ply_h_field_label = "oriented_h";
 
     Stage9IntegralAverageStats outer_H_area;
     Stage9IntegralAverageStats outer_K_area;
@@ -738,6 +747,18 @@ struct GeometryAnalysisResult {
     std::string run_summary_json_path;
     std::vector<std::string> messages;
 };
+
+struct CurvatureRgbColor {
+    uint8_t r = 255;
+    uint8_t g = 255;
+    uint8_t b = 255;
+};
+
+double computeCurvatureColorScaleMaxAbs(const std::vector<double>& curvature_values,
+                                        const std::vector<uint8_t>& value_valid_mask);
+
+CurvatureRgbColor mapCurvatureToDivergingRgb(double curvature_value,
+                                             double max_abs_curvature_scale);
 
 CylinderMembership classifyPatchCylinder(const geometry_symmetry::Vector3& position,
                                          double cylinder_radius);

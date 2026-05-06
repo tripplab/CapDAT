@@ -244,6 +244,8 @@ The real CLI surface is broader than older branch descriptions imply.
 
 All of that is visible directly in `printHelp(...)` and the argument parser in `main.cpp` :contentReference[oaicite:38]{index=38}.
 
+Current mesh format options are `obj`, `stl`, and `ply`, with `ply` as the default format for Stage 6/7 mesh export in the CLI/config surface.
+
 ## 11. Top-level CLI invariants and execution rules
 
 `main.cpp` enforces several important invariants before execution:
@@ -429,6 +431,7 @@ The branch is artifact-rich by design.
 - Stage 7 smoothed fields and delta maps
 - Stage 8 derivative CSVs
 - Stage 9 curvature CSVs
+- Stage 9 curvature-colored PLY meshes (red=negative H, white=0, blue=positive H) when mesh format is `ply`
 - Stage 10 thickness CSVs
 
 ### Mesh artifacts
@@ -502,7 +505,6 @@ It already includes:
 - broad geometry-focused tests
 
 So the honest state is this: this branch is not “early scaffolding” anymore. It is already a substantial scientific-numerical subsystem. The next development work should treat it with that level of seriousness.
-
 
 
 
