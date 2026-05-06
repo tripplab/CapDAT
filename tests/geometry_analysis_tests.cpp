@@ -47,6 +47,41 @@ std::vector<std::vector<std::string>> readCsvRows(const std::string& path) {
     return rows;
 }
 
+struct ParsedPlyHeader {
+    std::size_t vertex_count = 0;
+    std::size_t face_count = 0;
+    std::vector<std::string> vertex_properties;
+};
+
+ParsedPlyHeader parseAsciiPlyHeader(const std::string& path) {
+    std::ifstream in(path);
+    if (!in) {
+        throw std::runtime_error("Unable to open PLY file for header parse: " + path);
+    }
+    ParsedPlyHeader header;
+    std::string line;
+    bool in_vertex_props = false;
+    while (std::getline(in, line)) {
+        if (line == "end_header") {
+            break;
+        }
+        if (line.rfind("element vertex ", 0) == 0) {
+            header.vertex_count = static_cast<std::size_t>(std::stoull(line.substr(std::string("element vertex ").size())));
+            in_vertex_props = true;
+            continue;
+        }
+        if (line.rfind("element face ", 0) == 0) {
+            header.face_count = static_cast<std::size_t>(std::stoull(line.substr(std::string("element face ").size())));
+            in_vertex_props = false;
+            continue;
+        }
+        if (in_vertex_props && line.rfind("property ", 0) == 0) {
+            header.vertex_properties.push_back(line);
+        }
+    }
+    return header;
+}
+
 Capsid makeSimpleCapsid() {
     Capsid capsid("constructed");
     Chain chain(1, 'A');
@@ -280,6 +315,50 @@ void testLineSphereIntersectionHelper() {
 
     const auto near_miss = intersectVerticalLineWithSphere(2.000001, 0.0, atom, 1e-12);
     assertTrue(!near_miss.intersects, "just outside radius should miss with strict tolerance");
+}
+
+void testCurvatureColorScaleMaxAbsMaskAware() {
+    const std::vector<double> h = {-2.0, -0.5, 0.0, 1.5, 8.0};
+    const std::vector<uint8_t> mask = {1, 1, 1, 1, 0};
+    const double scale = computeCurvatureColorScaleMaxAbs(h, mask);
+    assertTrue(near(scale, 2.0, 1e-12), "color scale max-abs should use finite, mask-valid values only");
+}
+
+void testCurvatureColorScaleHandlesNonFiniteAndEmptyDomain() {
+    const std::vector<double> h = {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -3.0};
+    const std::vector<uint8_t> mask = {1, 1, 0};
+    const double scale = computeCurvatureColorScaleMaxAbs(h, mask);
+    assertTrue(near(scale, 0.0, 1e-12), "color scale should be zero when no finite, valid entries exist");
+}
+
+void testCurvatureDivergingRgbMapping() {
+    {
+        const CurvatureRgbColor c = mapCurvatureToDivergingRgb(-2.0, 2.0);
+        assertTrue(c.r == 255 && c.g == 0 && c.b == 0, "negative extreme should map to red");
+    }
+    {
+        const CurvatureRgbColor c = mapCurvatureToDivergingRgb(0.0, 2.0);
+        assertTrue(c.r == 255 && c.g == 255 && c.b == 255, "zero curvature should map to white");
+    }
+    {
+        const CurvatureRgbColor c = mapCurvatureToDivergingRgb(2.0, 2.0);
+        assertTrue(c.r == 0 && c.g == 0 && c.b == 255, "positive extreme should map to blue");
+    }
+    {
+        const CurvatureRgbColor c = mapCurvatureToDivergingRgb(-1.0, 2.0);
+        assertTrue(c.r == 255 && c.g == 128 && c.b == 128, "mid negative should interpolate red->white");
+    }
+    {
+        const CurvatureRgbColor c = mapCurvatureToDivergingRgb(1.0, 2.0);
+        assertTrue(c.r == 128 && c.g == 128 && c.b == 255, "mid positive should interpolate white->blue");
+    }
+}
+
+void testCurvatureDivergingRgbInvalidScaleFallback() {
+    const CurvatureRgbColor c1 = mapCurvatureToDivergingRgb(1.0, 0.0);
+    const CurvatureRgbColor c2 = mapCurvatureToDivergingRgb(std::numeric_limits<double>::quiet_NaN(), 1.0);
+    assertTrue(c1.r == 255 && c1.g == 255 && c1.b == 255, "zero scale should return white fallback");
+    assertTrue(c2.r == 255 && c2.g == 255 && c2.b == 255, "non-finite value should return white fallback");
 }
 
 void testSingleNodeFirstContact() {
@@ -1536,6 +1615,28 @@ void testStage6CombinedExportDefault() {
     std::filesystem::remove(stage6.outer_obj_path);
 }
 
+void testStage6ObjExportExplicit() {
+    GeometryStage5SurfacePrepResult stage5 = makeSyntheticStage5ResultForStage6();
+    FoldPatchAnalysisConfig config;
+    config.output_root_dir = "stage6_obj";
+    config.stage6_export_obj_meshes = true;
+    config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::obj;
+    config.stage6_split_in_out_meshes = true;
+
+    const auto stage6 = runGeometryAnalysisStage6SurfaceReconstruction(stage5, config, nullptr);
+    assertTrue(std::filesystem::exists(stage6.outer_obj_path), "outer obj should exist");
+    assertTrue(std::filesystem::exists(stage6.inner_obj_path), "inner obj should exist");
+    assertTrue(stage6.outer_obj_path.find(".obj") != std::string::npos, "outer mesh path should use obj extension");
+
+    std::ifstream obj_file(stage6.outer_obj_path);
+    std::string first_line;
+    std::getline(obj_file, first_line);
+    assertTrue(first_line.rfind("v ", 0) == 0, "OBJ should begin with a vertex record");
+
+    removeIfExists(stage6.outer_obj_path);
+    removeIfExists(stage6.inner_obj_path);
+}
+
 void testStage7RequiresSuccessfulStage6() {
     GeometryStage6SurfaceReconstructionResult stage6;
     stage6.success = false;
@@ -2776,6 +2877,109 @@ void testStage9CsvExportSmoke() {
     removeIfExists(stage9.curvature_summary_csv_path);
 }
 
+void testStage9CsvExportUnaffectedWhenPlyEnabled() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    FoldPatchAnalysisConfig config;
+    config.output_root_dir = "stage9_csv_plus_ply";
+    config.stage9_export_csv = true;
+    config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::ply;
+    config.stage6_split_in_out_meshes = false;
+    const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+
+    assertTrue(std::filesystem::exists(stage9.outer_curvature_csv_path), "outer curvature csv should still be exported in ply mode");
+    assertTrue(std::filesystem::exists(stage9.inner_curvature_csv_path), "inner curvature csv should still be exported in ply mode");
+    assertTrue(std::filesystem::exists(stage9.curvature_valid_mask_csv_path),
+               "curvature-valid mask csv should still be exported in ply mode");
+    assertTrue(std::filesystem::exists(stage9.curvature_summary_csv_path), "curvature summary csv should still be exported in ply mode");
+    assertTrue(std::filesystem::exists(stage9.outer_curvature_ply_path), "combined curvature ply should be exported in ply mode");
+
+    removeIfExists(stage9.outer_curvature_csv_path);
+    removeIfExists(stage9.inner_curvature_csv_path);
+    removeIfExists(stage9.curvature_valid_mask_csv_path);
+    removeIfExists(stage9.curvature_summary_csv_path);
+    removeIfExists(stage9.outer_curvature_ply_path);
+}
+
+void testStage9CurvaturePlyExportCombinedAndSplit() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+
+    {
+        FoldPatchAnalysisConfig config;
+        config.output_root_dir = "stage9_ply_combined";
+        config.stage9_export_csv = false;
+        config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::ply;
+        config.stage6_split_in_out_meshes = false;
+        const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+        assertTrue(!stage9.outer_curvature_ply_path.empty(), "combined PLY path should be recorded");
+        assertTrue(stage9.outer_curvature_ply_path == stage9.inner_curvature_ply_path,
+                   "combined PLY export should use a single file path when split flag is absent");
+        assertTrue(std::filesystem::exists(stage9.outer_curvature_ply_path), "combined curvature PLY should exist");
+        std::ifstream in(stage9.outer_curvature_ply_path);
+        std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        assertTrue(all.find("property uchar red") != std::string::npos, "combined PLY should include red channel property");
+        assertTrue(all.find("property uchar green") != std::string::npos, "combined PLY should include green channel property");
+        assertTrue(all.find("property uchar blue") != std::string::npos, "combined PLY should include blue channel property");
+        removeIfExists(stage9.outer_curvature_ply_path);
+    }
+
+    {
+        FoldPatchAnalysisConfig config;
+        config.output_root_dir = "stage9_ply_split";
+        config.stage9_export_csv = false;
+        config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::ply;
+        config.stage6_split_in_out_meshes = true;
+        const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+        assertTrue(!stage9.outer_curvature_ply_path.empty() && !stage9.inner_curvature_ply_path.empty(),
+                   "split PLY paths should be recorded");
+        assertTrue(stage9.outer_curvature_ply_path != stage9.inner_curvature_ply_path,
+                   "split PLY export should create distinct outer/inner files when split flag is present");
+        assertTrue(std::filesystem::exists(stage9.outer_curvature_ply_path), "split outer curvature PLY should exist");
+        assertTrue(std::filesystem::exists(stage9.inner_curvature_ply_path), "split inner curvature PLY should exist");
+        removeIfExists(stage9.outer_curvature_ply_path);
+        removeIfExists(stage9.inner_curvature_ply_path);
+    }
+}
+
+void testStage9CurvaturePlyGoldenHeaderAndCounts() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    FoldPatchAnalysisConfig config;
+    config.output_root_dir = "stage9_ply_golden";
+    config.stage9_export_csv = false;
+    config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::ply;
+    config.stage6_split_in_out_meshes = false;
+
+    const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+    const ParsedPlyHeader header = parseAsciiPlyHeader(stage9.outer_curvature_ply_path);
+    assertTrue(header.vertex_count == stage9.outer_curvature_ply_vertex_count,
+               "PLY header vertex_count should match recorded Stage 9 metadata");
+    assertTrue(header.face_count == stage9.outer_curvature_ply_face_count,
+               "PLY header face_count should match recorded Stage 9 metadata");
+    const std::vector<std::string> expected_props = {
+        "property float x", "property float y", "property float z",
+        "property uchar red", "property uchar green", "property uchar blue"};
+    assertTrue(header.vertex_properties == expected_props, "PLY vertex property order should remain stable for downstream parsers");
+    removeIfExists(stage9.outer_curvature_ply_path);
+}
+
+void testStage9CurvaturePlyRawHFieldSelection() {
+    auto stage8 = makeSyntheticStage8ResultForStage9();
+    const auto stage7 = makeSyntheticStage7ResultForStage9(stage8);
+    FoldPatchAnalysisConfig config;
+    config.output_root_dir = "stage9_ply_raw_h";
+    config.stage9_export_csv = false;
+    config.stage6_mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::ply;
+    config.stage6_split_in_out_meshes = false;
+    config.stage9_color_h_field = FoldPatchAnalysisConfig::Stage9ColorHField::raw_h;
+
+    const auto stage9 = runGeometryAnalysisStage9CurvatureComputation(stage7, stage8, config, nullptr);
+    assertTrue(stage9.curvature_ply_h_field_label == "raw_h", "Stage 9 should record raw_h label when configured");
+    assertTrue(std::filesystem::exists(stage9.outer_curvature_ply_path), "raw_h-mode curvature PLY should be exported");
+    removeIfExists(stage9.outer_curvature_ply_path);
+}
+
 void testStage9QcWarnFlagsAndConfidenceClass() {
     auto stage8 = makeSyntheticStage8ResultForStage9();
     const std::size_t center = nodeIndex(1, 1, stage8.grid.nx);
@@ -3124,6 +3328,10 @@ int main() {
         testPatchAtomBuilderNormalization();
         testPatchAtomBuilderInfersElementFromNameWhenMissing();
         testLineSphereIntersectionHelper();
+        testCurvatureColorScaleMaxAbsMaskAware();
+        testCurvatureColorScaleHandlesNonFiniteAndEmptyDomain();
+        testCurvatureDivergingRgbMapping();
+        testCurvatureDivergingRgbInvalidScaleFallback();
         testSingleNodeFirstContact();
         testStage4FirstContactEnvelopeCompetingWinners();
         testStage4InnerWinnerCanDisagreeWithLowestCenterZ();
@@ -3159,6 +3367,7 @@ int main() {
         testStage6DebugCsvArtifactsAndObjExportAndDeterminism();
         testStage6StlExport();
         testStage6CombinedExportDefault();
+        testStage6ObjExportExplicit();
         testStage1ToStage6Integration();
         testStage7RequiresSuccessfulStage6();
         testStage7SeedPinSwitchAndRoughnessReduction();
@@ -3183,6 +3392,10 @@ int main() {
         testStage9InvalidInputPropagation();
         testStage9NonFiniteOutputGuard();
         testStage9CsvExportSmoke();
+        testStage9CsvExportUnaffectedWhenPlyEnabled();
+        testStage9CurvaturePlyExportCombinedAndSplit();
+        testStage9CurvaturePlyGoldenHeaderAndCounts();
+        testStage9CurvaturePlyRawHFieldSelection();
         testStage9QcWarnFlagsAndConfidenceClass();
         testStage9CsvExportIncludesQcColumns();
         testStage9IntegralAreaAverageConstantFlatField();

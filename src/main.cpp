@@ -175,7 +175,7 @@ void printHelp(const std::string& program_name) {
       --geometry_support_radius <A>          Stage 5 interpolation support radius (default: auto)
       --geometry_min_support_nodes <n>       Stage 5 minimum nearby support seeds (default: 4)
       --geometry_reliable_radius <A>         Stage 5 reliable core radius (default: auto)
-      --export_mesh_format <name>            Stage 6 mesh export format: obj|stl (default: stl)
+      --export_mesh_format <name>            Stage 6 mesh export format: obj|stl|ply (default: ply)
       --split_in_out_mesh                    Export Stage 6 inner and outer meshes as separate files
       --surf_min_separation <A>              Stage 6 minimum outer-inner separation in angstroms (default: 0.0)
 
@@ -213,6 +213,7 @@ void printHelp(const std::string& program_name) {
   [Geometry curvature QC]
       --qc_n_tail <x>                          Stage 9a global-tail threshold in robust sigma units (default: 4.0)
       --qc_n_spike <x>                         Stage 9a local-spike threshold in robust sigma units (default: 4.0)
+      --geometry_curvature_color_h_field <oriented_h|raw_h>  Stage 9 PLY color scalar (default: oriented_h)
 
   [Geometry thickness]
       --geometry_thickness_enabled <true|false>  Stage 10 vertical thickness enable switch (default: true)
@@ -290,7 +291,7 @@ int main(int argc, char* argv[]) {
     double geometry_support_radius = 0.0;
     std::size_t geometry_min_support_nodes = 4;
     double geometry_reliable_radius = 0.0;
-    FoldPatchAnalysisConfig::MeshExportFormat mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::stl;
+    FoldPatchAnalysisConfig::MeshExportFormat mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::ply;
     bool split_in_out_mesh = false;
     double surface_min_separation = 0.0;
     // Stage 7 smoothing/regularization runs by default for geometry-analysis workflows.
@@ -325,6 +326,8 @@ int main(int argc, char* argv[]) {
     bool geometry_s8_export_csv = true;
     double geometry_qc_n_tail = 4.0;
     double geometry_qc_n_spike = 4.0;
+    FoldPatchAnalysisConfig::Stage9ColorHField geometry_curvature_color_h_field =
+        FoldPatchAnalysisConfig::Stage9ColorHField::oriented_h;
     bool geometry_thickness_enabled = true;
     FoldPatchAnalysisConfig::Stage10ThicknessMethod geometry_thickness_method =
         FoldPatchAnalysisConfig::Stage10ThicknessMethod::radial;
@@ -565,7 +568,11 @@ int main(int argc, char* argv[]) {
                 mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::stl;
                 continue;
             }
-            std::cerr << "Error: --export_mesh_format must be one of obj, stl\n";
+            if (format_arg == "ply" || format_arg == "PLY") {
+                mesh_export_format = FoldPatchAnalysisConfig::MeshExportFormat::ply;
+                continue;
+            }
+            std::cerr << "Error: --export_mesh_format must be one of obj, stl, ply\n";
             return 1;
         }
         if (arg == "--split_in_out_mesh") {
@@ -885,6 +892,23 @@ int main(int argc, char* argv[]) {
             }
             geometry_qc_n_spike = std::stod(argv[++i]);
             continue;
+        }
+        if (arg == "--geometry_curvature_color_h_field") {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: missing value for --geometry_curvature_color_h_field\n";
+                return 1;
+            }
+            const std::string field_arg = argv[++i];
+            if (field_arg == "oriented_h" || field_arg == "ORIENTED_H") {
+                geometry_curvature_color_h_field = FoldPatchAnalysisConfig::Stage9ColorHField::oriented_h;
+                continue;
+            }
+            if (field_arg == "raw_h" || field_arg == "RAW_H") {
+                geometry_curvature_color_h_field = FoldPatchAnalysisConfig::Stage9ColorHField::raw_h;
+                continue;
+            }
+            std::cerr << "Error: --geometry_curvature_color_h_field must be one of oriented_h, raw_h\n";
+            return 1;
         }
         if (arg == "--geometry_thickness_enabled") {
             if (i + 1 >= argc) {
@@ -1233,6 +1257,7 @@ int main(int argc, char* argv[]) {
         geometry_config.stage8_export_csv = geometry_s8_export_csv;
         geometry_config.stage9_qc_n_tail = geometry_qc_n_tail;
         geometry_config.stage9_qc_n_spike = geometry_qc_n_spike;
+        geometry_config.stage9_color_h_field = geometry_curvature_color_h_field;
         geometry_config.stage10_enabled = geometry_thickness_enabled;
         geometry_config.stage10_thickness_method = geometry_thickness_method;
         geometry_config.stage10_export_csv = geometry_thickness_export_csv;
