@@ -2800,17 +2800,17 @@ void testStage9ParaboloidCurvatureAtOrigin() {
     const std::size_t center = nodeIndex(1, 1, stage8.grid.nx);
     const double expected_H = alpha + beta;
     const double expected_K = 4.0 * alpha * beta;
-    assertTrue(near(stage9.outer_mean_curvature_H[center], expected_H, 1e-12), "paraboloid outer H at origin should match analytic");
+    assertTrue(near(stage9.outer_mean_curvature_H[center], -expected_H, 1e-12), "paraboloid outer H at origin should match analytic");
     assertTrue(near(stage9.outer_gaussian_curvature_K[center], expected_K, 1e-12),
                "paraboloid outer K at origin should match analytic");
-    assertTrue(near(stage9.outer_oriented_mean_curvature_H[center], -expected_H, 1e-12),
+    assertTrue(near(stage9.outer_oriented_mean_curvature_H[center], expected_H, 1e-12),
                "paraboloid outer oriented H should flip when graph normal is not outward");
     assertTrue(stage9.outer_orientation_flip_applied_flag[center] == 1, "outer center should apply orientation flip");
     assertTrue(stage9.outer_outward_normal_alignment_flag[center] == 0, "outer center graph normal should not be outward");
-    assertTrue(near(stage9.inner_mean_curvature_H[center], expected_H, 1e-12), "paraboloid inner H at origin should match analytic");
+    assertTrue(near(stage9.inner_mean_curvature_H[center], -expected_H, 1e-12), "paraboloid inner H at origin should match analytic");
     assertTrue(near(stage9.inner_gaussian_curvature_K[center], expected_K, 1e-12),
                "paraboloid inner K at origin should match analytic");
-    assertTrue(near(stage9.inner_oriented_mean_curvature_H[center], -expected_H, 1e-12),
+    assertTrue(near(stage9.inner_oriented_mean_curvature_H[center], expected_H, 1e-12),
                "paraboloid inner oriented H should flip when graph normal is not outward");
     assertTrue(stage9.inner_orientation_flip_applied_flag[center] == 1, "inner center should apply orientation flip");
     assertTrue(stage9.inner_outward_normal_alignment_flag[center] == 0, "inner center graph normal should not be outward");

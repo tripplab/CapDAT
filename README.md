@@ -45,6 +45,7 @@ Notes:
 - The script expects ASCII PLY input with `red`, `green`, and `blue` vertex properties.
 - Non-triangle faces are skipped.
 - `--quantize-levels` reduces color count to stay within VMD color-ID limits for large meshes.
+- Curvature-color convention for Stage 9 PLY exports is: **blue = positive H**, **white = near-zero H**, **red = negative H**, using the branch convention **"outward-facing convex sphere has H > 0"**.
 
 The current code base on this branch builds:
 - the main executable `capsid_analyzer`,
