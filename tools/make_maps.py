@@ -52,11 +52,12 @@ def _grid_field(df, value_col, valid_col, res, cyl_radius):
 
     radial_mask = (X ** 2 + Y ** 2) <= float(cyl_radius) ** 2
 
-    val_pts_indicator = valid_mask.astype(float)
-    support_linear = griddata(pts_all, val_pts_indicator, (X, Y), method="linear")
-    support_nearest = griddata(pts_all, val_pts_indicator, (X, Y), method="nearest")
-    support_interp = np.where(np.isnan(support_linear), support_nearest, support_linear)
-    support_region = support_interp >= 0.5
+    # Define support strictly from the convex hull of valid samples only.
+    # This avoids nearest-neighbor extrapolation into unsupported peripheral
+    # regions, which can otherwise create ring-like artifacts at the boundary.
+    support_seed = np.ones(pts_valid.shape[0], dtype=float)
+    support_linear = griddata(pts_valid, support_seed, (X, Y), method="linear")
+    support_region = np.isfinite(support_linear)
 
     grid = np.full_like(grid_val, np.nan, dtype=float)
     keep_mask = radial_mask & support_region
@@ -194,11 +195,11 @@ def main():
     viridis.set_bad("black")
 
     jobs = [
-        ("thickness", f"R{r}_thickness_map.png", "Thickness (radial)", viridis, False),
-        ("outer_H", f"R{r}_outer_H_map.png", "Outer H (H_oriented)", rb_cmap, True),
-        ("inner_H", f"R{r}_inner_H_map.png", "Inner H (H_oriented)", rb_cmap, True),
-        ("outer_K", f"R{r}_outer_K_map.png", "Outer K (K_raw)", rb_cmap, True),
-        ("inner_K", f"R{r}_inner_K_map.png", "Inner K (K_raw)", rb_cmap, True),
+        ("thickness", f"R{r}_thickness_map.png", "Thickness (radial) [Ang]", viridis, False),
+        ("outer_H", f"R{r}_outer_H_map.png", "Outer H (H_oriented) [Ang^-1]", rb_cmap, True),
+        ("inner_H", f"R{r}_inner_H_map.png", "Inner H (H_oriented) [Ang^-1]", rb_cmap, True),
+        ("outer_K", f"R{r}_outer_K_map.png", "Outer K (K_raw) [Ang^-2]", rb_cmap, True),
+        ("inner_K", f"R{r}_inner_K_map.png", "Inner K (K_raw) [Ang^-2]", rb_cmap, True),
     ]
 
     for kind, out_name, title, cmap, center_zero in jobs:
