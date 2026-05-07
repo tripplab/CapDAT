@@ -30,14 +30,12 @@ def parse_args():
     return p.parse_args()
 
 
-def _grid_field(df, value_col, valid_col, res):
+def _grid_field(df, value_col, valid_col, res, cyl_radius):
     d = df[["x", "y", value_col, valid_col]].copy()
     d = d.dropna(subset=["x", "y", value_col, valid_col])
 
-    x_min, x_max = d["x"].min(), d["x"].max()
-    y_min, y_max = d["y"].min(), d["y"].max()
-    gx = np.linspace(x_min, x_max, res)
-    gy = np.linspace(y_min, y_max, res)
+    gx = np.linspace(-cyl_radius, cyl_radius, res)
+    gy = np.linspace(-cyl_radius, cyl_radius, res)
     X, Y = np.meshgrid(gx, gy)
 
     valid_mask = d[valid_col].astype(bool).values
@@ -52,21 +50,19 @@ def _grid_field(df, value_col, valid_col, res):
     grid_nearest = griddata(pts_valid, vals_valid, (X, Y), method="nearest")
     grid_val = np.where(np.isnan(grid_linear), grid_nearest, grid_linear)
 
-    domain_linear = griddata(pts_all, np.ones(len(pts_all)), (X, Y), method="linear")
-    domain_nearest = griddata(pts_all, np.ones(len(pts_all)), (X, Y), method="nearest")
-    domain = np.where(np.isnan(domain_linear), domain_nearest, domain_linear)
-    domain_mask = np.isfinite(domain)
+    radial_mask = (X ** 2 + Y ** 2) <= float(cyl_radius) ** 2
 
     val_pts_indicator = valid_mask.astype(float)
-    valid_linear = griddata(pts_all, val_pts_indicator, (X, Y), method="linear")
-    valid_nearest = griddata(pts_all, val_pts_indicator, (X, Y), method="nearest")
-    valid_interp = np.where(np.isnan(valid_linear), valid_nearest, valid_linear)
-    valid_region = valid_interp >= 0.5
+    support_linear = griddata(pts_all, val_pts_indicator, (X, Y), method="linear")
+    support_nearest = griddata(pts_all, val_pts_indicator, (X, Y), method="nearest")
+    support_interp = np.where(np.isnan(support_linear), support_nearest, support_linear)
+    support_region = support_interp >= 0.5
 
     grid = np.full_like(grid_val, np.nan, dtype=float)
-    grid[domain_mask & valid_region] = grid_val[domain_mask & valid_region]
-
-    return X, Y, grid
+    keep_mask = radial_mask & support_region
+    grid[keep_mask] = grid_val[keep_mask]
+    extent = [-cyl_radius, cyl_radius, -cyl_radius, cyl_radius]
+    return X, Y, grid, extent
 
 
 def _read_csv(path):
@@ -112,8 +108,8 @@ def _build_panel_data(results_dir, capsid, folds, r, kind, res):
         else:
             raise ValueError(kind)
 
-        _, _, grid = _grid_field(df, value_col=value_col, valid_col=valid_col, res=res)
-        out.append((fold, grid))
+        _, _, grid, extent = _grid_field(df, value_col=value_col, valid_col=valid_col, res=res, cyl_radius=r)
+        out.append((fold, grid, extent))
 
         valid_vals = df.loc[df[valid_col].astype(bool), value_col].dropna().values
         if valid_vals.size > 0:
@@ -148,12 +144,12 @@ def _render_composed(panels, vmin, vmax, title, outfile, cmap, center_zero=False
     norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax) if center_zero else None
 
     mappable = None
-    for idx, (fold, grid) in enumerate(panels):
+    for idx, (fold, grid, extent) in enumerate(panels):
         ax = axes[idx]
         if norm is not None:
-            mappable = ax.imshow(grid, origin="lower", cmap=cmap, norm=norm)
+            mappable = ax.imshow(grid, origin="lower", cmap=cmap, norm=norm, extent=extent)
         else:
-            mappable = ax.imshow(grid, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
+            mappable = ax.imshow(grid, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax, extent=extent)
 
         ax.set_title(f"Fold {fold}")
         ax.set_xlabel("x")
@@ -178,6 +174,8 @@ def main():
     global np, pd, plt, LinearSegmentedColormap, TwoSlopeNorm, griddata
     import numpy as np
     import pandas as pd
+    import matplotlib
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
     from scipy.interpolate import griddata
