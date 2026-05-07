@@ -47,6 +47,51 @@ Notes:
 - `--quantize-levels` reduces color count to stay within VMD color-ID limits for large meshes.
 - Curvature-color convention for Stage 9 PLY exports is: **blue = positive H**, **white = near-zero H**, **red = negative H**, using the branch convention **"outward-facing convex sphere has H > 0"**.
 
+## Visualization Utility: Composed Thickness/Curvature Maps
+
+CapDAT includes a Python helper script to generate panelized 2D maps across folds for a given capsid and cylinder radius.
+
+- Script: `tools/make_maps.py`
+- Purpose: generate composed PNG maps (one panel per fold) for:
+  - radial thickness (`thickness_radial`, valid when `thickness_valid == 1`),
+  - outer/inner mean curvature (`H_oriented`, valid when `curvature_valid == 1`),
+  - outer/inner Gaussian curvature (`K_raw`, valid when `curvature_valid == 1`).
+
+Expected per-fold file pattern:
+
+`{results_dir}/{capsid}/{fold}/R{cyl_radius}_name.ext`
+
+For example:
+
+- `results/1cwp/5_0/R35_thickness_radial.csv`
+- `results/1cwp/5_0/R35_outer_curvature.csv`
+- `results/1cwp/5_0/R35_inner_curvature.csv`
+
+Usage:
+
+`python3 tools/make_maps.py --results results --capsid 1cwp --fold 2_0,2_1,3_0,5_0 --cyl_radius 35`
+
+Optional:
+
+- `--res` grid resolution per panel axis (default `500`), e.g. `--res 700`.
+
+Output files:
+
+- `results/{capsid}/R{cyl_radius}_thickness_map.png`
+- `results/{capsid}/R{cyl_radius}_outer_H_map.png`
+- `results/{capsid}/R{cyl_radius}_inner_H_map.png`
+- `results/{capsid}/R{cyl_radius}_outer_K_map.png`
+- `results/{capsid}/R{cyl_radius}_inner_K_map.png`
+
+Behavior notes:
+
+- Fold panel order follows the exact comma-separated order passed to `--fold`.
+- The script hard-fails if any requested fold directory or required CSV is missing.
+- Interpolation uses linear gridding with nearest-neighbor fallback only where linear is undefined.
+- Invalid/masked regions render as black.
+- Shared color ranges are computed from pooled valid values across all folds in each composed image using robust 1st/99th percentiles.
+- H/K maps use red (negative) → white (0) → blue (positive) diverging color mapping.
+
 The current code base on this branch builds:
 - the main executable `capsid_analyzer`,
 - structural summary tests,
