@@ -237,12 +237,11 @@ run_one_fold() {
 
   local run_label="${fold_name}"
   local log_dir="${RESULTS_DIR}/${pdbid}/${fold_name}"
-  local cyl_radius_flag=()
+  local capdat_cmd=()
 
   if [ -n "${cyl_radius}" ]; then
     run_label="${fold_name}_cyl_radius_${cyl_radius}"
     log_dir="${RESULTS_DIR}/${pdbid}/${fold_name}/cyl_radius_${cyl_radius}"
-    cyl_radius_flag=(--geometry_cylinder_radius "${cyl_radius}")
   fi
 
   local log_file="${log_dir}/output.log"
@@ -270,13 +269,20 @@ run_one_fold() {
   log_info "clean dir  : ${CLEAN_RESULTS_DIR}"
   log_info "=================================================="
 
-  set +e
-  "${CapDAT}" -i "${pdbid}" \
-    -l "${log_file}" \
-    --geometry-analysis \
-    --geometry_fold_name "${fold_name}" \
-    "${cyl_radius_flag[@]}" \
+  capdat_cmd=(
+    "${CapDAT}" -i "${pdbid}"
+    -l "${log_file}"
+    --geometry-analysis
+    --geometry_fold_name "${fold_name}"
     --clean-results-dir "${CLEAN_RESULTS_DIR}"
+  )
+
+  if [ -n "${cyl_radius}" ]; then
+    capdat_cmd+=(--geometry_cylinder_radius "${cyl_radius}")
+  fi
+
+  set +e
+  "${capdat_cmd[@]}"
   local status=$?
   set -e
 
