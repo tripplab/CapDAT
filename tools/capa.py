@@ -3194,6 +3194,408 @@ def _print_phase06_summary(report: Dict[str, Any]) -> None:
     except Exception: pass
     if report.get("warnings"): print("[WARN] Phase 6 completed with warnings. See phase06_report.json.")
 
+
+# ---------------------------------------------------------------------
+# Phase 7: mechanical and geometric distance-matrix comparison
+# ---------------------------------------------------------------------
+
+PHASE07_KEY_COLS = ["capside", "h", "patch_R", "fold"]
+PHASE07_CONDITION_COLS = ["h", "patch_R"]
+PHASE07_PRIMARY_REQUIRED_COLUMNS = ["capside", "fold", "h", "patch_R", "d_max_pct", "t", "Hout", "Hin"]
+PHASE07_PRIMARY_GEOM = ["t", "Hout", "Hin"]
+PHASE07_ALPHA = 0.05
+PHASE07_WEAK_R = 0.2
+
+
+def _phase07_obs_id(row: pd.Series) -> str:
+    return f"{row['capside']}|h={row['h']}|R={row['patch_R']}|fold={row['fold']}"
+
+
+def _phase07_condition_tag(h_value: Any, r_value: Any) -> str:
+    return f"h_{_format_condition_value(h_value)}_R_{_format_condition_value(r_value)}"
+
+
+def validate_phase07_input(df: pd.DataFrame) -> Dict[str, Any]:
+    missing = [c for c in PHASE07_PRIMARY_REQUIRED_COLUMNS if c not in df.columns]
+    missing_key = [c for c in PHASE07_KEY_COLS if c not in df.columns]
+    dup_rows = 0
+    dup_examples: List[Dict[str, Any]] = []
+    if not missing_key:
+        dup = df.duplicated(subset=PHASE07_KEY_COLS, keep=False)
+        dup_rows = int(dup.sum())
+        if dup_rows:
+            dup_examples = df.loc[dup, PHASE07_KEY_COLS].drop_duplicates().head(20).to_dict(orient="records")
+    nonfinite = {}
+    for c in ["d_max_pct", "t", "Hout", "Hin"]:
+        if c in df.columns:
+            vals = pd.to_numeric(df[c], errors="coerce")
+            n_bad = int((~np.isfinite(vals)).sum())
+            if n_bad:
+                nonfinite[c] = n_bad
+    return {
+        "required_columns_checked": PHASE07_PRIMARY_REQUIRED_COLUMNS,
+        "missing_columns": missing,
+        "missing_key_columns": missing_key,
+        "duplicate_key_status": {"is_unique": dup_rows == 0, "n_duplicate_rows": dup_rows, "duplicate_examples": dup_examples},
+        "nonfinite_counts": nonfinite,
+    }
+
+
+def make_observation_ids(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["fold"] = out["fold"].astype(str)
+    out["obs_id"] = out.apply(_phase07_obs_id, axis=1)
+    return out
+
+
+def prepare_phase07_condition_dataset(df: pd.DataFrame, h_value: Any, r_value: Any, variables: List[str]) -> Tuple[pd.DataFrame, int]:
+    cond = df[(df["h"] == h_value) & (df["patch_R"] == r_value)].copy()
+    for c in variables:
+        cond[c] = pd.to_numeric(cond[c], errors="coerce")
+    finite_mask = np.ones(len(cond), dtype=bool)
+    for c in variables:
+        finite_mask &= np.isfinite(cond[c].to_numpy(dtype=float))
+    filtered = cond.loc[finite_mask].copy()
+    filtered = filtered.sort_values(["capside", "fold"], key=lambda s: s.astype(str), kind="mergesort").reset_index(drop=True)
+    return filtered, int((~finite_mask).sum())
+
+
+def zscore_geometry_variables(condition_df: pd.DataFrame, variables: List[str]) -> Tuple[pd.DataFrame, List[str], Dict[str, Dict[str, float]], List[str]]:
+    out = condition_df.copy()
+    used: List[str] = []
+    stats: Dict[str, Dict[str, float]] = {}
+    flags: List[str] = []
+    for v in variables:
+        vals = pd.to_numeric(out[v], errors="coerce").to_numpy(dtype=float)
+        mean = float(np.mean(vals)) if len(vals) else np.nan
+        sd = float(np.std(vals, ddof=1)) if len(vals) > 1 else np.nan
+        stats[v] = {"mean": mean, "sd_ddof1": sd}
+        if not np.isfinite(sd) or sd == 0:
+            out[f"z_{v}"] = np.nan
+            flags.extend(["zero_geometry_variance", "geometry_variable_dropped"])
+        else:
+            out[f"z_{v}"] = (out[v] - mean) / sd
+            used.append(v)
+    if len(used) == 1:
+        flags.append("one_dimensional_geometry_distance")
+    return out, used, stats, _flag_string(flags).split(";") if _flag_string(flags) else []
+
+
+def compute_mechanical_distance(condition_df: pd.DataFrame, value_col: str = "d_max_pct") -> np.ndarray:
+    v = pd.to_numeric(condition_df[value_col], errors="coerce").to_numpy(dtype=float)
+    return np.abs(v[:, None] - v[None, :])
+
+
+def compute_geometric_distance(z_df: pd.DataFrame, variables_used: List[str]) -> np.ndarray:
+    if not variables_used:
+        return np.empty((0, 0))
+    z = z_df[[f"z_{v}" for v in variables_used]].to_numpy(dtype=float)
+    diff = z[:, None, :] - z[None, :, :]
+    return np.sqrt(np.sum(diff * diff, axis=2))
+
+
+def vectorize_upper_triangle(distance_matrix: np.ndarray) -> np.ndarray:
+    if distance_matrix.size == 0:
+        return np.array([], dtype=float)
+    idx = np.triu_indices(distance_matrix.shape[0], k=1)
+    return distance_matrix[idx].astype(float)
+
+
+def _pearson_np(x: np.ndarray, y: np.ndarray) -> float:
+    mask = np.isfinite(x) & np.isfinite(y)
+    x = x[mask]; y = y[mask]
+    if len(x) < 2 or np.std(x) == 0 or np.std(y) == 0:
+        return np.nan
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def compute_mantel_statistics(D_a: np.ndarray, D_b: np.ndarray) -> Dict[str, Any]:
+    a = vectorize_upper_triangle(D_a); b = vectorize_upper_triangle(D_b)
+    flags: List[str] = []
+    valid = True
+    if len(a) < 6 or len(b) < 6:
+        valid = False; flags.append("low_distance_pair_count")
+    if len(a) != len(b) or not (np.isfinite(a).all() and np.isfinite(b).all()):
+        valid = False; flags.append("invalid_distance_matrix")
+    if len(a) and (float(np.std(a)) == 0 or float(np.std(b)) == 0):
+        valid = False; flags.append("zero_distance_variance")
+        if float(np.std(a)) == 0: flags.append("zero_mechanical_distance_variance")
+        if float(np.std(b)) == 0: flags.append("zero_geometric_distance_variance")
+    pearson = _pearson_np(a, b) if valid else np.nan
+    spearman = _pearson_np(pd.Series(a).rank(method="average").to_numpy(), pd.Series(b).rank(method="average").to_numpy()) if valid else np.nan
+    if not np.isfinite(pearson):
+        valid = False
+        if "invalid_mantel_comparison" not in flags: flags.append("invalid_mantel_comparison")
+    return {"a_vec": a, "b_vec": b, "mantel_r_pearson": pearson, "mantel_r_spearman": spearman, "valid_comparison": bool(valid), "warning_flags": flags}
+
+
+def run_restricted_mantel_permutation(condition_df: pd.DataFrame, D_geom: np.ndarray, args: argparse.Namespace, seed_offset: int = 0) -> Tuple[Dict[str, Any], List[float]]:
+    rng = np.random.default_rng(int(args.seed) + seed_offset)
+    geom_vec = vectorize_upper_triangle(D_geom)
+    reps: List[float] = []
+    capsid_sizes = condition_df.groupby("capside", sort=False)["fold"].size()
+    any_exchangeable = bool((capsid_sizes > 1).any())
+    for _ in range(int(args.perm_n)):
+        if not any_exchangeable:
+            continue
+        perm = condition_df["d_max_pct"].to_numpy(dtype=float).copy()
+        for _, idx in condition_df.groupby("capside", sort=False).groups.items():
+            locs = np.array(list(idx), dtype=int)
+            if len(locs) > 1:
+                perm[locs] = rng.permutation(perm[locs])
+        Dp = np.abs(perm[:, None] - perm[None, :])
+        r = _pearson_np(vectorize_upper_triangle(Dp), geom_vec)
+        if np.isfinite(r):
+            reps.append(float(r))
+    flags = [] if any_exchangeable else ["restricted_permutation_not_possible"]
+    return _phase07_perm_summary(reps, int(args.perm_n), "restricted_within_capside_within_h_patch_R", flags), reps
+
+
+def run_global_mantel_permutation(condition_df: pd.DataFrame, D_geom: np.ndarray, args: argparse.Namespace, seed_offset: int = 1000000) -> Tuple[Dict[str, Any], List[float]]:
+    rng = np.random.default_rng(int(args.seed) + seed_offset)
+    geom_vec = vectorize_upper_triangle(D_geom)
+    reps: List[float] = []
+    d = condition_df["d_max_pct"].to_numpy(dtype=float)
+    for _ in range(int(args.perm_n)):
+        perm = rng.permutation(d)
+        r = _pearson_np(vectorize_upper_triangle(np.abs(perm[:, None] - perm[None, :])), geom_vec)
+        if np.isfinite(r): reps.append(float(r))
+    return _phase07_perm_summary(reps, int(args.perm_n), "global_label_permutation_within_h_patch_R", ["global_permutation_diagnostic_only"]), reps
+
+
+def _phase07_perm_summary(reps: List[float], requested: int, method: str, flags: List[str]) -> Dict[str, Any]:
+    arr = np.array(reps, dtype=float)
+    out = {"perm_method": method, "perm_n_requested": int(requested), "perm_n_successful": int(len(arr)), "perm_r_mean": np.nan, "perm_r_sd": np.nan, "perm_r_min": np.nan, "perm_r_max": np.nan, "p_perm_two_sided": np.nan, "p_perm_greater": np.nan, "p_perm_less": np.nan, "warning_flags": list(flags)}
+    if requested > 0 and len(arr) < 0.70 * requested:
+        out["warning_flags"].append("unstable_permutation")
+    if len(arr) == 0:
+        out["warning_flags"].append("permutation_failed")
+    else:
+        out.update({"perm_r_mean": float(arr.mean()), "perm_r_sd": float(arr.std(ddof=1)) if len(arr) > 1 else 0.0, "perm_r_min": float(arr.min()), "perm_r_max": float(arr.max())})
+    return out
+
+
+def _phase07_finalize_pvals(perm: Dict[str, Any], observed_r: float) -> Dict[str, Any]:
+    # p-values are filled by caller with stored reps; placeholder retained for schema clarity.
+    return perm
+
+
+def _phase07_pvals_from_reps(perm: Dict[str, Any], reps: List[float], observed_r: float) -> Dict[str, Any]:
+    out = dict(perm)
+    arr = np.array(reps, dtype=float)
+    if len(arr) and np.isfinite(observed_r):
+        out["p_perm_two_sided"] = float((1 + np.sum(np.abs(arr) >= abs(observed_r))) / (1 + len(arr)))
+        out["p_perm_greater"] = float((1 + np.sum(arr >= observed_r)) / (1 + len(arr)))
+        out["p_perm_less"] = float((1 + np.sum(arr <= observed_r)) / (1 + len(arr)))
+    return out
+
+
+def _phase07_interpretation(valid: bool, r: float, p: float) -> str:
+    if not valid:
+        return "comparison_invalid"
+    if np.isfinite(r) and np.isfinite(p) and r > 0 and p <= PHASE07_ALPHA:
+        return "positive_distance_association_empirical"
+    if np.isfinite(r) and np.isfinite(p) and r < 0 and p <= PHASE07_ALPHA:
+        return "negative_distance_association_empirical"
+    if np.isfinite(r) and abs(r) < PHASE07_WEAK_R:
+        return "weak_or_no_distance_association"
+    return "inconclusive_distance_association"
+
+
+def build_distance_pair_table(condition_df: pd.DataFrame, D_mech: np.ndarray, D_geom: np.ndarray, variables_used: List[str], flags: List[str]) -> pd.DataFrame:
+    rows = []
+    n = len(condition_df)
+    flag_str = _flag_string(flags)
+    for i in range(n):
+        for j in range(i + 1, n):
+            ri = condition_df.iloc[i]; rj = condition_df.iloc[j]
+            row = {"h": _json_scalar(ri["h"]), "patch_R": _json_scalar(ri["patch_R"]), "obs_i": ri["obs_id"], "obs_j": rj["obs_id"], "capside_i": ri["capside"], "fold_i": ri["fold"], "capside_j": rj["capside"], "fold_j": rj["fold"], "same_capside": bool(ri["capside"] == rj["capside"]), "same_fold": bool(ri["fold"] == rj["fold"]), "d_max_pct_i": ri["d_max_pct"], "d_max_pct_j": rj["d_max_pct"], "D_mech": D_mech[i, j], "t_i": ri["t"], "Hout_i": ri["Hout"], "Hin_i": ri["Hin"], "t_j": rj["t"], "Hout_j": rj["Hout"], "Hin_j": rj["Hin"], "D_geom_simple": D_geom[i, j], "phase07_warning_flags": flag_str}
+            for v in PHASE07_PRIMARY_GEOM:
+                row[f"z_{v}_i"] = ri.get(f"z_{v}", np.nan)
+                row[f"z_{v}_j"] = rj.get(f"z_{v}", np.nan)
+            rows.append(row)
+    cols = ["h","patch_R","obs_i","obs_j","capside_i","fold_i","capside_j","fold_j","same_capside","same_fold","d_max_pct_i","d_max_pct_j","D_mech","t_i","Hout_i","Hin_i","t_j","Hout_j","Hin_j","z_t_i","z_Hout_i","z_Hin_i","z_t_j","z_Hout_j","z_Hin_j","D_geom_simple","phase07_warning_flags"]
+    return pd.DataFrame(rows)[cols] if rows else pd.DataFrame(columns=cols)
+
+
+def make_phase07_heatmaps(condition_df: pd.DataFrame, D_mech: np.ndarray, D_geom: np.ndarray, h_value: Any, r_value: Any, tag: str, summary_row: Dict[str, Any], args: argparse.Namespace) -> Tuple[List[str], List[str]]:
+    if args.no_plots:
+        return [], []
+    files: List[str] = []; warnings: List[str] = []
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+        labels = condition_df["obs_id"].astype(str).tolist()
+        show_labels = len(labels) <= 25
+        for name, mat, title in [("D_mech", D_mech, "Mechanical distance D_mech"), ("D_geom_simple", D_geom, "Simple geometric distance D_geom_simple")]:
+            fig, ax = plt.subplots(figsize=(max(5, min(12, len(labels) * 0.35)), max(4, min(12, len(labels) * 0.35))))
+            im = ax.imshow(mat, interpolation="nearest", aspect="auto")
+            ax.set_title(f"Phase 7 {title}\nh={h_value}, patch_R={r_value}")
+            if show_labels:
+                ax.set_xticks(range(len(labels))); ax.set_yticks(range(len(labels)))
+                ax.set_xticklabels(labels, rotation=90, fontsize=6); ax.set_yticklabels(labels, fontsize=6)
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            fig.tight_layout()
+            path = args.outdir / f"phase07_heatmap_{name}_{tag}.png"
+            fig.savefig(path, dpi=150); plt.close(fig); files.append(str(path))
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4.8))
+        for ax, mat, title in [(axes[0], D_mech, "A: D_mech"), (axes[1], D_geom, "B: D_geom_simple")]:
+            im = ax.imshow(mat, interpolation="nearest", aspect="auto"); ax.set_title(title); fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        axes[2].scatter(vectorize_upper_triangle(D_geom), vectorize_upper_triangle(D_mech), s=18, alpha=0.8)
+        axes[2].set_xlabel("D_geom_simple"); axes[2].set_ylabel("D_mech")
+        axes[2].set_title(f"C: upper-triangle distances\nr={summary_row.get('mantel_r_pearson', np.nan):.3g}, p={summary_row.get('p_perm_two_sided', np.nan):.3g}")
+        fig.suptitle(f"Phase 7 distance comparison: h={h_value}, patch_R={r_value}")
+        fig.tight_layout()
+        path = args.outdir / f"phase07_heatmap_comparison_{tag}.png"
+        fig.savefig(path, dpi=150); plt.close(fig); files.append(str(path))
+    except Exception as exc:
+        warnings.append(f"plot_failed:{exc}")
+    return files, warnings
+
+
+def write_phase07_summary(path: Path, report: Dict[str, Any], summary_df: pd.DataFrame) -> None:
+    lines = [f"Phase 7 distance-matrix comparison: {report['status']}", "", f"Valid h/patch_R conditions: {report.get('n_valid_conditions', 0)} / {report.get('n_conditions', 0)}"]
+    if summary_df.empty:
+        lines.append("No valid Mantel comparisons were produced.")
+    else:
+        lines.append("")
+        lines.append("Condition results:")
+        for _, row in summary_df.iterrows():
+            lines.append(f"  - h={row['h']}, patch_R={row['patch_R']}: n={row['n_observations']}, variables={row['variables_used_matrix_b']}, Mantel Pearson r={row['mantel_r_pearson']:.6g} empirical restricted-permutation p={row['p_perm_two_sided']:.6g}, label={row['interpretation_label']}")
+    lines.append("")
+    lines.append("Interpretation note: Phase 7 compares similarity patterns descriptively using permutation-based matrix association statistics. It does not establish causal explanation.")
+    if report.get("warnings"):
+        lines.append("Warnings:")
+        lines.extend(f"  - {w}" for w in report["warnings"])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def run_phase07(input_df: pd.DataFrame, phase01_report: Dict, phase02_report: Dict, phase03_report: Dict, phase04_report: Dict, phase05_report: Dict, phase06_report: Dict, args: argparse.Namespace) -> Dict[str, Any]:
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    validation = validate_phase07_input(input_df)
+    warnings: List[str] = []
+    severe: List[str] = []
+    output_files: Dict[str, Any] = {"mantel_summary": str(args.outdir / "phase07_mantel_summary.csv"), "report": str(args.outdir / "phase07_report.json"), "summary": str(args.outdir / "phase07_summary.txt"), "distance_matrices": [], "pair_tables": [], "figures": []}
+    if phase01_report.get("status") != "PASS" or phase02_report.get("status") == "FAIL":
+        severe.append("upstream_required_phase_failed")
+    for pn, rep in [("phase02", phase02_report), ("phase03", phase03_report), ("phase04", phase04_report), ("phase05", phase05_report), ("phase06", phase06_report)]:
+        if rep.get("status") == "WARN": warnings.append(f"upstream_{pn}_warn")
+        if pn == "phase06" and rep.get("status") == "FAIL": warnings.append("upstream_phase06_failed_simple_geometry_only")
+    if validation["missing_key_columns"] or "d_max_pct" in validation["missing_columns"]:
+        severe.append("missing_required_column")
+    if validation["duplicate_key_status"]["n_duplicate_rows"]:
+        severe.append("duplicate_observation_key")
+    if all(v in validation["missing_columns"] for v in PHASE07_PRIMARY_GEOM):
+        severe.append("missing_all_geometry_variables")
+    elif any(v in validation["missing_columns"] for v in PHASE07_PRIMARY_GEOM):
+        severe.append("missing_required_column")
+    if severe:
+        pd.DataFrame().to_csv(args.outdir / "phase07_mantel_summary.csv", index=False)
+        report = _phase07_report(input_df, validation, output_files, warnings, severe, "FAIL", phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, phase06_report, args, [], [])
+        (args.outdir / "phase07_report.json").write_text(json.dumps(_nan_to_none(report), indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+        write_phase07_summary(args.outdir / "phase07_summary.txt", report, pd.DataFrame())
+        return report
+
+    work = make_observation_ids(input_df)
+    for c in ["d_max_pct", "t", "Hout", "Hin"]:
+        work[c] = pd.to_numeric(work[c], errors="coerce")
+    summary_rows: List[Dict[str, Any]] = []
+    perm_rows: List[Dict[str, Any]] = []
+    condition_reports: List[Dict[str, Any]] = []
+    dropped_zero: Dict[str, List[str]] = {}
+    conditions = work[["h", "patch_R"]].drop_duplicates().sort_values(["h", "patch_R"], key=lambda s: s.astype(str), kind="mergesort")
+    for cond_i, cond in conditions.reset_index(drop=True).iterrows():
+        h_value = cond["h"]; r_value = cond["patch_R"]; tag = _phase07_condition_tag(h_value, r_value)
+        cflags: List[str] = []
+        cdf, n_excluded = prepare_phase07_condition_dataset(work, h_value, r_value, ["d_max_pct"] + PHASE07_PRIMARY_GEOM)
+        if n_excluded:
+            cflags.append(f"complete_case_rows_excluded={n_excluded}")
+        if len(cdf) < 4:
+            cflags.append("insufficient_observations_for_distance_matrix")
+            condition_reports.append({"h": _json_scalar(h_value), "patch_R": _json_scalar(r_value), "n_valid_observations": int(len(cdf)), "valid": False, "warning_flags": cflags})
+            warnings.extend(cflags)
+            continue
+        zdf, geom_used, zstats, zflags = zscore_geometry_variables(cdf, PHASE07_PRIMARY_GEOM)
+        cflags.extend(zflags)
+        dropped = [v for v in PHASE07_PRIMARY_GEOM if v not in geom_used]
+        if dropped: dropped_zero[tag] = dropped
+        if not geom_used:
+            cflags.append("invalid_distance_matrix")
+            condition_reports.append({"h": _json_scalar(h_value), "patch_R": _json_scalar(r_value), "n_valid_observations": int(len(cdf)), "valid": False, "variables_used": geom_used, "warning_flags": cflags})
+            warnings.extend(cflags)
+            continue
+        D_mech = compute_mechanical_distance(zdf)
+        D_geom = compute_geometric_distance(zdf, geom_used)
+        obs_ids = zdf["obs_id"].tolist()
+        mech_path = args.outdir / f"phase07_D_mech_{tag}.csv"
+        geom_path = args.outdir / f"phase07_D_geom_simple_{tag}.csv"
+        pd.DataFrame(D_mech, index=obs_ids, columns=obs_ids).to_csv(mech_path)
+        pd.DataFrame(D_geom, index=obs_ids, columns=obs_ids).to_csv(geom_path)
+        output_files["distance_matrices"].extend([str(mech_path), str(geom_path)])
+        pair_df = build_distance_pair_table(zdf, D_mech, D_geom, geom_used, cflags)
+        pair_path = args.outdir / f"phase07_distance_pairs_{tag}.csv"
+        pair_df.to_csv(pair_path, index=False); output_files["pair_tables"].append(str(pair_path))
+        stats = compute_mantel_statistics(D_mech, D_geom)
+        cflags.extend(stats["warning_flags"])
+        perm, reps = run_restricted_mantel_permutation(zdf, D_geom, args, seed_offset=int(cond_i) * 1000)
+        perm = _phase07_pvals_from_reps(perm, reps, stats["mantel_r_pearson"])
+        cflags.extend(perm.get("warning_flags", []))
+        interp = _phase07_interpretation(bool(stats["valid_comparison"]), stats["mantel_r_pearson"], perm["p_perm_two_sided"])
+        row = {"h": _json_scalar(h_value), "patch_R": _json_scalar(r_value), "comparison_id": "D_mech_vs_D_geom_simple", "matrix_a": "D_mech", "matrix_b": "D_geom_simple", "n_observations": int(len(zdf)), "n_distance_pairs": int(len(stats["a_vec"])), "variables_used_matrix_a": "d_max_pct", "variables_used_matrix_b": ";".join(geom_used), "standardization_scope": "within_h_patch_R_condition", "standardization_method": "z_score_sample_sd_ddof_1", "mantel_r_pearson": stats["mantel_r_pearson"], "mantel_r_spearman": stats["mantel_r_spearman"], **{k: perm[k] for k in ["perm_method","perm_n_requested","perm_n_successful","p_perm_two_sided","p_perm_greater","p_perm_less","perm_r_mean","perm_r_sd","perm_r_min","perm_r_max"]}, "valid_comparison": bool(stats["valid_comparison"] and np.isfinite(perm["p_perm_two_sided"])), "interpretation_label": interp, "warning_flags": _flag_string(cflags)}
+        summary_rows.append(row)
+        if args.save_mantel_permutations:
+            for pi, rv in enumerate(reps, start=1):
+                perm_rows.append({"h": _json_scalar(h_value), "patch_R": _json_scalar(r_value), "comparison_id": "D_mech_vs_D_geom_simple", "permutation_method": perm["perm_method"], "permutation_index": pi, "mantel_r_perm": rv})
+        if args.mantel_global_permutation:
+            gperm, greps = run_global_mantel_permutation(zdf, D_geom, args, seed_offset=int(cond_i) * 1000 + 500000)
+            gperm = _phase07_pvals_from_reps(gperm, greps, stats["mantel_r_pearson"])
+            grow = dict(row); grow.update({k: gperm[k] for k in ["perm_method","perm_n_requested","perm_n_successful","p_perm_two_sided","p_perm_greater","p_perm_less","perm_r_mean","perm_r_sd","perm_r_min","perm_r_max"]}); grow["warning_flags"] = _flag_string(cflags + gperm.get("warning_flags", [])); summary_rows.append(grow)
+            if args.save_mantel_permutations:
+                for pi, rv in enumerate(greps, start=1):
+                    perm_rows.append({"h": _json_scalar(h_value), "patch_R": _json_scalar(r_value), "comparison_id": "D_mech_vs_D_geom_simple", "permutation_method": gperm["perm_method"], "permutation_index": pi, "mantel_r_perm": rv})
+        fig_files, fig_warnings = make_phase07_heatmaps(zdf, D_mech, D_geom, h_value, r_value, tag, row, args)
+        output_files["figures"].extend(fig_files); cflags.extend(["plot_failed" for _ in fig_warnings]); warnings.extend(fig_warnings)
+        condition_reports.append({"h": _json_scalar(h_value), "patch_R": _json_scalar(r_value), "n_valid_observations": int(len(zdf)), "variables_used": geom_used, "standardization": zstats, "valid": bool(row["valid_comparison"]), "warning_flags": _flag_string(cflags)})
+        warnings.extend([f for f in cflags if not str(f).startswith("complete_case_rows_excluded=")])
+    summary_df = pd.DataFrame(summary_rows)
+    summary_df.to_csv(args.outdir / "phase07_mantel_summary.csv", index=False)
+    if args.save_mantel_permutations:
+        pd.DataFrame(perm_rows).to_csv(args.outdir / "phase07_mantel_permutation_distribution.csv", index=False)
+        output_files["permutation_distribution"] = str(args.outdir / "phase07_mantel_permutation_distribution.csv")
+    any_valid = bool((not summary_df.empty) and summary_df["valid_comparison"].astype(bool).any())
+    if not output_files["distance_matrices"]:
+        severe.append("no_valid_distance_matrix")
+    if not any_valid:
+        severe.append("no_valid_mantel_comparison")
+    status = "FAIL" if severe else ("WARN" if warnings or any(summary_df.get("warning_flags", pd.Series(dtype=str)).astype(str).str.len() > 0) else "PASS")
+    report = _phase07_report(work, validation, output_files, sorted(set(warnings)), sorted(set(severe)), status, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, phase06_report, args, condition_reports, dropped_zero)
+    report["n_valid_conditions"] = int(sum(1 for c in condition_reports if c.get("valid")))
+    (args.outdir / "phase07_report.json").write_text(json.dumps(_nan_to_none(report), indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+    write_phase07_summary(args.outdir / "phase07_summary.txt", report, summary_df)
+    return report
+
+
+def _phase07_report(df: pd.DataFrame, validation: Dict[str, Any], output_files: Dict[str, Any], warnings: List[str], severe: List[str], status: str, p1: Dict, p2: Dict, p3: Dict, p4: Dict, p5: Dict, p6: Dict, args: argparse.Namespace, condition_reports: List[Dict[str, Any]], dropped_zero: Dict[str, List[str]]) -> Dict[str, Any]:
+    return {"phase": 7, "status": status, "timestamp": datetime.now(timezone.utc).isoformat(), "input_file": str(args.input), "output_directory": str(args.outdir), "upstream_phase01_status": p1.get("status"), "upstream_phase02_status": p2.get("status"), "upstream_phase03_status": p3.get("status"), "upstream_phase04_status": p4.get("status"), "upstream_phase05_status": p5.get("status"), "upstream_phase06_status": p6.get("status"), "required_columns_checked": validation.get("required_columns_checked", PHASE07_PRIMARY_REQUIRED_COLUMNS), "missing_columns": validation.get("missing_columns", []), "n_rows_input": int(len(df)), "n_capsides": int(df["capside"].nunique(dropna=True)) if "capside" in df.columns else 0, "n_folds": int(df["fold"].astype(str).nunique(dropna=True)) if "fold" in df.columns else 0, "h_values": _sorted_json_values(df["h"]) if "h" in df.columns else [], "patch_R_values": _sorted_json_values(df["patch_R"]) if "patch_R" in df.columns else [], "n_conditions": int(df[["h", "patch_R"]].drop_duplicates().shape[0]) if all(c in df.columns for c in ["h", "patch_R"]) else 0, "observation_key": PHASE07_KEY_COLS, "condition_cols": PHASE07_CONDITION_COLS, "obs_id_format": "capside + '|h=' + h + '|R=' + patch_R + '|fold=' + fold", "primary_mechanical_variable": "d_max_pct", "primary_geometry_variables": PHASE07_PRIMARY_GEOM, "distance_definitions": {"D_mech": "abs(d_max_pct_i - d_max_pct_j)", "D_geom_simple": "Euclidean distance over condition-level z-scored t, Hout, Hin, after dropping zero-variance variables"}, "standardization_method": "z_score_sample_sd_ddof_1", "standardization_scope": "within each fixed h and patch_R condition", "geometry_variables_dropped_due_to_zero_variance": dropped_zero, "mantel_statistic": "Pearson and Spearman correlations of upper-triangle distance entries excluding diagonal", "permutation_method_primary": "restricted_within_capside_within_h_patch_R", "perm_n": int(args.perm_n), "seed": int(args.seed), "interpretation_thresholds": {"empirical_p_alpha": PHASE07_ALPHA, "weak_abs_r_threshold": PHASE07_WEAK_R}, "optional_analyses_enabled": {"mantel_global_permutation": bool(args.mantel_global_permutation), "save_mantel_permutations": bool(args.save_mantel_permutations), "plots": not bool(args.no_plots), "centered_distance": False, "composite_distance": False}, "condition_reports": condition_reports, "output_files": output_files, "warnings": sorted(set(warnings)), "severe_flags": sorted(set(severe))}
+
+
+def _print_phase07_summary(report: Dict[str, Any]) -> None:
+    print(f"[{report.get('status')}] Phase 7 completed.")
+    files = report.get("output_files", {})
+    print(f"[INFO] Mantel summary table: {files.get('mantel_summary', 'not written')}")
+    print(f"[INFO] Phase 7 report: {files.get('report', 'not written')}")
+    summary_path = Path(files.get("mantel_summary", ""))
+    if summary_path.exists() and summary_path.stat().st_size > 0:
+        try:
+            df = pd.read_csv(summary_path)
+            for _, row in df[df.get("perm_method", "") == "restricted_within_capside_within_h_patch_R"].iterrows():
+                print(f"[DIST] h={row['h']} patch_R={row['patch_R']} comparison={row['comparison_id']} r={row['mantel_r_pearson']:.6g} p_perm={row['p_perm_two_sided']:.6g} label={row['interpretation_label']}")
+        except Exception:
+            pass
+    print(f"[INFO] Distance matrices written under: {report.get('output_directory')}")
+    if report.get("warnings"):
+        print("[WARN] Phase 7 completed with warnings. See phase07_report.json.")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -3206,9 +3608,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--phase",
-        choices=["1", "2", "3", "4", "5", "6"],
+        choices=["1", "2", "3", "4", "5", "6", "7"],
         default="1",
-        help="Analysis phase to run. Phase 1 is the default. Phase 6 runs Phases 1 through 6, then computes composite geometric descriptors and comparisons."
+        help="Analysis phase to run. Phase 1 is the default. Phase 7 runs Phases 1 through 7, then compares mechanical and geometric distance matrices."
     )
 
     parser.add_argument(
@@ -3236,7 +3638,7 @@ def parse_args() -> argparse.Namespace:
         "--outdir",
         default=Path("results"),
         type=Path,
-        help="Output directory for Phase 2, Phase 3, Phase 4, Phase 5, and Phase 6 artifacts."
+        help="Output directory for Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, and Phase 7 artifacts."
     )
 
     parser.add_argument(
@@ -3291,7 +3693,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-plots",
         action="store_true",
-        help="Skip Phase 3 centered scatterplots, Phase 4 ordinal ranking plots, Phase 5 model comparison figures, and Phase 6 figures."
+        help="Skip Phase 3 centered scatterplots, Phase 4 ordinal ranking plots, Phase 5 model comparison figures, Phase 6 figures, and Phase 7 heatmaps."
     )
 
     parser.add_argument(
@@ -3360,6 +3762,19 @@ def parse_args() -> argparse.Namespace:
         default=0.90,
         type=float,
         help="Phase 6 absolute Pearson-r threshold for high predictor redundancy. Default: 0.90."
+    )
+
+
+    parser.add_argument(
+        "--save-mantel-permutations",
+        action="store_true",
+        help="Save full Phase 7 Mantel permutation distributions."
+    )
+
+    parser.add_argument(
+        "--mantel-global-permutation",
+        action="store_true",
+        help="Also run Phase 7 diagnostic global-label Mantel permutation within h/patch_R conditions."
     )
 
     parser.add_argument(
@@ -3542,9 +3957,29 @@ def main() -> int:
                 pass
     phase06_report = run_phase06(phase06_input_df, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, args)
     _print_phase06_summary(phase06_report)
-    if phase06_report["status"] == "FAIL":
+
+    if args.phase == "6":
+        if phase06_report["status"] == "FAIL":
+            return 1
+        if args.fail_on_warning and phase06_report["status"] != "PASS":
+            return 1
+        return 0
+
+    phase07_input_df = phase06_input_df
+    for candidate in [args.outdir / "phase06_composite_geometry.csv", args.outdir / "phase03_centered_geometry.csv", centered_path, args.output]:
+        if candidate.exists() and candidate.stat().st_size > 0:
+            try:
+                tmp = pd.read_csv(candidate)
+                if all(c in tmp.columns for c in ["capside", "fold", "h", "patch_R", "d_max_pct", "t", "Hout", "Hin"]):
+                    phase07_input_df = tmp
+                    break
+            except Exception:
+                pass
+    phase07_report = run_phase07(phase07_input_df, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, phase06_report, args)
+    _print_phase07_summary(phase07_report)
+    if phase07_report["status"] == "FAIL":
         return 1
-    if args.fail_on_warning and phase06_report["status"] != "PASS":
+    if args.fail_on_warning and phase07_report["status"] != "PASS":
         return 1
     return 0
 
