@@ -3596,6 +3596,490 @@ def _print_phase07_summary(report: Dict[str, Any]) -> None:
         print("[WARN] Phase 7 completed with warnings. See phase07_report.json.")
 
 
+# ---------------------------------------------------------------------
+# Phase 8: geometric anisotropy versus mechanical anisotropy
+# ---------------------------------------------------------------------
+
+PHASE08_GROUP_COLS = ["capside", "h", "patch_R"]
+PHASE08_CONDITION_COLS = ["h", "patch_R"]
+PHASE08_REQUIRED_KEY_COLUMNS = ["capside", "fold", "h", "patch_R"]
+PHASE08_PRIMARY_VARIABLES = ["d_max_pct", "t", "Hout", "Hin"]
+PHASE08_METRICS = ["A_mech", "A_t", "A_Hout", "A_Hin"]
+PHASE08_GEOM_COMPARISONS = [
+    ("A_mech_vs_A_t", "A_t", "A_mech"),
+    ("A_mech_vs_A_Hout", "A_Hout", "A_mech"),
+    ("A_mech_vs_A_Hin", "A_Hin", "A_mech"),
+]
+PHASE08_TOP_COMPARISONS = [
+    ("top_A_mech_vs_top_A_t", "A_t"),
+    ("top_A_mech_vs_top_A_Hout", "A_Hout"),
+    ("top_A_mech_vs_top_A_Hin", "A_Hin"),
+]
+PHASE08_INTERPRETATION_THRESHOLDS = {
+    "strong_abs_spearman_rho": 0.7,
+    "moderate_abs_spearman_rho": 0.4,
+}
+
+
+def _phase08_flag_string(flags: List[str]) -> str:
+    return ";".join(sorted(dict.fromkeys([f for f in flags if f])))
+
+
+def _phase08_safe_tag(value: Any) -> str:
+    text = str(value).strip().replace("-", "m").replace(".", "p")
+    return "".join(ch if ch.isalnum() else "_" for ch in text)
+
+
+def validate_phase08_input(df: pd.DataFrame) -> Dict[str, Any]:
+    missing_keys = [c for c in PHASE08_REQUIRED_KEY_COLUMNS if c not in df.columns]
+    missing = missing_keys + (["d_max_pct"] if "d_max_pct" not in df.columns else [])
+    missing_geom = [c for c in ["t", "Hout", "Hin"] if c not in df.columns]
+    duplicate_rows = 0
+    duplicate_examples: List[Dict[str, Any]] = []
+    if not missing_keys:
+        dup = df.duplicated(subset=OBSERVATION_KEY, keep=False)
+        duplicate_rows = int(dup.sum())
+        if duplicate_rows:
+            duplicate_examples = df.loc[dup, OBSERVATION_KEY].drop_duplicates().head(20).to_dict(orient="records")
+    nonfinite: Dict[str, int] = {}
+    for col in PHASE08_PRIMARY_VARIABLES:
+        if col in df.columns:
+            values = pd.to_numeric(df[col], errors="coerce")
+            nonfinite[col] = int((~np.isfinite(values)).sum())
+    return {
+        "missing_columns": missing,
+        "missing_geometry_columns": missing_geom,
+        "duplicate_key_status": {"observation_key": OBSERVATION_KEY, "is_unique": duplicate_rows == 0, "n_duplicate_rows": duplicate_rows, "duplicate_examples": duplicate_examples},
+        "nonfinite_counts": nonfinite,
+    }
+
+
+def _phase08_variable_summary(group: pd.DataFrame, variable: str, denominator_kind: str, args: argparse.Namespace) -> Dict[str, Any]:
+    flags: List[str] = []
+    if variable not in group.columns:
+        flags.append(f"missing_{variable}")
+        return {"metric": np.nan, "stats": {}, "flags": flags}
+    values = pd.to_numeric(group[variable], errors="coerce")
+    valid = group.loc[np.isfinite(values), ["fold"]].copy()
+    valid[variable] = values[np.isfinite(values)].astype(float)
+    n = int(valid["fold"].astype(str).nunique(dropna=True))
+    if variable in ["d_max_pct", "t", "Hout", "Hin"] and int((~np.isfinite(values)).sum()) > 0:
+        flags.append(f"nonfinite_{variable}")
+    stats: Dict[str, Any] = {
+        f"n_valid_folds_{variable}": n,
+        f"folds_used_{variable}": _semicolon_join(valid["fold"]) if not valid.empty else "",
+    }
+    if valid.empty:
+        for name in ["mean", "median", "sd", "min", "max", "range"]:
+            stats[f"{name}_{variable}"] = np.nan
+        stats[f"fold_min_{variable}"] = ""
+        stats[f"fold_max_{variable}"] = ""
+    else:
+        vals = valid[variable].astype(float)
+        vmin = float(vals.min()); vmax = float(vals.max())
+        stats.update({
+            f"mean_{variable}": float(vals.mean()),
+            f"median_{variable}": float(vals.median()),
+            f"sd_{variable}": float(vals.std(ddof=1)) if len(vals) > 1 else np.nan,
+            f"min_{variable}": vmin,
+            f"max_{variable}": vmax,
+            f"range_{variable}": vmax - vmin,
+            f"fold_min_{variable}": _semicolon_join(valid.loc[vals.eq(vmin), "fold"]),
+            f"fold_max_{variable}": _semicolon_join(valid.loc[vals.eq(vmax), "fold"]),
+        })
+        if denominator_kind == "mean_abs":
+            stats[f"mean_abs_{variable}"] = float(vals.abs().mean())
+    metric = np.nan
+    if n < 2:
+        flags.append("insufficient_folds_for_anisotropy")
+    else:
+        if n < int(args.anisotropy_min_folds):
+            flags.append("low_fold_count_for_anisotropy")
+        denominator = float(valid[variable].abs().mean()) if denominator_kind == "mean_abs" else float(valid[variable].mean())
+        if not np.isfinite(denominator) or denominator <= 0:
+            flags.append("invalid_anisotropy_denominator")
+        else:
+            metric = float((valid[variable].max() - valid[variable].min()) / denominator)
+    return {"metric": metric, "stats": stats, "flags": flags}
+
+
+def compute_phase08_capsid_anisotropy(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    work = df.copy()
+    if "fold" in work.columns:
+        work["fold"] = work["fold"].astype(str)
+    for key, group in work.groupby(PHASE08_GROUP_COLS, sort=True, dropna=False):
+        capside, h_value, r_value = key
+        row: Dict[str, Any] = {"capside": capside, "h": h_value, "patch_R": r_value}
+        row["folds_present"] = _semicolon_join(group["fold"])
+        row["n_folds_total"] = int(group["fold"].astype(str).nunique(dropna=True))
+        flags: List[str] = []
+        specs = {
+            "d_max_pct": ("A_mech", "mean"),
+            "t": ("A_t", "mean"),
+            "Hout": ("A_Hout", "mean_abs"),
+            "Hin": ("A_Hin", "mean_abs"),
+        }
+        for variable, (metric_col, denom_kind) in specs.items():
+            result = _phase08_variable_summary(group, variable, denom_kind, args)
+            row[metric_col] = result["metric"]
+            row.update(result["stats"])
+            flags.extend(result["flags"])
+        row["A_mech_pct"] = row["A_mech"]
+        # Required aliases for curvature mean denominators in the primary table.
+        row.setdefault("mean_abs_Hout", row.get("mean_Hout", np.nan))
+        row.setdefault("mean_abs_Hin", row.get("mean_Hin", np.nan))
+        if not any(np.isfinite(row.get(m, np.nan)) for m in ["A_t", "A_Hout", "A_Hin"]):
+            flags.append("missing_geometric_anisotropy")
+        row["phase08_warning_flags"] = _phase08_flag_string(flags)
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return compute_anisotropy_ranks(out, args)
+
+
+def compute_anisotropy_ranks(anisotropy_df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    out = anisotropy_df.copy()
+    rank_cols = {"A_mech": "rank_A_mech", "A_t": "rank_A_t", "A_Hout": "rank_A_Hout", "A_Hin": "rank_A_Hin"}
+    top_cols = {"A_mech": "is_most_mechanically_anisotropic", "A_t": "is_most_t_anisotropic", "A_Hout": "is_most_Hout_anisotropic", "A_Hin": "is_most_Hin_anisotropic"}
+    for metric, rank_col in rank_cols.items():
+        out[rank_col] = np.nan
+        out[top_cols[metric]] = False
+        if metric not in out.columns:
+            continue
+        out[rank_col] = out.groupby(PHASE08_CONDITION_COLS, sort=False, dropna=False)[metric].rank(method=args.rank_method, ascending=False)
+        for _, idx in out.groupby(PHASE08_CONDITION_COLS, sort=False, dropna=False).groups.items():
+            sub = out.loc[idx]
+            vals = pd.to_numeric(sub[metric], errors="coerce")
+            if vals.notna().any():
+                maxv = vals.max()
+                top_mask = vals.eq(maxv) & vals.notna()
+                out.loc[sub.index[top_mask], top_cols[metric]] = True
+                if int(top_mask.sum()) > 1:
+                    out.loc[sub.index[top_mask], "phase08_warning_flags"] = out.loc[sub.index[top_mask], "phase08_warning_flags"].apply(lambda x: _append_flag(x, "tied_anisotropy_rank"))
+    return out.sort_values(["h", "patch_R", "rank_A_mech", "capside"], kind="mergesort").reset_index(drop=True)
+
+
+def _phase08_corrs(x: pd.Series, y: pd.Series) -> Tuple[float, float, float]:
+    return float(x.corr(y, method="pearson")), float(x.corr(y, method="spearman")), float(x.corr(y, method="kendall"))
+
+
+def _phase08_interpret(valid: bool, n: int, spearman: float) -> str:
+    if not valid:
+        return "comparison_invalid"
+    if n < 5:
+        return "descriptive_only_low_n"
+    if np.isfinite(spearman) and abs(spearman) >= PHASE08_INTERPRETATION_THRESHOLDS["strong_abs_spearman_rho"]:
+        return "strong_rank_alignment_exploratory"
+    if np.isfinite(spearman) and abs(spearman) >= PHASE08_INTERPRETATION_THRESHOLDS["moderate_abs_spearman_rho"]:
+        return "moderate_rank_alignment_exploratory"
+    return "weak_or_no_rank_alignment"
+
+
+def compute_anisotropy_comparison_summary(anisotropy_df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for key, group in anisotropy_df.groupby(PHASE08_CONDITION_COLS, sort=True, dropna=False):
+        h_value, r_value = key
+        for cid, x_metric, y_metric in PHASE08_GEOM_COMPARISONS:
+            flags: List[str] = []
+            valid_rows = group.dropna(subset=[x_metric, y_metric]).copy()
+            n_total = int(group["capside"].nunique(dropna=True))
+            n_valid = int(valid_rows["capside"].nunique(dropna=True))
+            pearson = spearman = kendall = slope = intercept = r2 = np.nan
+            spearman_rank = kendall_rank = np.nan
+            valid = True
+            if n_valid < 3:
+                valid = False; flags.append("insufficient_capsids_for_correlation")
+            if n_valid >= 3:
+                x = pd.to_numeric(valid_rows[x_metric], errors="coerce")
+                y = pd.to_numeric(valid_rows[y_metric], errors="coerce")
+                if x.nunique(dropna=True) <= 1 or y.nunique(dropna=True) <= 1:
+                    valid = False; flags.append("zero_anisotropy_variance")
+                else:
+                    pearson, spearman, kendall = _phase08_corrs(x, y)
+                    x_rank_col = "rank_" + x_metric
+                    y_rank_col = "rank_" + y_metric
+                    if x_rank_col in valid_rows.columns and y_rank_col in valid_rows.columns:
+                        xr = pd.to_numeric(valid_rows[x_rank_col], errors="coerce")
+                        yr = pd.to_numeric(valid_rows[y_rank_col], errors="coerce")
+                        if xr.nunique(dropna=True) > 1 and yr.nunique(dropna=True) > 1:
+                            _, spearman_rank, kendall_rank = _phase08_corrs(xr, yr)
+                    slope, intercept = np.polyfit(x.to_numpy(dtype=float), y.to_numpy(dtype=float), 1)
+                    r2 = pearson * pearson if np.isfinite(pearson) else np.nan
+                    if n_valid < 5:
+                        flags.append("low_capsid_count_descriptive_only")
+            rows.append({
+                "h": h_value, "patch_R": r_value, "comparison_id": cid, "x_metric": x_metric, "y_metric": y_metric,
+                "n_capsides_total": n_total, "n_capsides_valid": n_valid, "capsides_used": _semicolon_join(valid_rows["capside"]) if not valid_rows.empty else "",
+                "pearson_r": pearson, "spearman_rho": spearman, "kendall_tau": kendall,
+                "spearman_rho_rank": spearman_rank, "kendall_tau_rank": kendall_rank,
+                "slope_descriptive": slope, "intercept_descriptive": intercept, "r_squared_descriptive": r2,
+                "valid_comparison": bool(valid and np.isfinite(spearman)),
+                "interpretation_label": _phase08_interpret(bool(valid and np.isfinite(spearman)), n_valid, spearman),
+                "warning_flags": _phase08_flag_string(flags),
+            })
+    return pd.DataFrame(rows).sort_values(["h", "patch_R", "comparison_id"], kind="mergesort").reset_index(drop=True)
+
+
+def compute_phase08_rankings_long(anisotropy_df: pd.DataFrame) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    rank_map = {"A_mech": "rank_A_mech", "A_t": "rank_A_t", "A_Hout": "rank_A_Hout", "A_Hin": "rank_A_Hin"}
+    for key, group in anisotropy_df.groupby(PHASE08_CONDITION_COLS, sort=True, dropna=False):
+        h_value, r_value = key
+        n_caps = int(group["capside"].nunique(dropna=True))
+        for metric, rank_col in rank_map.items():
+            vals = pd.to_numeric(group[metric], errors="coerce")
+            flags = ["missing_geometric_anisotropy"] if metric != "A_mech" and vals.notna().sum() == 0 else []
+            for _, row in group.iterrows():
+                rank = row.get(rank_col, np.nan)
+                rows.append({"h": h_value, "patch_R": r_value, "metric": metric, "capside": row["capside"], "anisotropy_value": row.get(metric, np.nan), "rank": rank, "is_rank1": bool(np.isfinite(rank) and rank == 1), "n_capsides_in_condition": n_caps, "warning_flags": _phase08_flag_string(flags)})
+    return pd.DataFrame(rows).sort_values(["h", "patch_R", "metric", "rank", "capside"], kind="mergesort").reset_index(drop=True)
+
+
+def compute_top_rank_coincidence(anisotropy_df: pd.DataFrame) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for key, group in anisotropy_df.groupby(PHASE08_CONDITION_COLS, sort=True, dropna=False):
+        h_value, r_value = key
+        mech_top = set(group.loc[group["rank_A_mech"].eq(1), "capside"].astype(str))
+        for cid, metric in PHASE08_TOP_COMPARISONS:
+            valid = group.dropna(subset=["A_mech", metric])
+            geom_rank = "rank_" + metric
+            geom_top = set(group.loc[group[geom_rank].eq(1), "capside"].astype(str)) if geom_rank in group.columns else set()
+            inter = mech_top & geom_top
+            union = mech_top | geom_top
+            flags = [] if len(valid) >= 3 else ["insufficient_capsids_for_correlation"]
+            rows.append({"h": h_value, "patch_R": r_value, "comparison_id": cid, "top_A_mech_capsids": ";".join(sorted(mech_top)), "top_geometry_capsids": ";".join(sorted(geom_top)), "top1_match_binary": int(len(inter) > 0), "top1_jaccard": float(len(inter) / len(union)) if union else np.nan, "n_capsides_valid": int(valid["capside"].nunique(dropna=True)), "warning_flags": _phase08_flag_string(flags)})
+    return pd.DataFrame(rows).sort_values(["h", "patch_R", "comparison_id"], kind="mergesort").reset_index(drop=True)
+
+
+def make_phase08_scatterplots(anisotropy_df: pd.DataFrame, comparison_df: pd.DataFrame, args: argparse.Namespace) -> List[str]:
+    if args.no_plots:
+        return []
+    paths: List[str] = []
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    for _, comp in comparison_df.iterrows():
+        h_value, r_value = comp["h"], comp["patch_R"]
+        x_metric, y_metric, cid = comp["x_metric"], comp["y_metric"], comp["comparison_id"]
+        sub = anisotropy_df[(anisotropy_df["h"] == h_value) & (anisotropy_df["patch_R"] == r_value)].dropna(subset=[x_metric, y_metric])
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.scatter(sub[x_metric], sub[y_metric])
+        for _, row in sub.iterrows():
+            ax.annotate(str(row["capside"]), (row[x_metric], row[y_metric]), xytext=(4, 4), textcoords="offset points", fontsize=8)
+        if len(sub) >= 3 and bool(comp.get("valid_comparison", False)) and np.isfinite(comp.get("slope_descriptive", np.nan)):
+            xs = np.linspace(float(sub[x_metric].min()), float(sub[x_metric].max()), 50)
+            ax.plot(xs, float(comp["slope_descriptive"]) * xs + float(comp["intercept_descriptive"]), linestyle="--")
+        low = " low-N descriptive" if "low_capsid_count_descriptive_only" in str(comp.get("warning_flags", "")) or len(sub) < 5 else ""
+        rho = comp.get("spearman_rho", np.nan)
+        ax.set_title(f"{cid}: h={h_value}, patch_R={r_value}, rho={rho:.3g}{low}")
+        ax.set_xlabel(x_metric); ax.set_ylabel(y_metric)
+        fig.tight_layout()
+        path = args.outdir / f"phase08_scatter_{cid}_h_{_phase08_safe_tag(h_value)}_R_{_phase08_safe_tag(r_value)}.png"
+        fig.savefig(path, dpi=150); plt.close(fig)
+        paths.append(str(path))
+    return paths
+
+
+def make_phase08_ranking_figures(anisotropy_df: pd.DataFrame, args: argparse.Namespace) -> List[str]:
+    if args.no_plots:
+        return []
+    paths: List[str] = []
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    for key, group in anisotropy_df.groupby(PHASE08_CONDITION_COLS, sort=True, dropna=False):
+        h_value, r_value = key
+        order = group.sort_values(["rank_A_mech", "capside"], kind="mergesort")["capside"].astype(str).tolist()
+        plot_df = group.set_index(group["capside"].astype(str)).reindex(order)
+        fig, axes = plt.subplots(2, 2, figsize=(9, 6), sharex=True)
+        for ax, metric, panel in zip(axes.ravel(), PHASE08_METRICS, ["A", "B", "C", "D"]):
+            vals = pd.to_numeric(plot_df[metric], errors="coerce")
+            ax.bar(np.arange(len(order)), vals.fillna(0.0))
+            for i, v in enumerate(vals):
+                if pd.isna(v):
+                    ax.text(i, 0, "NA", ha="center", va="bottom", fontsize=8)
+            ax.set_title(f"{panel}: {metric}")
+            ax.set_ylabel("anisotropy")
+        axes[-1, 0].set_xticks(np.arange(len(order))); axes[-1, 0].set_xticklabels(order, rotation=45, ha="right")
+        axes[-1, 1].set_xticks(np.arange(len(order))); axes[-1, 1].set_xticklabels(order, rotation=45, ha="right")
+        fig.suptitle(f"Capsid anisotropy rankings h={h_value}, patch_R={r_value}; higher means stronger anisotropy")
+        fig.tight_layout()
+        path = args.outdir / f"phase08_capsid_anisotropy_rankings_h_{_phase08_safe_tag(h_value)}_R_{_phase08_safe_tag(r_value)}.png"
+        fig.savefig(path, dpi=150); plt.close(fig)
+        paths.append(str(path))
+    return paths
+
+
+def write_phase08_summary(path: Path, report: Dict[str, Any], anisotropy_df: pd.DataFrame, comparison_df: pd.DataFrame, top_df: pd.DataFrame) -> None:
+    lines = [f"Phase 8 capsid-level anisotropy comparison: {report['status']}", "", f"Conditions analyzed: {report.get('n_conditions', 0)}", "This summary is descriptive and does not establish causality or statistical significance.", ""]
+    for key, group in anisotropy_df.groupby(PHASE08_CONDITION_COLS, sort=True, dropna=False):
+        h_value, r_value = key
+        lines.append(f"h={h_value}, patch_R={r_value}: {group['capside'].nunique()} capsids")
+        for metric, label in [("A_mech", "mechanically"), ("A_t", "thickness"), ("A_Hout", "Hout"), ("A_Hin", "Hin")]:
+            rank_col = "rank_" + metric
+            top = group.loc[group[rank_col].eq(1), "capside"].astype(str).tolist() if rank_col in group else []
+            lines.append(f"  - Most {label} anisotropic capsid(s): {';'.join(sorted(top)) if top else 'NA'}")
+        comps = comparison_df[(comparison_df["h"] == h_value) & (comparison_df["patch_R"] == r_value)]
+        for _, row in comps.iterrows():
+            rho = row["spearman_rho"] if np.isfinite(row["spearman_rho"]) else "NA"
+            lines.append(f"  - {row['comparison_id']}: Spearman rho={rho}, label={row['interpretation_label']}, warnings={row['warning_flags'] or 'none'}")
+        tops = top_df[(top_df["h"] == h_value) & (top_df["patch_R"] == r_value)]
+        for _, row in tops.iterrows():
+            lines.append(f"  - {row['comparison_id']}: top-rank match={row['top1_match_binary']}, jaccard={row['top1_jaccard']:.3g}")
+        lines.append("  - Low-N comparisons are descriptive only when flagged.")
+    if report.get("warnings"):
+        lines.extend(["", "Warnings:"] + [f"  - {w}" for w in report["warnings"]])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def build_phase08_report(input_df: pd.DataFrame, validation: Dict[str, Any], output_files: Dict[str, Any], warnings: List[str], severe: List[str], status: str, args: argparse.Namespace, phase_reports: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "phase": "08_geometric_vs_mechanical_anisotropy",
+        "status": status,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "input_file": str(args.input),
+        "output_directory": str(args.outdir),
+        "upstream_phase01_status": phase_reports.get("phase01", {}).get("status"),
+        "upstream_phase02_status": phase_reports.get("phase02", {}).get("status"),
+        "upstream_phase03_status": phase_reports.get("phase03", {}).get("status"),
+        "upstream_phase04_status": phase_reports.get("phase04", {}).get("status"),
+        "upstream_phase05_status": phase_reports.get("phase05", {}).get("status"),
+        "upstream_phase06_status": phase_reports.get("phase06", {}).get("status"),
+        "upstream_phase07_status": phase_reports.get("phase07", {}).get("status"),
+        "required_columns_checked": PHASE08_REQUIRED_KEY_COLUMNS + ["d_max_pct", "t", "Hout", "Hin"],
+        "missing_columns": validation.get("missing_columns", []) + validation.get("missing_geometry_columns", []),
+        "n_rows_input": int(len(input_df)),
+        "n_capsides": int(input_df["capside"].nunique(dropna=True)) if "capside" in input_df.columns else 0,
+        "n_folds": int(input_df["fold"].astype(str).nunique(dropna=True)) if "fold" in input_df.columns else 0,
+        "h_values": _sorted_json_values(input_df["h"]) if "h" in input_df.columns else [],
+        "patch_R_values": _sorted_json_values(input_df["patch_R"]) if "patch_R" in input_df.columns else [],
+        "n_conditions": int(input_df[PHASE08_CONDITION_COLS].drop_duplicates().shape[0]) if all(c in input_df.columns for c in PHASE08_CONDITION_COLS) else 0,
+        "anisotropy_group_cols": PHASE08_GROUP_COLS,
+        "condition_cols": PHASE08_CONDITION_COLS,
+        "anisotropy_definitions": {"A_mech": "range(d_max_pct)/mean(d_max_pct)", "A_t": "range(t)/mean(t)", "A_Hout": "range(Hout)/mean(abs(Hout))", "A_Hin": "range(Hin)/mean(abs(Hin))"},
+        "denominator_rules": {"d_max_pct": "mean; positive finite", "t": "mean; positive finite", "Hout": "mean absolute; positive finite", "Hin": "mean absolute; positive finite"},
+        "ranking_method": args.rank_method,
+        "ranking_direction": "descending; rank 1 = highest anisotropy",
+        "comparison_ids": [c[0] for c in PHASE08_GEOM_COMPARISONS],
+        "correlation_policy": "No correlations for n<3; n=3 or 4 descriptive only; n>=5 exploratory; no p-values in primary outputs. Rank consistency columns compare mechanical rank against geometric rank descriptively.",
+        "low_n_policy": "Low capsid counts are warning-only and must not be overinterpreted.",
+        "interpretation_thresholds": PHASE08_INTERPRETATION_THRESHOLDS,
+        "optional_composite_anisotropy_enabled": False,
+        "output_files": output_files,
+        "warnings": sorted(set(warnings)),
+        "severe_flags": sorted(set(severe)),
+    }
+
+
+def run_phase08(input_df: pd.DataFrame, phase01_report: Dict, phase02_report: Dict, phase03_report: Dict, phase04_report: Dict, phase05_report: Dict, phase06_report: Dict, phase07_report: Dict, args: argparse.Namespace) -> Dict[str, Any]:
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    output_files: Dict[str, Any] = {
+        "capsid_anisotropy": str(args.outdir / "phase08_capsid_anisotropy.csv"),
+        "comparison_summary": str(args.outdir / "phase08_anisotropy_comparison_summary.csv"),
+        "rankings": str(args.outdir / "phase08_capsid_anisotropy_rankings.csv"),
+        "top_rank_coincidence": str(args.outdir / "phase08_top_rank_coincidence.csv"),
+        "report": str(args.outdir / "phase08_report.json"),
+        "summary": str(args.outdir / "phase08_summary.txt"),
+        "figures": [],
+    }
+    warnings: List[str] = []
+    severe: List[str] = []
+    if phase01_report.get("status") != "PASS":
+        severe.append("upstream_phase01_failed")
+    if phase02_report.get("status") == "FAIL":
+        severe.append("upstream_phase02_failed")
+    for pn, rep in [("phase02", phase02_report), ("phase03", phase03_report), ("phase04", phase04_report), ("phase05", phase05_report), ("phase06", phase06_report), ("phase07", phase07_report)]:
+        if rep.get("status") == "WARN":
+            warnings.append(f"upstream_{pn}_warn")
+    validation = validate_phase08_input(input_df)
+    if validation["missing_columns"]:
+        severe.append("missing_required_column")
+    if len(validation["missing_geometry_columns"]) == 3:
+        severe.append("missing_geometric_anisotropy")
+    if not validation["duplicate_key_status"]["is_unique"]:
+        severe.append("duplicate_observation_key")
+    for col, n in validation.get("nonfinite_counts", {}).items():
+        if n:
+            warnings.append(f"nonfinite_{col}")
+    if severe:
+        empty = pd.DataFrame()
+        for path_key in ["capsid_anisotropy", "comparison_summary", "rankings", "top_rank_coincidence"]:
+            empty.to_csv(output_files[path_key], index=False)
+        report = build_phase08_report(input_df, validation, output_files, warnings, severe, "FAIL", args, {"phase01": phase01_report, "phase02": phase02_report, "phase03": phase03_report, "phase04": phase04_report, "phase05": phase05_report, "phase06": phase06_report, "phase07": phase07_report})
+        with (args.outdir / "phase08_report.json").open("w", encoding="utf-8") as f:
+            json.dump(_nan_to_none(report), f, indent=2, ensure_ascii=False, allow_nan=False)
+        (args.outdir / "phase08_summary.txt").write_text("Phase 8 capsid-level anisotropy comparison: FAIL\n", encoding="utf-8")
+        return report
+    anisotropy = compute_phase08_capsid_anisotropy(input_df, args)
+    comparisons = compute_anisotropy_comparison_summary(anisotropy, args) if not anisotropy.empty else pd.DataFrame()
+    rankings = compute_phase08_rankings_long(anisotropy) if not anisotropy.empty else pd.DataFrame()
+    top = compute_top_rank_coincidence(anisotropy) if not anisotropy.empty else pd.DataFrame()
+    if anisotropy.empty or not pd.to_numeric(anisotropy.get("A_mech", pd.Series(dtype=float)), errors="coerce").notna().any():
+        severe.append("no_valid_mechanical_anisotropy")
+    if anisotropy.empty or not any(pd.to_numeric(anisotropy.get(m, pd.Series(dtype=float)), errors="coerce").notna().any() for m in ["A_t", "A_Hout", "A_Hin"]):
+        severe.append("missing_geometric_anisotropy")
+    if comparisons.empty or not comparisons.get("valid_comparison", pd.Series(dtype=bool)).astype(bool).any():
+        warnings.append("no_valid_geometric_comparison")
+    for col in ["phase08_warning_flags"]:
+        if col in anisotropy.columns:
+            warnings.extend([f for f in ";".join(anisotropy[col].dropna().astype(str)).split(";") if f])
+    if "warning_flags" in comparisons.columns:
+        warnings.extend([f for f in ";".join(comparisons["warning_flags"].dropna().astype(str)).split(";") if f])
+    figures: List[str] = []
+    if not severe:
+        try:
+            figures.extend(make_phase08_scatterplots(anisotropy, comparisons, args))
+            figures.extend(make_phase08_ranking_figures(anisotropy, args))
+        except Exception:
+            warnings.append("plot_failed")
+    output_files["figures"] = figures
+    if severe:
+        status = "FAIL"
+    elif warnings or (not args.no_plots and len(figures) == 0):
+        status = "WARN"
+    else:
+        status = "PASS"
+    anisotropy.to_csv(output_files["capsid_anisotropy"], index=False)
+    comparisons.to_csv(output_files["comparison_summary"], index=False)
+    rankings.to_csv(output_files["rankings"], index=False)
+    top.to_csv(output_files["top_rank_coincidence"], index=False)
+    report = build_phase08_report(input_df, validation, output_files, warnings, severe, status, args, {"phase01": phase01_report, "phase02": phase02_report, "phase03": phase03_report, "phase04": phase04_report, "phase05": phase05_report, "phase06": phase06_report, "phase07": phase07_report})
+    with (args.outdir / "phase08_report.json").open("w", encoding="utf-8") as f:
+        json.dump(_nan_to_none(report), f, indent=2, ensure_ascii=False, allow_nan=False)
+    write_phase08_summary(args.outdir / "phase08_summary.txt", report, anisotropy, comparisons, top)
+    return report
+
+
+def _print_phase08_summary(report: Dict[str, Any]) -> None:
+    print(f"[{report.get('status')}] Phase 8 completed.")
+    files = report.get("output_files", {})
+    print(f"[INFO] Capsid anisotropy table: {files.get('capsid_anisotropy', 'not written')}")
+    print(f"[INFO] Anisotropy comparison summary: {files.get('comparison_summary', 'not written')}")
+    print(f"[INFO] Capsid anisotropy rankings: {files.get('rankings', 'not written')}")
+    print(f"[INFO] Top-rank coincidence table: {files.get('top_rank_coincidence', 'not written')}")
+    print(f"[INFO] Phase 8 report: {files.get('report', 'not written')}")
+    aniso_path = Path(files.get("capsid_anisotropy", ""))
+    if aniso_path.exists() and aniso_path.stat().st_size > 0:
+        try:
+            aniso = pd.read_csv(aniso_path)
+            for _, row in aniso[aniso.get("rank_A_mech", np.nan) == 1].sort_values(["h", "patch_R", "capside"], kind="mergesort").iterrows():
+                print(f"[ANISO] h={row['h']} patch_R={row['patch_R']} top_A_mech={row['capside']} A_mech={row['A_mech']:.6g}")
+        except Exception:
+            pass
+    comp_path = Path(files.get("comparison_summary", ""))
+    if comp_path.exists() and comp_path.stat().st_size > 0:
+        try:
+            comp = pd.read_csv(comp_path)
+            for _, row in comp.iterrows():
+                spearman = row["spearman_rho"] if np.isfinite(row["spearman_rho"]) else np.nan
+                print(f"[COMPARE] h={row['h']} patch_R={row['patch_R']} comparison={row['comparison_id']} spearman={spearman:.6g} label={row['interpretation_label']}")
+        except Exception:
+            pass
+    if report.get("warnings"):
+        print("[WARN] Phase 8 completed with warnings. See phase08_report.json.")
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -3608,9 +4092,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--phase",
-        choices=["1", "2", "3", "4", "5", "6", "7"],
+        choices=["1", "2", "3", "4", "5", "6", "7", "8"],
         default="1",
-        help="Analysis phase to run. Phase 1 is the default. Phase 7 runs Phases 1 through 7, then compares mechanical and geometric distance matrices."
+        help="Analysis phase to run. Phase 1 is the default. Phase 8 runs Phases 1 through 8, then compares capsid-level geometric and mechanical anisotropy."
     )
 
     parser.add_argument(
@@ -3638,7 +4122,7 @@ def parse_args() -> argparse.Namespace:
         "--outdir",
         default=Path("results"),
         type=Path,
-        help="Output directory for Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, and Phase 7 artifacts."
+        help="Output directory for Phase 2 through Phase 8 artifacts."
     )
 
     parser.add_argument(
@@ -3693,13 +4177,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-plots",
         action="store_true",
-        help="Skip Phase 3 centered scatterplots, Phase 4 ordinal ranking plots, Phase 5 model comparison figures, Phase 6 figures, and Phase 7 heatmaps."
+        help="Skip Phase 3 centered scatterplots, Phase 4 ordinal ranking plots, Phase 5 model comparison figures, Phase 6 figures, Phase 7 heatmaps, and Phase 8 scatter/ranking figures."
     )
 
     parser.add_argument(
         "--save-bootstrap-distributions",
         action="store_true",
         help="Save full Phase 3 bootstrap slope distributions."
+    )
+
+    parser.add_argument(
+        "--anisotropy-min-folds",
+        default=3,
+        type=int,
+        help="Phase 8 preferred minimum number of valid folds for robust anisotropy calculation. Default: 3."
+    )
+
+    parser.add_argument(
+        "--anisotropy-allow-two-folds",
+        action="store_true",
+        help="Phase 8 allows two-fold anisotropy values to be computed with a warning. Two folds are computed and flagged by default."
     )
 
     parser.add_argument(
@@ -3872,6 +4369,10 @@ def main() -> int:
         print("[ERROR] --epsilon and --redundancy-threshold must be positive.", file=sys.stderr)
         return 2
 
+    if args.anisotropy_min_folds < 2:
+        print("[ERROR] --anisotropy-min-folds must be at least 2.", file=sys.stderr)
+        return 2
+
     try:
         normalized_df, phase01_report = run_phase01(args)
     except Exception as exc:
@@ -3977,9 +4478,29 @@ def main() -> int:
                 pass
     phase07_report = run_phase07(phase07_input_df, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, phase06_report, args)
     _print_phase07_summary(phase07_report)
-    if phase07_report["status"] == "FAIL":
+
+    if args.phase == "7":
+        if phase07_report["status"] == "FAIL":
+            return 1
+        if args.fail_on_warning and phase07_report["status"] != "PASS":
+            return 1
+        return 0
+
+    phase08_input_df = normalized_df
+    for candidate in [args.outdir / "phase06_composite_geometry.csv", args.outdir / "phase03_centered_geometry.csv", centered_path, args.output]:
+        if candidate.exists() and candidate.stat().st_size > 0:
+            try:
+                tmp = pd.read_csv(candidate)
+                if all(c in tmp.columns for c in ["capside", "fold", "h", "patch_R", "d_max_pct"]):
+                    phase08_input_df = tmp
+                    break
+            except Exception:
+                pass
+    phase08_report = run_phase08(phase08_input_df, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, phase06_report, phase07_report, args)
+    _print_phase08_summary(phase08_report)
+    if phase08_report["status"] == "FAIL":
         return 1
-    if args.fail_on_warning and phase07_report["status"] != "PASS":
+    if args.fail_on_warning and phase08_report["status"] != "PASS":
         return 1
     return 0
 
