@@ -1565,6 +1565,542 @@ def _print_phase03_summary(report: Dict) -> None:
 
 
 # ---------------------------------------------------------------------
+# Phase 4: ordinal fold rankings and rank-agreement summaries
+# ---------------------------------------------------------------------
+
+PHASE04_RANK_GROUP_COLS = ["capside", "h", "patch_R"]
+PHASE04_KEY_COLUMNS = ["capside", "fold", "h", "patch_R"]
+PHASE04_REQUIRED_COLUMNS = PHASE04_KEY_COLUMNS + ["d_max_pct"]
+PHASE04_GEOMETRY_COLUMNS = ["t", "Hout", "Hin"]
+PHASE04_RANKED_VARIABLES = ["d_max_pct", "t", "t_thinnest", "Hout", "Hin"]
+PHASE04_CONSISTENCY_THRESHOLD = 0.75
+PHASE04_PRESERVE_COLUMNS = [
+    "d_mag_max", "D", "delta_d_max_pct", "rel_delta_d_max_pct", "t_c", "Hout_c", "Hin_c",
+    "H1", "H2", "H1_norm", "H2_norm", "H0", "H0_norm", "patch_elems", "size_h", "E",
+    "rank_d_max_pct_within_capsid", "is_most_deformable_fold", "is_least_deformable_fold",
+]
+PHASE04_RANK_COLUMNS = {
+    "d_max_pct": "rank_d_max_pct",
+    "t": "rank_t",
+    "t_thinnest": "rank_t_thinnest",
+    "Hout": "rank_Hout",
+    "Hin": "rank_Hin",
+}
+PHASE04_TOP_FLAG_COLUMNS = {
+    "d_max_pct": "is_top_d_max_pct",
+    "t": "is_top_t",
+    "t_thinnest": "is_thinnest_t",
+    "Hout": "is_top_Hout",
+    "Hin": "is_top_Hin",
+}
+PHASE04_TIE_FLAG_COLUMNS = {
+    "d_max_pct": "tied_d_max_pct_rank",
+    "t": "tied_t_rank",
+    "t_thinnest": "tied_t_thinnest_rank",
+    "Hout": "tied_Hout_rank",
+    "Hin": "tied_Hin_rank",
+}
+PHASE04_COMPARISONS = [
+    ("d_max_pct_vs_t", "rank_d_max_pct", "rank_t"),
+    ("d_max_pct_vs_t_thinnest", "rank_d_max_pct", "rank_t_thinnest"),
+    ("d_max_pct_vs_Hout", "rank_d_max_pct", "rank_Hout"),
+    ("d_max_pct_vs_Hin", "rank_d_max_pct", "rank_Hin"),
+]
+PHASE04_COINCIDENCE_COMPARISONS = [
+    ("top_d_max_pct_vs_top_t", "is_top_d_max_pct", "is_top_t"),
+    ("top_d_max_pct_vs_thinnest_t", "is_top_d_max_pct", "is_thinnest_t"),
+    ("top_d_max_pct_vs_top_Hout", "is_top_d_max_pct", "is_top_Hout"),
+    ("top_d_max_pct_vs_top_Hin", "is_top_d_max_pct", "is_top_Hin"),
+]
+
+
+def validate_phase04_input(df: pd.DataFrame) -> Dict:
+    missing_keys = [col for col in PHASE04_KEY_COLUMNS if col not in df.columns]
+    missing_required = [col for col in PHASE04_REQUIRED_COLUMNS if col not in df.columns]
+    missing_geometry = [col for col in PHASE04_GEOMETRY_COLUMNS if col not in df.columns]
+    duplicate_examples: List[Dict[str, Any]] = []
+    n_duplicate_rows = 0
+    if all(c in df.columns for c in PHASE04_KEY_COLUMNS):
+        dup_mask = df.duplicated(subset=PHASE04_KEY_COLUMNS, keep=False)
+        n_duplicate_rows = int(dup_mask.sum())
+        if n_duplicate_rows:
+            duplicate_examples = df.loc[dup_mask, PHASE04_KEY_COLUMNS].drop_duplicates().head(20).to_dict(orient="records")
+    nonfinite_counts: Dict[str, int] = {}
+    for col in ["d_max_pct", "t", "Hout", "Hin"]:
+        if col in df.columns:
+            vals = pd.to_numeric(df[col], errors="coerce")
+            bad = int((~np.isfinite(vals)).sum())
+            if bad:
+                nonfinite_counts[col] = bad
+    n_groups = 0
+    insufficient_groups: List[Dict[str, Any]] = []
+    if all(c in df.columns for c in PHASE04_RANK_GROUP_COLS + ["fold", "d_max_pct"]):
+        finite_d = df[np.isfinite(pd.to_numeric(df["d_max_pct"], errors="coerce"))]
+        n_groups = int(finite_d[PHASE04_RANK_GROUP_COLS].drop_duplicates().shape[0])
+        for key, group in finite_d.groupby(PHASE04_RANK_GROUP_COLS, sort=True, dropna=False):
+            n_folds = int(group["fold"].astype(str).nunique(dropna=True))
+            if n_folds < 2:
+                insufficient_groups.append({"capside": _json_scalar(key[0]), "h": _json_scalar(key[1]), "patch_R": _json_scalar(key[2]), "n_folds": n_folds})
+    return {
+        "missing_key_columns": missing_keys,
+        "missing_required_columns": missing_required,
+        "missing_geometry_columns": missing_geometry,
+        "duplicate_key_status": {"observation_key": PHASE04_KEY_COLUMNS, "is_unique": n_duplicate_rows == 0, "n_duplicate_rows": n_duplicate_rows, "duplicate_examples": duplicate_examples},
+        "nonfinite_counts": nonfinite_counts,
+        "n_ranking_groups": n_groups,
+        "insufficient_ranking_groups": insufficient_groups,
+    }
+
+
+def _phase04_rank_series(series: pd.Series, method: str, ascending: bool) -> pd.Series:
+    vals = pd.to_numeric(series, errors="coerce")
+    return vals.rank(method=method, ascending=ascending, na_option="keep")
+
+
+def compute_fold_rankings(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    out = df.copy()
+    out["fold"] = out["fold"].astype(str)
+    out["phase04_warning_flags"] = ""
+    for col in ["d_max_pct", "t", "Hout", "Hin", "h", "patch_R"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    rank_method = getattr(args, "rank_method", "average")
+    if "d_max_pct" in out.columns:
+        out["rank_d_max_pct"] = out.groupby(PHASE04_RANK_GROUP_COLS, sort=False, dropna=False)["d_max_pct"].transform(lambda s: _phase04_rank_series(s, rank_method, ascending=False))
+    for raw, rank_col in [("t", "rank_t"), ("Hout", "rank_Hout"), ("Hin", "rank_Hin")]:
+        if raw in out.columns:
+            out[rank_col] = out.groupby(PHASE04_RANK_GROUP_COLS, sort=False, dropna=False)[raw].transform(lambda s: _phase04_rank_series(s, rank_method, ascending=False))
+        else:
+            out[rank_col] = np.nan
+            out["phase04_warning_flags"] = out["phase04_warning_flags"].apply(lambda x, r=raw: _append_flag(x, f"missing_{r}"))
+    if "t" in out.columns:
+        out["rank_t_thinnest"] = out.groupby(PHASE04_RANK_GROUP_COLS, sort=False, dropna=False)["t"].transform(lambda s: _phase04_rank_series(s, rank_method, ascending=True))
+    else:
+        out["rank_t_thinnest"] = np.nan
+    # Tie flags are based on duplicate finite raw values inside each ranking group.
+    raw_for_var = {"d_max_pct": "d_max_pct", "t": "t", "t_thinnest": "t", "Hout": "Hout", "Hin": "Hin"}
+    for var, tie_col in PHASE04_TIE_FLAG_COLUMNS.items():
+        raw = raw_for_var[var]
+        if raw in out.columns:
+            out[tie_col] = out.groupby(PHASE04_RANK_GROUP_COLS, sort=False, dropna=False)[raw].transform(lambda s: pd.to_numeric(s, errors="coerce").duplicated(keep=False) & pd.to_numeric(s, errors="coerce").notna()).astype(bool)
+        else:
+            out[tie_col] = False
+    for var, rank_col in PHASE04_RANK_COLUMNS.items():
+        flag_col = PHASE04_TOP_FLAG_COLUMNS[var]
+        out[flag_col] = False
+        if rank_col in out.columns:
+            mins = out.groupby(PHASE04_RANK_GROUP_COLS, sort=False, dropna=False)[rank_col].transform("min")
+            out[flag_col] = (out[rank_col].notna() & (out[rank_col] == mins))
+    for rank_col in PHASE04_RANK_COLUMNS.values():
+        if rank_col in out.columns:
+            missing = out[rank_col].isna()
+            if missing.any():
+                out.loc[missing, "phase04_warning_flags"] = out.loc[missing, "phase04_warning_flags"].apply(lambda x: _append_flag(x, "missing_rank_values"))
+    for tie_col in PHASE04_TIE_FLAG_COLUMNS.values():
+        if tie_col in out.columns and out[tie_col].any():
+            out.loc[out[tie_col], "phase04_warning_flags"] = out.loc[out[tie_col], "phase04_warning_flags"].apply(lambda x: _append_flag(x, "ties_present"))
+    ordered = PHASE04_KEY_COLUMNS + ["d_max_pct", "t", "Hout", "Hin", "rank_d_max_pct", "rank_t", "rank_t_thinnest", "rank_Hout", "rank_Hin", "tied_d_max_pct_rank", "tied_t_rank", "tied_t_thinnest_rank", "tied_Hout_rank", "tied_Hin_rank", "is_top_d_max_pct", "is_top_t", "is_thinnest_t", "is_top_Hout", "is_top_Hin", "phase04_warning_flags"]
+    preserve = [c for c in PHASE04_PRESERVE_COLUMNS if c in out.columns and c not in ordered]
+    ordered = [c for c in ordered if c in out.columns] + preserve + [c for c in out.columns if c not in ordered + preserve]
+    return out[ordered].sort_values(["h", "patch_R", "capside", "fold"], kind="mergesort").reset_index(drop=True)
+
+
+def _rank_correlations(x: pd.Series, y: pd.Series) -> Tuple[float, float, float, float]:
+    try:
+        from scipy import stats  # type: ignore
+        s = stats.spearmanr(x, y, nan_policy="omit")
+        k = stats.kendalltau(x, y, nan_policy="omit")
+        return float(s.statistic), float(s.pvalue), float(k.statistic), float(k.pvalue)
+    except Exception:
+        # Pandas supplies tie-aware Spearman/Kendall coefficients; p-values are unavailable without scipy.
+        return float(x.corr(y, method="spearman")), np.nan, float(x.corr(y, method="kendall")), np.nan
+
+
+def compute_rank_correlations_by_capsid(rankings_df: pd.DataFrame) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for key, group in rankings_df.groupby(PHASE04_RANK_GROUP_COLS, sort=True, dropna=False):
+        capside, h_value, r_value = key
+        for comparison, mech_rank, geom_rank in PHASE04_COMPARISONS:
+            flags: List[str] = []
+            required = [mech_rank, geom_rank]
+            valid_rows = group.dropna(subset=required).copy() if all(c in group.columns for c in required) else pd.DataFrame()
+            n = int(len(valid_rows))
+            spearman_rho = spearman_p = kendall_tau = kendall_p = np.nan
+            valid = True
+            if n < 3:
+                valid = False
+                flags.append("insufficient_folds_for_correlation")
+            elif valid_rows[mech_rank].nunique(dropna=True) <= 1 or valid_rows[geom_rank].nunique(dropna=True) <= 1:
+                valid = False
+                flags.append("zero_rank_variance")
+            else:
+                if n in [3, 4]:
+                    flags.append("low_fold_count_rank_correlation")
+                tie_cols = []
+                if mech_rank == "rank_d_max_pct":
+                    tie_cols.append("tied_d_max_pct_rank")
+                tie_cols.append({"rank_t": "tied_t_rank", "rank_t_thinnest": "tied_t_thinnest_rank", "rank_Hout": "tied_Hout_rank", "rank_Hin": "tied_Hin_rank"}.get(geom_rank, ""))
+                tie_cols = [c for c in tie_cols if c and c in valid_rows.columns]
+                if tie_cols and valid_rows[tie_cols].any(axis=None):
+                    flags.append("ties_present")
+                spearman_rho, spearman_p, kendall_tau, kendall_p = _rank_correlations(valid_rows[mech_rank], valid_rows[geom_rank])
+                if not np.isfinite(spearman_rho) or not np.isfinite(kendall_tau):
+                    valid = False
+                    flags.append("zero_rank_variance")
+            rows.append({
+                "capside": _json_scalar(capside), "h": _json_scalar(h_value), "patch_R": _json_scalar(r_value),
+                "comparison": comparison, "mechanical_rank": mech_rank, "geometry_rank": geom_rank,
+                "n_folds_used": n, "folds_used": _semicolon_join(valid_rows["fold"]) if not valid_rows.empty else "",
+                "spearman_rho": spearman_rho, "spearman_p": spearman_p, "kendall_tau": kendall_tau, "kendall_p": kendall_p,
+                "valid_comparison": bool(valid), "warning_flags": _flag_string(flags),
+            })
+    return pd.DataFrame(rows).sort_values(["h", "patch_R", "capside", "comparison"], kind="mergesort").reset_index(drop=True)
+
+
+def _fraction_positive(series: pd.Series) -> float:
+    vals = pd.to_numeric(series, errors="coerce").dropna()
+    return float((vals > 0).mean()) if len(vals) else np.nan
+
+
+def _fraction_negative(series: pd.Series) -> float:
+    vals = pd.to_numeric(series, errors="coerce").dropna()
+    return float((vals < 0).mean()) if len(vals) else np.nan
+
+
+def _consistency_label(pos: float, neg: float, threshold: float) -> str:
+    if np.isfinite(pos) and pos >= threshold:
+        return "mostly_positive"
+    if np.isfinite(neg) and neg >= threshold:
+        return "mostly_negative"
+    return "inconsistent"
+
+
+def compute_rank_correlation_summary(correlations_df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for key, group in correlations_df.groupby(["h", "patch_R", "comparison"], sort=True, dropna=False):
+        h_value, r_value, comparison = key
+        valid = group[group["valid_comparison"] == True].copy()
+        s = pd.to_numeric(valid["spearman_rho"], errors="coerce") if not valid.empty else pd.Series(dtype=float)
+        k = pd.to_numeric(valid["kendall_tau"], errors="coerce") if not valid.empty else pd.Series(dtype=float)
+        pos_s = _fraction_positive(s)
+        neg_s = _fraction_negative(s)
+        flags = sorted(set(";".join(group["warning_flags"].dropna().astype(str)).split(";")) - {""})
+        if valid.empty:
+            flags.append("no_valid_rank_comparisons")
+        rows.append({
+            "h": _json_scalar(h_value), "patch_R": _json_scalar(r_value), "comparison": comparison,
+            "n_capsids_total": int(group["capside"].nunique(dropna=True)), "n_valid_capsids": int(valid["capside"].nunique(dropna=True)),
+            "capsids_used": _semicolon_join(valid["capside"]) if not valid.empty else "",
+            "mean_spearman_rho": float(s.mean()) if len(s) else np.nan, "median_spearman_rho": float(s.median()) if len(s) else np.nan,
+            "sd_spearman_rho": float(s.std(ddof=1)) if len(s) > 1 else np.nan, "min_spearman_rho": float(s.min()) if len(s) else np.nan, "max_spearman_rho": float(s.max()) if len(s) else np.nan,
+            "fraction_positive_spearman": pos_s, "fraction_negative_spearman": neg_s,
+            "mean_kendall_tau": float(k.mean()) if len(k) else np.nan, "median_kendall_tau": float(k.median()) if len(k) else np.nan,
+            "sd_kendall_tau": float(k.std(ddof=1)) if len(k) > 1 else np.nan, "min_kendall_tau": float(k.min()) if len(k) else np.nan, "max_kendall_tau": float(k.max()) if len(k) else np.nan,
+            "fraction_positive_kendall": _fraction_positive(k), "fraction_negative_kendall": _fraction_negative(k),
+            "consistency_label": _consistency_label(pos_s, neg_s, threshold), "warning_flags": _flag_string(flags),
+        })
+    return pd.DataFrame(rows).sort_values(["h", "patch_R", "comparison"], kind="mergesort").reset_index(drop=True)
+
+
+def _group_identifier(capside: Any, h_value: Any, r_value: Any) -> str:
+    return f"{capside}|h={h_value}|R={r_value}"
+
+
+def compute_top_rank_coincidence(rankings_df: pd.DataFrame) -> pd.DataFrame:
+    group_rows: List[Dict[str, Any]] = []
+    for key, group in rankings_df.groupby(PHASE04_RANK_GROUP_COLS, sort=True, dropna=False):
+        capside, h_value, r_value = key
+        gid = _group_identifier(capside, h_value, r_value)
+        for comparison, a_flag, b_flag in PHASE04_COINCIDENCE_COMPARISONS:
+            a = set(group.loc[group[a_flag] == True, "fold"].astype(str).tolist()) if a_flag in group.columns else set()
+            b = set(group.loc[group[b_flag] == True, "fold"].astype(str).tolist()) if b_flag in group.columns else set()
+            union = a | b
+            inter = a & b
+            valid = bool(a and b)
+            group_rows.append({"h": h_value, "patch_R": r_value, "comparison": comparison, "group_id": gid, "valid": valid, "match": bool(inter) if valid else False, "jaccard": float(len(inter) / len(union)) if valid and union else np.nan})
+    detail = pd.DataFrame(group_rows)
+    rows: List[Dict[str, Any]] = []
+    if detail.empty:
+        return pd.DataFrame(columns=["h", "patch_R", "comparison", "n_groups_total", "n_groups_valid", "n_top1_matches", "fraction_top1_match", "mean_top1_jaccard", "median_top1_jaccard", "groups_with_match", "groups_without_match", "warning_flags"])
+    for key, group in detail.groupby(["h", "patch_R", "comparison"], sort=True, dropna=False):
+        h_value, r_value, comparison = key
+        valid = group[group["valid"] == True]
+        matched = valid[valid["match"] == True]
+        unmatched = valid[valid["match"] == False]
+        flags = [] if len(valid) else ["no_valid_rank_comparisons"]
+        rows.append({
+            "h": _json_scalar(h_value), "patch_R": _json_scalar(r_value), "comparison": comparison,
+            "n_groups_total": int(len(group)), "n_groups_valid": int(len(valid)), "n_top1_matches": int(len(matched)),
+            "fraction_top1_match": float(len(matched) / len(valid)) if len(valid) else np.nan,
+            "mean_top1_jaccard": float(valid["jaccard"].mean()) if len(valid) else np.nan,
+            "median_top1_jaccard": float(valid["jaccard"].median()) if len(valid) else np.nan,
+            "groups_with_match": ";".join(sorted(matched["group_id"].astype(str).tolist())),
+            "groups_without_match": ";".join(sorted(unmatched["group_id"].astype(str).tolist())),
+            "warning_flags": _flag_string(flags),
+        })
+    return pd.DataFrame(rows).sort_values(["h", "patch_R", "comparison"], kind="mergesort").reset_index(drop=True)
+
+
+def compute_fold_rank_consistency(rankings_df: pd.DataFrame) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for variable, rank_col in PHASE04_RANK_COLUMNS.items():
+        if rank_col not in rankings_df.columns:
+            continue
+        last_rank = rankings_df.groupby(PHASE04_RANK_GROUP_COLS, sort=False, dropna=False)[rank_col].transform("max")
+        tmp = rankings_df[["h", "patch_R", "capside", "fold", rank_col]].copy()
+        tmp["is_rank1"] = tmp[rank_col] == 1
+        tmp["is_rank_last"] = tmp[rank_col] == last_rank
+        tmp = tmp.dropna(subset=[rank_col])
+        for key, group in tmp.groupby(["h", "patch_R", "fold"], sort=True, dropna=False):
+            h_value, r_value, fold = key
+            ranks = pd.to_numeric(group[rank_col], errors="coerce").dropna()
+            rows.append({
+                "h": _json_scalar(h_value), "patch_R": _json_scalar(r_value), "variable": variable, "fold": str(fold),
+                "n_capsides": int(group["capside"].nunique(dropna=True)), "capsides_present": _semicolon_join(group["capside"]),
+                "mean_rank": float(ranks.mean()) if len(ranks) else np.nan, "median_rank": float(ranks.median()) if len(ranks) else np.nan,
+                "sd_rank": float(ranks.std(ddof=1)) if len(ranks) > 1 else np.nan, "min_rank": float(ranks.min()) if len(ranks) else np.nan, "max_rank": float(ranks.max()) if len(ranks) else np.nan,
+                "fraction_rank1": float(group["is_rank1"].mean()) if len(group) else np.nan, "fraction_rank_last": float(group["is_rank_last"].mean()) if len(group) else np.nan,
+                "warning_flags": "",
+            })
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(["h", "patch_R", "variable", "mean_rank", "fold"], kind="mergesort").reset_index(drop=True)
+
+
+def make_phase04_ordinal_figures(rankings_df: pd.DataFrame, args: argparse.Namespace) -> Tuple[List[str], List[str]]:
+    output_files: List[str] = []
+    warnings: List[str] = []
+    if args.no_plots:
+        return output_files, warnings
+    try:
+        import matplotlib.pyplot as plt
+        import numpy.ma as ma
+    except Exception as exc:
+        return output_files, [f"plot_failed: matplotlib unavailable ({exc})"]
+    variables = [("d_max_pct", "rank_d_max_pct"), ("t_thinnest", "rank_t_thinnest"), ("Hout", "rank_Hout"), ("Hin", "rank_Hin")]
+    one_condition = rankings_df[["h", "patch_R"]].drop_duplicates().shape[0] == 1
+    try:
+        for (h_value, r_value), subset in rankings_df.groupby(["h", "patch_R"], sort=True, dropna=False):
+            folds = sorted(subset["fold"].dropna().astype(str).unique().tolist())
+            capsides = sorted(subset["capside"].dropna().astype(str).unique().tolist())
+            fig, axes = plt.subplots(2, 4, figsize=(18, 8), constrained_layout=True)
+            cmap = plt.get_cmap("tab10")
+            for col_idx, (label, rank_col) in enumerate(variables):
+                ax = axes[0, col_idx]
+                for idx, capside in enumerate(capsides):
+                    g = subset[subset["capside"].astype(str) == capside].set_index("fold").reindex(folds)
+                    ax.plot(folds, g[rank_col], marker="o", linewidth=1.2, color=cmap(idx % 10), label=capside)
+                ax.invert_yaxis()
+                ax.set_title(f"{label} ranks; rank 1 at top")
+                ax.set_xlabel("fold")
+                ax.set_ylabel("rank")
+                ax.tick_params(axis="x", rotation=45)
+                if col_idx == 0:
+                    ax.legend(fontsize=7, title="capside")
+                heat = np.full((len(folds), len(capsides)), np.nan)
+                for j, capside in enumerate(capsides):
+                    g = subset[subset["capside"].astype(str) == capside].set_index("fold")
+                    for i, fold in enumerate(folds):
+                        if fold in g.index:
+                            heat[i, j] = pd.to_numeric(g.loc[fold, rank_col], errors="coerce")
+                hax = axes[1, col_idx]
+                masked = ma.masked_invalid(heat)
+                im = hax.imshow(masked, aspect="auto", cmap="viridis_r")
+                hax.set_title(f"{label} rank heatmap")
+                hax.set_xticks(range(len(capsides)))
+                hax.set_xticklabels(capsides, rotation=45, ha="right")
+                hax.set_yticks(range(len(folds)))
+                hax.set_yticklabels(folds)
+                fig.colorbar(im, ax=hax, fraction=0.046, pad=0.04, label="rank (1 = top)")
+            fig.suptitle(f"Phase 4 ordinal rankings (rank 1 = highest value; t_thinnest rank 1 = thinnest); h={h_value}, patch_R={r_value}")
+            filename = "phase04_ordinal_rankings.png" if one_condition else f"phase04_ordinal_rankings_h_{_format_condition_value(h_value)}_R_{_format_condition_value(r_value)}.png"
+            path = args.outdir / filename
+            fig.savefig(path, dpi=150)
+            plt.close(fig)
+            output_files.append(str(path))
+    except Exception as exc:
+        warnings.append(f"plot_failed: {exc}")
+    return output_files, warnings
+
+
+def write_phase04_summary(path: Path, report: Dict, fold_consistency_df: pd.DataFrame, coincidence_df: pd.DataFrame, corr_summary_df: pd.DataFrame) -> None:
+    lines = [
+        f"Phase 4 ordinal fold-rank summary: {report['status']}",
+        "This summary describes ordinal rank agreement only; it does not make causal or significance claims.",
+        f"Capsids: {report['n_capsides']}",
+        f"Folds: {report['n_folds']}",
+        f"h values: {report['h_values']}",
+        f"patch_R values: {report['patch_R_values']}",
+        f"Ranking convention: {report['ranking_direction']}; rank_t_thinnest = 1 means thinnest fold.",
+        "",
+    ]
+    for h_value in report["h_values"]:
+        for r_value in report["patch_R_values"]:
+            sub_fold = fold_consistency_df[(fold_consistency_df["h"].astype(str) == str(h_value)) & (fold_consistency_df["patch_R"].astype(str) == str(r_value)) & (fold_consistency_df["variable"] == "d_max_pct")]
+            if sub_fold.empty:
+                continue
+            top = sub_fold.sort_values(["fraction_rank1", "mean_rank", "fold"], ascending=[False, True, True], kind="mergesort").iloc[0]
+            lines.append(f"Condition h={h_value}, patch_R={r_value}:")
+            lines.append(f"  - Fold most often rank 1 mechanically: {top['fold']} (fraction_rank1={top['fraction_rank1']:.3f})")
+            match = coincidence_df[(coincidence_df["h"].astype(str) == str(h_value)) & (coincidence_df["patch_R"].astype(str) == str(r_value)) & (coincidence_df["comparison"] == "top_d_max_pct_vs_thinnest_t")]
+            if not match.empty and np.isfinite(match.iloc[0]["fraction_top1_match"]):
+                lines.append(f"  - top_d_max_pct_vs_thinnest_t fraction: {match.iloc[0]['fraction_top1_match']:.3f}")
+            sub_corr = corr_summary_df[(corr_summary_df["h"].astype(str) == str(h_value)) & (corr_summary_df["patch_R"].astype(str) == str(r_value))]
+            for _, row in sub_corr.iterrows():
+                rho = row["median_spearman_rho"] if np.isfinite(row["median_spearman_rho"]) else np.nan
+                lines.append(f"  - {row['comparison']}: median Spearman rho={rho:.6g}, consistency={row['consistency_label']}")
+            lines.append("")
+    lines.append("Warnings:")
+    if report["warnings"]:
+        lines.extend(f"  - {w}" for w in report["warnings"])
+    else:
+        lines.append("  none")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def run_phase04(input_df: pd.DataFrame, phase01_report: Dict, phase02_report: Dict, phase03_report: Dict, args: argparse.Namespace) -> Dict:
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    output_files = {
+        "fold_rankings": str(args.outdir / "phase04_fold_rankings.csv"),
+        "rank_correlations_by_capsid": str(args.outdir / "phase04_rank_correlations_by_capsid.csv"),
+        "rank_correlation_summary": str(args.outdir / "phase04_rank_correlation_summary.csv"),
+        "top_rank_coincidence": str(args.outdir / "phase04_top_rank_coincidence.csv"),
+        "fold_rank_consistency": str(args.outdir / "phase04_fold_rank_consistency.csv"),
+        "report": str(args.outdir / "phase04_report.json"),
+        "summary": str(args.outdir / "phase04_summary.txt"),
+        "ordinal_figures": [],
+    }
+    warnings: List[str] = []
+    severe_flags: List[str] = []
+    if phase02_report.get("status") == "WARN":
+        warnings.append("upstream_phase02_warn")
+    if phase03_report.get("status") == "WARN":
+        warnings.append("upstream_phase03_warn")
+    if phase01_report.get("status") == "FAIL":
+        severe_flags.append("phase01_validation_failed")
+    if phase02_report.get("status") == "FAIL":
+        severe_flags.append("phase02_failed")
+    validation = validate_phase04_input(input_df) if not input_df.empty else {
+        "missing_key_columns": PHASE04_KEY_COLUMNS, "missing_required_columns": PHASE04_REQUIRED_COLUMNS,
+        "missing_geometry_columns": PHASE04_GEOMETRY_COLUMNS, "duplicate_key_status": {"is_unique": True, "n_duplicate_rows": 0, "duplicate_examples": []},
+        "nonfinite_counts": {}, "n_ranking_groups": 0, "insufficient_ranking_groups": [],
+    }
+    for col in validation["missing_key_columns"]:
+        severe_flags.append("missing_required_column")
+    if "d_max_pct" in validation["missing_required_columns"]:
+        severe_flags.append("missing_required_column")
+    if not validation["duplicate_key_status"].get("is_unique", True):
+        severe_flags.append("duplicate_observation_key")
+    if validation["n_ranking_groups"] == 0:
+        severe_flags.append("no_valid_ranking_group")
+    for col in validation["missing_geometry_columns"]:
+        warnings.append(f"missing_{col}")
+    if validation["insufficient_ranking_groups"]:
+        warnings.append("insufficient_folds_for_ranking")
+    if validation["nonfinite_counts"].get("d_max_pct", 0):
+        severe_flags.append("missing_d_max_pct")
+    for col in ["t", "Hout", "Hin"]:
+        if validation["nonfinite_counts"].get(col, 0):
+            warnings.append(f"missing_{col}")
+    if severe_flags:
+        rankings_df = pd.DataFrame()
+        corr_df = pd.DataFrame()
+        corr_summary_df = pd.DataFrame()
+        coincidence_df = pd.DataFrame()
+        fold_consistency_df = pd.DataFrame()
+        status = "FAIL"
+    else:
+        rankings_df = compute_fold_rankings(input_df, args)
+        corr_df = compute_rank_correlations_by_capsid(rankings_df)
+        corr_summary_df = compute_rank_correlation_summary(corr_df, float(args.rank_consistency_threshold))
+        coincidence_df = compute_top_rank_coincidence(rankings_df)
+        fold_consistency_df = compute_fold_rank_consistency(rankings_df)
+        all_conditions_have_valid = True
+        for _, group in corr_summary_df.groupby(["h", "patch_R"], sort=True, dropna=False):
+            if int(group["n_valid_capsids"].sum()) == 0:
+                all_conditions_have_valid = False
+        if not all_conditions_have_valid:
+            warnings.append("no_valid_rank_comparisons")
+        if corr_df["warning_flags"].astype(str).str.contains("low_fold_count_rank_correlation", regex=False).any():
+            warnings.append("low_fold_count_rank_correlation")
+        if corr_df["warning_flags"].astype(str).str.contains("ties_present", regex=False).any() or rankings_df[[c for c in PHASE04_TIE_FLAG_COLUMNS.values() if c in rankings_df.columns]].any(axis=None):
+            warnings.append("ties_present")
+        if corr_df["warning_flags"].astype(str).str.contains("zero_rank_variance", regex=False).any():
+            warnings.append("zero_rank_variance")
+        plot_files, plot_warnings = make_phase04_ordinal_figures(rankings_df, args)
+        output_files["ordinal_figures"] = plot_files
+        if plot_warnings:
+            warnings.extend(["plot_failed" if "plot_failed" in w else w for w in plot_warnings])
+        status = "WARN" if warnings else "PASS"
+        if not all_conditions_have_valid:
+            status = "WARN"
+        rankings_df.to_csv(output_files["fold_rankings"], index=False)
+        corr_df.to_csv(output_files["rank_correlations_by_capsid"], index=False)
+        corr_summary_df.to_csv(output_files["rank_correlation_summary"], index=False)
+        coincidence_df.to_csv(output_files["top_rank_coincidence"], index=False)
+        fold_consistency_df.to_csv(output_files["fold_rank_consistency"], index=False)
+    report = {
+        "phase": "04_ordinal_fold_rankings", "status": status, "timestamp": datetime.now(timezone.utc).isoformat(),
+        "input_file": str(args.input), "output_directory": str(args.outdir),
+        "upstream_phase01_status": phase01_report.get("status"), "upstream_phase02_status": phase02_report.get("status"), "upstream_phase03_status": phase03_report.get("status"),
+        "required_columns_checked": PHASE04_REQUIRED_COLUMNS + PHASE04_GEOMETRY_COLUMNS, "missing_columns": validation["missing_key_columns"] + [c for c in validation["missing_required_columns"] if c not in validation["missing_key_columns"]] + validation["missing_geometry_columns"],
+        "n_rows_input": int(len(input_df)), "n_rows_output": int(len(rankings_df)),
+        "n_capsides": int(input_df["capside"].nunique(dropna=True)) if "capside" in input_df.columns else 0,
+        "n_folds": int(input_df["fold"].astype(str).nunique(dropna=True)) if "fold" in input_df.columns else 0,
+        "h_values": _sorted_json_values(input_df["h"]) if "h" in input_df.columns else [], "patch_R_values": _sorted_json_values(input_df["patch_R"]) if "patch_R" in input_df.columns else [],
+        "n_ranking_groups": validation["n_ranking_groups"], "rank_group_cols": PHASE04_RANK_GROUP_COLS,
+        "ranked_variables": PHASE04_RANKED_VARIABLES, "ranking_method": getattr(args, "rank_method", "average"),
+        "ranking_direction": "descending; rank 1 = highest value (rank_t_thinnest is ascending; rank 1 = thinnest fold)",
+        "tie_handling": "average ranks; tied top folds are retained as sets",
+        "rank_correlation_comparisons": [c[0] for c in PHASE04_COMPARISONS], "consistency_threshold": float(args.rank_consistency_threshold),
+        "duplicate_key_status": validation["duplicate_key_status"], "output_files": output_files,
+        "warnings": sorted(dict.fromkeys(warnings)), "severe_flags": sorted(dict.fromkeys(severe_flags)),
+    }
+    if status == "FAIL":
+        # Write empty placeholders so failure diagnostics are deterministic, but only after no upstream commit decision depends on them.
+        for key in ["fold_rankings", "rank_correlations_by_capsid", "rank_correlation_summary", "top_rank_coincidence", "fold_rank_consistency"]:
+            pd.DataFrame().to_csv(output_files[key], index=False)
+        (args.outdir / "phase04_summary.txt").write_text(f"Phase 4 ordinal fold-rank summary: FAIL\nSevere flags: {', '.join(report['severe_flags'])}\n", encoding="utf-8")
+    else:
+        write_phase04_summary(args.outdir / "phase04_summary.txt", report, fold_consistency_df, coincidence_df, corr_summary_df)
+    with (args.outdir / "phase04_report.json").open("w", encoding="utf-8") as f:
+        json.dump(_nan_to_none(report), f, indent=2, ensure_ascii=False, allow_nan=False)
+    return report
+
+
+def _print_phase04_summary(report: Dict) -> None:
+    print(f"[{report['status']}] Phase 4 completed.")
+    files = report.get("output_files", {})
+    print(f"[INFO] Fold rankings table: {files.get('fold_rankings', 'not written')}")
+    print(f"[INFO] Rank correlations by capsid: {files.get('rank_correlations_by_capsid', 'not written')}")
+    print(f"[INFO] Rank correlation summary: {files.get('rank_correlation_summary', 'not written')}")
+    print(f"[INFO] Top-rank coincidence summary: {files.get('top_rank_coincidence', 'not written')}")
+    print(f"[INFO] Fold-rank consistency summary: {files.get('fold_rank_consistency', 'not written')}")
+    print(f"[INFO] Phase 4 report: {files.get('report', 'not written')}")
+    fold_path = Path(files.get("fold_rank_consistency", ""))
+    if fold_path.exists() and fold_path.stat().st_size > 0:
+        try:
+            fold_df = pd.read_csv(fold_path)
+            mech = fold_df[fold_df["variable"] == "d_max_pct"] if "variable" in fold_df.columns else pd.DataFrame()
+            for _, row in mech.sort_values(["h", "patch_R", "fraction_rank1", "mean_rank", "fold"], ascending=[True, True, False, True, True], kind="mergesort").groupby(["h", "patch_R"], sort=True).head(1).iterrows():
+                print(f"[RANK] h={row['h']} patch_R={row['patch_R']} top_mechanical_fold={row['fold']} fraction_rank1={row['fraction_rank1']:.3f}")
+        except Exception:
+            pass
+    match_path = Path(files.get("top_rank_coincidence", ""))
+    if match_path.exists() and match_path.stat().st_size > 0:
+        try:
+            match_df = pd.read_csv(match_path)
+            sub = match_df[match_df["comparison"] == "top_d_max_pct_vs_thinnest_t"] if "comparison" in match_df.columns else pd.DataFrame()
+            for _, row in sub.iterrows():
+                frac = row["fraction_top1_match"] if np.isfinite(row["fraction_top1_match"]) else np.nan
+                print(f"[MATCH] h={row['h']} patch_R={row['patch_R']} comparison=top_d_vs_thinnest_t fraction={frac:.3f}")
+        except Exception:
+            pass
+    if report.get("warnings"):
+        print("[WARN] Phase 4 completed with warnings. See phase04_report.json.")
+
+
+# ---------------------------------------------------------------------
 # Main CLI
 # ---------------------------------------------------------------------
 
@@ -1574,15 +2110,15 @@ def parse_args() -> argparse.Namespace:
             "Capsid mechanical-geometrical-topological analysis. Phase 1 reads, "
             "validates, and normalizes the master CSV; Phase 2 performs fold-level "
             "mechanical comparisons within each (capside, h, patch_R) stratum; "
-            "Phase 3 evaluates centered local geometry-mechanics associations."
+            "Phase 3 evaluates centered local geometry-mechanics associations; Phase 4 compares ordinal fold rankings."
         )
     )
 
     parser.add_argument(
         "--phase",
-        choices=["1", "2", "3"],
+        choices=["1", "2", "3", "4"],
         default="1",
-        help="Analysis phase to run. Phase 1 is the default. Phase 2 runs Phase 1 first; Phase 3 runs Phases 1 and 2 first."
+        help="Analysis phase to run. Phase 1 is the default. Phase 2 runs Phase 1 first; Phase 3 runs Phases 1 and 2 first; Phase 4 runs Phases 1, 2, and 3 first."
     )
 
     parser.add_argument(
@@ -1610,7 +2146,7 @@ def parse_args() -> argparse.Namespace:
         "--outdir",
         default=Path("results"),
         type=Path,
-        help="Output directory for Phase 2 artifacts."
+        help="Output directory for Phase 2, Phase 3, and Phase 4 artifacts."
     )
 
     parser.add_argument(
@@ -1665,13 +2201,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-plots",
         action="store_true",
-        help="Skip Phase 3 centered scatterplot generation."
+        help="Skip Phase 3 centered scatterplots and Phase 4 ordinal ranking plots."
     )
 
     parser.add_argument(
         "--save-bootstrap-distributions",
         action="store_true",
         help="Save full Phase 3 bootstrap slope distributions."
+    )
+
+    parser.add_argument(
+        "--rank-method",
+        default="average",
+        choices=["average", "min", "max", "dense", "first"],
+        help="Phase 4 ranking method for ties. Default: average."
+    )
+
+    parser.add_argument(
+        "--rank-consistency-threshold",
+        default=PHASE04_CONSISTENCY_THRESHOLD,
+        type=float,
+        help="Phase 4 threshold for mostly_positive / mostly_negative consistency labels. Default: 0.75."
     )
 
     parser.add_argument(
@@ -1755,6 +2305,10 @@ def main() -> int:
         print("[ERROR] --ci must be between 0 and 1.", file=sys.stderr)
         return 2
 
+    if not 0 <= args.rank_consistency_threshold <= 1:
+        print("[ERROR] --rank-consistency-threshold must be between 0 and 1.", file=sys.stderr)
+        return 2
+
     try:
         normalized_df, phase01_report = run_phase01(args)
     except Exception as exc:
@@ -1778,18 +2332,37 @@ def main() -> int:
         return 0
 
     centered_path = args.outdir / "phase02_fold_level_centered.csv"
+    centered_phase02_df = pd.DataFrame()
     if phase02_report["status"] == "FAIL" or not centered_path.exists():
         phase03_report = run_phase03(pd.DataFrame(), phase01_report, phase02_report, args)
         _print_phase03_summary(phase03_report)
-        return 1
+        if args.phase == "3":
+            return 1
+    else:
+        centered_phase02_df = pd.read_csv(centered_path)
+        phase03_report = run_phase03(centered_phase02_df, phase01_report, phase02_report, args)
+        _print_phase03_summary(phase03_report)
 
-    centered_phase02_df = pd.read_csv(centered_path)
-    phase03_report = run_phase03(centered_phase02_df, phase01_report, phase02_report, args)
-    _print_phase03_summary(phase03_report)
+    if args.phase == "3":
+        if phase03_report["status"] == "FAIL":
+            return 1
+        if args.fail_on_warning and phase03_report["status"] != "PASS":
+            return 1
+        return 0
 
-    if phase03_report["status"] == "FAIL":
+    phase04_input_df = centered_phase02_df
+    phase03_centered_path = args.outdir / "phase03_centered_geometry.csv"
+    if phase03_centered_path.exists() and phase03_centered_path.stat().st_size > 0:
+        try:
+            phase04_input_df = pd.read_csv(phase03_centered_path)
+        except Exception:
+            phase04_input_df = centered_phase02_df
+    phase04_report = run_phase04(phase04_input_df, phase01_report, phase02_report, phase03_report, args)
+    _print_phase04_summary(phase04_report)
+
+    if phase04_report["status"] == "FAIL":
         return 1
-    if args.fail_on_warning and phase03_report["status"] != "PASS":
+    if args.fail_on_warning and phase04_report["status"] != "PASS":
         return 1
     return 0
 
