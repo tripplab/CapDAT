@@ -3837,7 +3837,7 @@ def compute_phase08_rankings_long(anisotropy_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["h", "patch_R", "metric", "rank", "capside"], kind="mergesort").reset_index(drop=True)
 
 
-def compute_top_rank_coincidence(anisotropy_df: pd.DataFrame) -> pd.DataFrame:
+def compute_phase08_top_rank_coincidence(anisotropy_df: pd.DataFrame) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
     for key, group in anisotropy_df.groupby(PHASE08_CONDITION_COLS, sort=True, dropna=False):
         h_value, r_value = key
@@ -4015,7 +4015,7 @@ def run_phase08(input_df: pd.DataFrame, phase01_report: Dict, phase02_report: Di
     anisotropy = compute_phase08_capsid_anisotropy(input_df, args)
     comparisons = compute_anisotropy_comparison_summary(anisotropy, args) if not anisotropy.empty else pd.DataFrame()
     rankings = compute_phase08_rankings_long(anisotropy) if not anisotropy.empty else pd.DataFrame()
-    top = compute_top_rank_coincidence(anisotropy) if not anisotropy.empty else pd.DataFrame()
+    top = compute_phase08_top_rank_coincidence(anisotropy) if not anisotropy.empty else pd.DataFrame()
     if anisotropy.empty or not pd.to_numeric(anisotropy.get("A_mech", pd.Series(dtype=float)), errors="coerce").notna().any():
         severe.append("no_valid_mechanical_anisotropy")
     if anisotropy.empty or not any(pd.to_numeric(anisotropy.get(m, pd.Series(dtype=float)), errors="coerce").notna().any() for m in ["A_t", "A_Hout", "A_Hin"]):
