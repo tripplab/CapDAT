@@ -4441,6 +4441,484 @@ def _print_phase09_summary(report: Dict[str, Any]) -> None:
     if report.get("warnings"):
         print("[WARN] Phase 9 completed with warnings. See phase09_report.json.")
 
+# ---------------------------------------------------------------------
+# Phase 10: leave-one-capsid-out sensitivity
+# ---------------------------------------------------------------------
+
+PHASE10_REQUIRED_ALWAYS = ["capside", "fold", "h", "patch_R", "d_max_pct", "delta_d_max_pct"]
+PHASE10_GEOMETRY_COLS = ["t", "Hout", "Hin"]
+PHASE10_SIGNED_METRICS = {"slope", "median_spearman_rho", "median_kendall_tau", "mantel_r_pearson", "mantel_r_spearman", "delta_loocv_rmse", "metric_value"}
+
+
+def _phase10_csv(path: Path, df: pd.DataFrame) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+    return str(path)
+
+
+def _phase10_finite(value: Any) -> bool:
+    try:
+        return bool(np.isfinite(float(value)))
+    except Exception:
+        return False
+
+
+def _phase10_float(value: Any) -> float:
+    try:
+        v = float(value)
+        return v if np.isfinite(v) else np.nan
+    except Exception:
+        return np.nan
+
+
+def _phase10_sign(value: Any, threshold: float) -> int:
+    v = _phase10_float(value)
+    if not np.isfinite(v) or abs(v) <= threshold:
+        return 0
+    return 1 if v > 0 else -1
+
+
+def _phase10_sign_flip(full: Any, loo: Any, threshold: float) -> bool:
+    sf = _phase10_sign(full, threshold)
+    sl = _phase10_sign(loo, threshold)
+    return bool(sf != 0 and sl != 0 and sf != sl)
+
+
+def _phase10_relative_change(full: Any, loo: Any, eps: float) -> float:
+    f = _phase10_float(full); l = _phase10_float(loo)
+    if not (np.isfinite(f) and np.isfinite(l)):
+        return np.nan
+    return float(abs(l - f) / (abs(f) + eps))
+
+
+def _phase10_p_cross(full_p: Any, loo_p: Any, threshold: float) -> Tuple[bool, bool, bool]:
+    f = _phase10_float(full_p); l = _phase10_float(loo_p)
+    if not (np.isfinite(f) and np.isfinite(l)):
+        return False, False, False
+    lost = bool(f <= threshold and l > threshold)
+    gained = bool(f > threshold and l <= threshold)
+    return bool(lost or gained), lost, gained
+
+
+def _phase10_join_flags(flags: List[str]) -> str:
+    return ";".join(dict.fromkeys([str(f) for f in flags if f and str(f) != "nan"]))
+
+
+def validate_phase10_input(df: pd.DataFrame) -> Dict[str, Any]:
+    missing = [c for c in PHASE10_REQUIRED_ALWAYS if c not in df.columns]
+    missing_geom = [c for c in PHASE10_GEOMETRY_COLS if c not in df.columns]
+    missing_topo = [c for c in PHASE09_PRIMARY_TOPO if c not in df.columns]
+    dup_rows = 0; dup_examples: List[Dict[str, Any]] = []
+    if all(c in df.columns for c in OBSERVATION_KEY):
+        dup = df.duplicated(subset=OBSERVATION_KEY, keep=False)
+        dup_rows = int(dup.sum())
+        if dup_rows:
+            dup_examples = df.loc[dup, OBSERVATION_KEY].drop_duplicates().head(20).to_dict(orient="records")
+    n_caps = int(df["capside"].astype(str).nunique(dropna=True)) if "capside" in df.columns else 0
+    flags: List[str] = []
+    if missing: flags.append("missing_required_column")
+    if dup_rows: flags.append("duplicate_observation_key")
+    if n_caps < 3: flags.append("insufficient_capsids_for_loo")
+    elif n_caps == 3: flags.append("very_low_capsid_count_for_loo")
+    elif n_caps == 4: flags.append("low_capsid_count_descriptive_only")
+    if missing_geom: flags.append("geometry_unavailable")
+    if missing_topo: flags.append("topology_unavailable")
+    return {"missing_required_columns": missing, "missing_geometry_columns": missing_geom, "missing_topology_columns": missing_topo, "duplicate_key_status": {"n_duplicate_rows": dup_rows, "duplicate_examples": dup_examples}, "n_capsides": n_caps, "warning_flags": flags}
+
+
+def build_loo_run_index(df: pd.DataFrame, validation: Dict[str, Any], args: argparse.Namespace) -> pd.DataFrame:
+    caps = sorted(df["capside"].dropna().astype(str).unique().tolist()) if "capside" in df.columns else []
+    rows: List[Dict[str, Any]] = []
+    base_flags = [f for f in validation.get("warning_flags", []) if f in ["very_low_capsid_count_for_loo", "low_capsid_count_descriptive_only", "insufficient_capsids_for_loo", "duplicate_observation_key"]]
+    for i, cap in enumerate(["NONE"] + caps):
+        sub = df if cap == "NONE" else df[df["capside"].astype(str) != cap]
+        n_caps = int(sub["capside"].astype(str).nunique(dropna=True)) if "capside" in sub.columns else 0
+        flags = list(base_flags)
+        if cap != "NONE" and n_caps < 2: flags.append("insufficient_capsids_after_exclusion")
+        rows.append({
+            "run_label": "full" if cap == "NONE" else f"without_{cap}",
+            "run_type": "full" if cap == "NONE" else "leave_one_capsid_out",
+            "excluded_capside": cap,
+            "n_rows": int(len(sub)),
+            "n_capsides": n_caps,
+            "n_folds": int(sub["fold"].astype(str).nunique(dropna=True)) if "fold" in sub.columns else 0,
+            "h_values": ";".join(map(str, _sorted_json_values(sub["h"]))) if "h" in sub.columns else "",
+            "patch_R_values": ";".join(map(str, _sorted_json_values(sub["patch_R"]))) if "patch_R" in sub.columns else "",
+            "sub_seed": int(args.seed) + i,
+            "valid_run": bool(len(sub) > 0 and n_caps >= 2),
+            "warning_flags": _phase10_join_flags(flags),
+        })
+    return pd.DataFrame(rows)
+
+
+def _phase10_prepare_subset(df: pd.DataFrame) -> pd.DataFrame:
+    centered = compute_fold_centered_table(df.copy(), {}) if "delta_d_max_pct" not in df.columns else df.copy()
+    if all(c in centered.columns for c in ["t", "Hout", "Hin", "delta_d_max_pct"]):
+        centered = compute_centered_geometry(centered)
+    return centered
+
+
+def _phase10_associations(centered: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    if not all(c in centered.columns for c in ["delta_d_max_pct", "t", "Hout", "Hin"]):
+        return pd.DataFrame()
+    c = compute_centered_geometry(centered) if not all(p in centered.columns for p in PHASE03_PREDICTORS) else centered.copy()
+    slopes, _, _ = fit_centered_geometry_models(c, args)
+    return slopes
+
+
+def _phase10_rankings(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    if not all(c in df.columns for c in PHASE04_REQUIRED_COLUMNS):
+        return pd.DataFrame()
+    rankings = compute_fold_rankings(df, args)
+    corr = compute_rank_correlations_by_capsid(rankings)
+    summary = compute_rank_correlation_summary(corr, args.rank_consistency_threshold).rename(columns={"comparison": "comparison_id"})
+    top = compute_top_rank_coincidence(rankings).rename(columns={"comparison": "comparison_id"})
+    rows: List[Dict[str, Any]] = []
+    top_by = {(str(r["h"]), str(r["patch_R"]), r["comparison_id"]): r for _, r in top.iterrows()} if not top.empty else {}
+    top_map = {"d_max_pct_vs_t": "top_d_max_pct_vs_top_t", "d_max_pct_vs_t_thinnest": "top_d_max_pct_vs_thinnest_t", "d_max_pct_vs_Hout": "top_d_max_pct_vs_top_Hout", "d_max_pct_vs_Hin": "top_d_max_pct_vs_top_Hin"}
+    for _, r in summary.iterrows():
+        tr = top_by.get((str(r["h"]), str(r["patch_R"]), top_map.get(r["comparison_id"], "")), {})
+        row = r.to_dict()
+        row["fraction_top1_match"] = tr.get("fraction_top1_match", np.nan)
+        row["mean_top1_jaccard"] = tr.get("mean_top1_jaccard", np.nan)
+        row["top_warning_flags"] = tr.get("warning_flags", "")
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _phase10_models(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    if not all(c in df.columns for c in PHASE05_CORE_COLUMNS):
+        return pd.DataFrame()
+    datasets = prepare_phase05_model_datasets(df)
+    fits: List[Dict[str, Any]] = []
+    for (h, r), dsets in datasets.items():
+        for model_id in PHASE05_MODEL_ORDER:
+            ds_type = PHASE05_MODEL_FORMULAS[model_id]["dataset_type"]
+            fits.append(fit_phase05_model(dsets[ds_type], model_id, h, r, args))
+    if not fits:
+        return pd.DataFrame()
+    return compute_phase05_contributions(_phase05_metric_rows(fits))
+
+
+def _phase10_distance(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    if not all(c in df.columns for c in ["capside", "fold", "h", "patch_R", "d_max_pct", "t", "Hout", "Hin"]):
+        return pd.DataFrame()
+    work = make_observation_ids(df)
+    rows: List[Dict[str, Any]] = []
+    conditions = work[["h", "patch_R"]].drop_duplicates().sort_values(["h", "patch_R"], key=lambda s: s.astype(str), kind="mergesort")
+    for ci, cond in conditions.reset_index(drop=True).iterrows():
+        h = cond["h"]; r = cond["patch_R"]; flags: List[str] = []
+        cdf, n_excl = prepare_phase07_condition_dataset(work, h, r, ["d_max_pct"] + PHASE07_PRIMARY_GEOM)
+        if n_excl: flags.append(f"complete_case_rows_excluded={n_excl}")
+        if len(cdf) < 4:
+            flags.append("insufficient_observations_after_exclusion")
+            rows.append({"h": _json_scalar(h), "patch_R": _json_scalar(r), "comparison_id": "D_mech_vs_D_geom_simple", "mantel_r_pearson": np.nan, "mantel_r_spearman": np.nan, "p_perm_two_sided": np.nan, "valid_comparison": False, "interpretation_label": "comparison_invalid", "warning_flags": _phase10_join_flags(flags)})
+            continue
+        zdf, geom_used, _, zflags = zscore_geometry_variables(cdf, PHASE07_PRIMARY_GEOM); flags.extend(zflags)
+        Dm = compute_mechanical_distance(zdf); Dg = compute_geometric_distance(zdf, geom_used)
+        stats = compute_mantel_statistics(Dm, Dg) if Dg.size else {"mantel_r_pearson": np.nan, "mantel_r_spearman": np.nan, "valid_comparison": False, "warning_flags": ["invalid_distance_matrix"]}
+        flags.extend(stats.get("warning_flags", []))
+        perm, reps = run_restricted_mantel_permutation(zdf, Dg, args, seed_offset=int(ci) * 1000) if Dg.size else ({"p_perm_two_sided": np.nan, "warning_flags": []}, [])
+        perm = _phase07_pvals_from_reps(perm, reps, stats.get("mantel_r_pearson", np.nan)); flags.extend(perm.get("warning_flags", []))
+        valid = bool(stats.get("valid_comparison", False) and np.isfinite(perm.get("p_perm_two_sided", np.nan)))
+        rows.append({"h": _json_scalar(h), "patch_R": _json_scalar(r), "comparison_id": "D_mech_vs_D_geom_simple", "mantel_r_pearson": stats.get("mantel_r_pearson", np.nan), "mantel_r_spearman": stats.get("mantel_r_spearman", np.nan), "p_perm_two_sided": perm.get("p_perm_two_sided", np.nan), "valid_comparison": valid, "interpretation_label": _phase07_interpretation(valid, stats.get("mantel_r_pearson", np.nan), perm.get("p_perm_two_sided", np.nan)), "warning_flags": _phase10_join_flags(flags)})
+    return pd.DataFrame(rows)
+
+
+def _phase10_topology(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    if not all(c in df.columns for c in ["capside", "fold", "h", "patch_R", "d_max_pct", "delta_d_max_pct", "H1_norm", "H2_norm"]):
+        return pd.DataFrame()
+    topo_vars, optional = _phase09_topology_vars(df, args)
+    centered = compute_phase09_centered_topology(df, topo_vars, [])
+    assoc = fit_phase09_centered_associations(centered, topo_vars, args)
+    rows: List[Dict[str, Any]] = []
+    for _, r in assoc.iterrows():
+        rows.append({"h": r["h"], "patch_R": r["patch_R"], "analysis_type": "centered_topology_association", "comparison_or_predictor": r["predictor"], "metric_value": r["slope"], "p_perm_two_sided": r.get("p_perm_two_sided", np.nan), "label": "valid_model" if bool(r.get("valid_model", False)) else "comparison_invalid", "warning_flags": r.get("warning_flags", "")})
+    work = centered
+    conditions = work[["h", "patch_R"]].drop_duplicates().sort_values(["h", "patch_R"], key=lambda s: s.astype(str), kind="mergesort")
+    for ci, cond in conditions.reset_index(drop=True).iterrows():
+        h = cond["h"]; r = cond["patch_R"]; flags: List[str] = []
+        vars_needed = ["d_max_pct"] + [g for g in PHASE09_GEOM_SIMPLE if g in work.columns] + topo_vars
+        cdf, n_excl = prepare_phase07_condition_dataset(work, h, r, vars_needed)
+        if n_excl: flags.append(f"complete_case_rows_excluded={n_excl}")
+        if len(cdf) < 4:
+            continue
+        zdf, geom_used, gf = zscore_phase09_variables(cdf, [g for g in PHASE09_GEOM_SIMPLE if g in cdf.columns], "geometry")
+        zdf, topo_used, tf = zscore_phase09_variables(zdf, topo_vars, "topology"); flags.extend(gf + tf)
+        Dm = compute_mechanical_distance(zdf)
+        Dg = phase09_distance_from_z(zdf, geom_used) if geom_used else np.empty((0, 0))
+        Dt = phase09_distance_from_z(zdf, topo_used) if topo_used else np.empty((0, 0))
+        Dc = phase09_distance_from_z(zdf, geom_used + topo_used) if geom_used and topo_used else np.empty((0, 0))
+        perm_rows: List[Dict[str, Any]] = []
+        comps = [("D_mech_vs_D_topo", Dt, topo_used), ("D_mech_vs_D_geom_topo", Dc, geom_used + topo_used)]
+        comp_rows: Dict[str, Dict[str, Any]] = {}
+        for j, (cid, D, used) in enumerate(comps):
+            row = phase09_mantel_row(h, r, cid, "D_mech", cid.replace("D_mech_vs_", ""), Dm, D, ["d_max_pct"], used, zdf, args, True, int(ci) * 1000 + j, perm_rows)
+            comp_rows[cid] = row
+            rows.append({"h": row["h"], "patch_R": row["patch_R"], "analysis_type": "topology_distance", "comparison_or_predictor": cid, "metric_value": row["mantel_r_pearson"], "p_perm_two_sided": row["p_perm_two_sided"], "label": row["interpretation_label"], "warning_flags": _phase10_join_flags(flags + str(row.get("warning_flags", "")).split(";"))})
+        base_stats = compute_mantel_statistics(Dm, Dg) if Dg.size else {"mantel_r_pearson": np.nan, "valid_comparison": False}
+        ext = comp_rows.get("D_mech_vs_D_geom_topo", {})
+        delta_abs = abs(_phase10_float(ext.get("mantel_r_pearson", np.nan))) - abs(_phase10_float(base_stats.get("mantel_r_pearson", np.nan))) if base_stats.get("valid_comparison") and ext.get("valid_comparison") else np.nan
+        label = "comparison_invalid"
+        if np.isfinite(delta_abs):
+            label = "topology_improves_distance_correspondence" if delta_abs > 0 else "topology_does_not_improve_distance_correspondence"
+        rows.append({"h": _json_scalar(h), "patch_R": _json_scalar(r), "analysis_type": "geom_vs_geom_topo_value_add", "comparison_or_predictor": "geom_vs_geom_topo", "metric_value": delta_abs, "p_perm_two_sided": ext.get("p_perm_two_sided", np.nan), "label": label, "warning_flags": _phase10_join_flags(flags)})
+    return pd.DataFrame(rows)
+
+
+def run_key_analyses_for_loo_dataset(df_subset: pd.DataFrame, run_label: str, excluded_capside: str, args: argparse.Namespace) -> Dict[str, pd.DataFrame]:
+    old_seed = args.seed
+    prepared = _phase10_prepare_subset(df_subset)
+    outputs = {
+        "centered": _phase10_associations(prepared, args),
+        "ranking": _phase10_rankings(prepared, args),
+        "model": _phase10_models(prepared, args),
+        "distance": _phase10_distance(prepared, args),
+        "topology": _phase10_topology(prepared, args),
+    }
+    for df in outputs.values():
+        if not df.empty:
+            df.insert(0, "run_label", run_label)
+            df.insert(1, "run_type", "full" if excluded_capside == "NONE" else "leave_one_capsid_out")
+            df.insert(2, "excluded_capside", excluded_capside)
+    args.seed = old_seed
+    return outputs
+
+
+def _phase10_find_full(full_df: pd.DataFrame, keys: Dict[str, Any]) -> Optional[pd.Series]:
+    if full_df.empty:
+        return None
+    mask = np.ones(len(full_df), dtype=bool)
+    for k, v in keys.items():
+        if k not in full_df.columns:
+            return None
+        mask &= full_df[k].astype(str).eq(str(v)).to_numpy()
+    m = full_df.loc[mask]
+    return m.iloc[0] if not m.empty else None
+
+
+def _phase10_flags_and_label(full_metric: Any, loo_metric: Any, full_p: Any = np.nan, loo_p: Any = np.nan, full_label: str = "", loo_label: str = "", full_valid: Any = True, loo_valid: Any = True, args: argparse.Namespace = None, loocv: bool = False) -> Tuple[str, str, Dict[str, Any]]:
+    threshold = float(args.loo_relative_change_threshold); eps = float(args.stability_epsilon); near = float(args.near_zero_threshold); pthr = float(args.p_threshold)
+    rel = _phase10_relative_change(full_metric, loo_metric, eps)
+    flip = _phase10_sign_flip(full_metric, loo_metric, near)
+    pcross, lost, gained = _phase10_p_cross(full_p, loo_p, pthr)
+    label_changed = bool(str(full_label) != str(loo_label)) if full_label or loo_label else False
+    loocv_rev = False
+    if loocv:
+        f = _phase10_float(full_metric); l = _phase10_float(loo_metric)
+        loocv_rev = bool(np.isfinite(f) and np.isfinite(l) and ((f < 0 and l >= 0) or (f >= 0 and l < 0)))
+    flags: List[str] = []
+    if not bool(full_valid) or not bool(loo_valid): flags.append("loo_run_invalid")
+    if flip: flags.append("sign_flip")
+    if np.isfinite(rel) and rel >= threshold: flags.append("large_relative_change")
+    if pcross: flags.append("p_threshold_crossed")
+    if lost: flags.append("support_lost_after_exclusion")
+    if gained: flags.append("support_appears_after_exclusion")
+    if label_changed: flags.append("interpretation_label_changed")
+    if loocv_rev: flags.append("loocv_reversal")
+    if any(f in flags for f in ["sign_flip", "support_lost_after_exclusion", "interpretation_label_changed", "loocv_reversal"]): flags.append("dominated_by_single_capsid")
+    label = "dominated_by_single_capsid" if "dominated_by_single_capsid" in flags else ("moderately_sensitive" if "large_relative_change" in flags else "stable")
+    return _phase10_join_flags(flags), label, {"relative_change": rel, "sign_flip": flip, "p_crosses_threshold": pcross, "support_lost": lost, "support_gained": gained, "label_changed": label_changed, "loocv_reversal": loocv_rev}
+
+def compare_full_vs_loo(full: Dict[str, pd.DataFrame], loo_outputs: List[Dict[str, pd.DataFrame]], args: argparse.Namespace) -> Dict[str, pd.DataFrame]:
+    centered_rows: List[Dict[str, Any]] = []; ranking_rows: List[Dict[str, Any]] = []; model_rows: List[Dict[str, Any]] = []; distance_rows: List[Dict[str, Any]] = []; topo_rows: List[Dict[str, Any]] = []
+    for out in loo_outputs:
+        loo = out["outputs"]
+        for _, r in loo.get("centered", pd.DataFrame()).iterrows():
+            f = _phase10_find_full(full.get("centered", pd.DataFrame()), {"h": r["h"], "patch_R": r["patch_R"], "predictor": r["predictor"]})
+            if f is None: continue
+            flags, label, extra = _phase10_flags_and_label(f.get("slope"), r.get("slope"), f.get("p_perm_two_sided"), r.get("p_perm_two_sided"), "valid" if f.get("valid_model") else "invalid", "valid" if r.get("valid_model") else "invalid", f.get("valid_model"), r.get("valid_model"), args)
+            centered_rows.append({"h": r["h"], "patch_R": r["patch_R"], "predictor": r["predictor"], "response": r.get("response", "delta_d_max_pct"), "full_slope": f.get("slope"), "loo_slope": r.get("slope"), "delta_slope": _phase10_float(r.get("slope"))-_phase10_float(f.get("slope")), "abs_delta_slope": abs(_phase10_float(r.get("slope"))-_phase10_float(f.get("slope"))), "relative_change_slope": extra["relative_change"], "sign_flip_slope": extra["sign_flip"], "full_r_squared": f.get("r_squared"), "loo_r_squared": r.get("r_squared"), "delta_r_squared": _phase10_float(r.get("r_squared"))-_phase10_float(f.get("r_squared")), "full_p_perm_two_sided": f.get("p_perm_two_sided"), "loo_p_perm_two_sided": r.get("p_perm_two_sided"), "p_crosses_threshold": extra["p_crosses_threshold"], "full_ci_low": f.get("slope_ci_low"), "full_ci_high": f.get("slope_ci_high"), "loo_ci_low": r.get("slope_ci_low"), "loo_ci_high": r.get("slope_ci_high"), "full_valid_model": bool(f.get("valid_model", False)), "loo_valid_model": bool(r.get("valid_model", False)), "excluded_capside": r["excluded_capside"], "run_label": r["run_label"], "dominance_flags": flags, "stability_label": label, "warning_flags": _phase10_join_flags(str(f.get("warning_flags", "")).split(";")+str(r.get("warning_flags", "")).split(";"))})
+        for _, r in loo.get("ranking", pd.DataFrame()).iterrows():
+            f = _phase10_find_full(full.get("ranking", pd.DataFrame()), {"h": r["h"], "patch_R": r["patch_R"], "comparison_id": r["comparison_id"]})
+            if f is None: continue
+            flags, label, extra = _phase10_flags_and_label(f.get("median_spearman_rho"), r.get("median_spearman_rho"), np.nan, np.nan, f.get("consistency_label", ""), r.get("consistency_label", ""), True, True, args)
+            kflip = _phase10_sign_flip(f.get("median_kendall_tau"), r.get("median_kendall_tau"), args.near_zero_threshold)
+            if kflip and "sign_flip" not in flags: flags = _phase10_join_flags(flags.split(";") + ["sign_flip", "dominated_by_single_capsid"]); label = "dominated_by_single_capsid"
+            ranking_rows.append({"h": r["h"], "patch_R": r["patch_R"], "comparison_id": r["comparison_id"], "full_median_spearman_rho": f.get("median_spearman_rho"), "loo_median_spearman_rho": r.get("median_spearman_rho"), "delta_median_spearman_rho": _phase10_float(r.get("median_spearman_rho"))-_phase10_float(f.get("median_spearman_rho")), "sign_flip_spearman": extra["sign_flip"], "full_median_kendall_tau": f.get("median_kendall_tau"), "loo_median_kendall_tau": r.get("median_kendall_tau"), "delta_median_kendall_tau": _phase10_float(r.get("median_kendall_tau"))-_phase10_float(f.get("median_kendall_tau")), "sign_flip_kendall": kflip, "full_consistency_label": f.get("consistency_label"), "loo_consistency_label": r.get("consistency_label"), "consistency_label_changed": str(f.get("consistency_label")) != str(r.get("consistency_label")), "full_fraction_top1_match": f.get("fraction_top1_match"), "loo_fraction_top1_match": r.get("fraction_top1_match"), "delta_fraction_top1_match": _phase10_float(r.get("fraction_top1_match"))-_phase10_float(f.get("fraction_top1_match")), "excluded_capside": r["excluded_capside"], "run_label": r["run_label"], "dominance_flags": flags, "stability_label": label, "warning_flags": _phase10_join_flags(str(f.get("warning_flags", "")).split(";")+str(r.get("warning_flags", "")).split(";")+str(r.get("top_warning_flags", "")).split(";"))})
+        for _, r in loo.get("model", pd.DataFrame()).iterrows():
+            f = _phase10_find_full(full.get("model", pd.DataFrame()), {"h": r["h"], "patch_R": r["patch_R"], "comparison_id": r["comparison_id"]})
+            if f is None: continue
+            flags, label, extra = _phase10_flags_and_label(f.get("delta_loocv_rmse"), r.get("delta_loocv_rmse"), np.nan, np.nan, f.get("interpretation_label", ""), r.get("interpretation_label", ""), f.get("interpretation_label") != "comparison_invalid", r.get("interpretation_label") != "comparison_invalid", args, loocv=True)
+            model_rows.append({"h": r["h"], "patch_R": r["patch_R"], "comparison_id": r["comparison_id"], "contribution_label": r.get("contribution_label"), "full_delta_r_squared": f.get("delta_r_squared"), "loo_delta_r_squared": r.get("delta_r_squared"), "delta_delta_r_squared": _phase10_float(r.get("delta_r_squared"))-_phase10_float(f.get("delta_r_squared")), "relative_change_delta_r_squared": _phase10_relative_change(f.get("delta_r_squared"), r.get("delta_r_squared"), args.stability_epsilon), "full_delta_r_squared_adjusted": f.get("delta_r_squared_adjusted"), "loo_delta_r_squared_adjusted": r.get("delta_r_squared_adjusted"), "delta_delta_r_squared_adjusted": _phase10_float(r.get("delta_r_squared_adjusted"))-_phase10_float(f.get("delta_r_squared_adjusted")), "full_delta_loocv_rmse": f.get("delta_loocv_rmse"), "loo_delta_loocv_rmse": r.get("delta_loocv_rmse"), "delta_delta_loocv_rmse": _phase10_float(r.get("delta_loocv_rmse"))-_phase10_float(f.get("delta_loocv_rmse")), "loocv_reversal": extra["loocv_reversal"], "full_interpretation_label": f.get("interpretation_label"), "loo_interpretation_label": r.get("interpretation_label"), "interpretation_label_changed": extra["label_changed"], "full_valid_comparison": f.get("interpretation_label") != "comparison_invalid", "loo_valid_comparison": r.get("interpretation_label") != "comparison_invalid", "excluded_capside": r["excluded_capside"], "run_label": r["run_label"], "dominance_flags": flags, "stability_label": label, "warning_flags": _phase10_join_flags(str(f.get("warning_flags", "")).split(";")+str(r.get("warning_flags", "")).split(";"))})
+        for _, r in loo.get("distance", pd.DataFrame()).iterrows():
+            f = _phase10_find_full(full.get("distance", pd.DataFrame()), {"h": r["h"], "patch_R": r["patch_R"], "comparison_id": r["comparison_id"]})
+            if f is None: continue
+            flags, label, extra = _phase10_flags_and_label(f.get("mantel_r_pearson"), r.get("mantel_r_pearson"), f.get("p_perm_two_sided"), r.get("p_perm_two_sided"), f.get("interpretation_label", ""), r.get("interpretation_label", ""), f.get("valid_comparison"), r.get("valid_comparison"), args)
+            distance_rows.append({"h": r["h"], "patch_R": r["patch_R"], "comparison_id": r["comparison_id"], "full_mantel_r_pearson": f.get("mantel_r_pearson"), "loo_mantel_r_pearson": r.get("mantel_r_pearson"), "delta_mantel_r_pearson": _phase10_float(r.get("mantel_r_pearson"))-_phase10_float(f.get("mantel_r_pearson")), "relative_change_mantel_r_pearson": extra["relative_change"], "sign_flip_mantel_r_pearson": extra["sign_flip"], "full_mantel_r_spearman": f.get("mantel_r_spearman"), "loo_mantel_r_spearman": r.get("mantel_r_spearman"), "delta_mantel_r_spearman": _phase10_float(r.get("mantel_r_spearman"))-_phase10_float(f.get("mantel_r_spearman")), "sign_flip_mantel_r_spearman": _phase10_sign_flip(f.get("mantel_r_spearman"), r.get("mantel_r_spearman"), args.near_zero_threshold), "full_p_perm_two_sided": f.get("p_perm_two_sided"), "loo_p_perm_two_sided": r.get("p_perm_two_sided"), "p_crosses_threshold": extra["p_crosses_threshold"], "full_interpretation_label": f.get("interpretation_label"), "loo_interpretation_label": r.get("interpretation_label"), "interpretation_label_changed": extra["label_changed"], "excluded_capside": r["excluded_capside"], "run_label": r["run_label"], "dominance_flags": flags, "stability_label": label, "warning_flags": _phase10_join_flags(str(f.get("warning_flags", "")).split(";")+str(r.get("warning_flags", "")).split(";"))})
+        for _, r in loo.get("topology", pd.DataFrame()).iterrows():
+            f = _phase10_find_full(full.get("topology", pd.DataFrame()), {"h": r["h"], "patch_R": r["patch_R"], "analysis_type": r["analysis_type"], "comparison_or_predictor": r["comparison_or_predictor"]})
+            if f is None: continue
+            flags, label, extra = _phase10_flags_and_label(f.get("metric_value"), r.get("metric_value"), f.get("p_perm_two_sided"), r.get("p_perm_two_sided"), f.get("label", ""), r.get("label", ""), f.get("label") != "comparison_invalid", r.get("label") != "comparison_invalid", args)
+            topo_rows.append({"h": r["h"], "patch_R": r["patch_R"], "analysis_type": r["analysis_type"], "comparison_or_predictor": r["comparison_or_predictor"], "full_metric_value": f.get("metric_value"), "loo_metric_value": r.get("metric_value"), "delta_metric_value": _phase10_float(r.get("metric_value"))-_phase10_float(f.get("metric_value")), "relative_change_metric_value": extra["relative_change"], "sign_flip": extra["sign_flip"], "full_p_perm_two_sided": f.get("p_perm_two_sided"), "loo_p_perm_two_sided": r.get("p_perm_two_sided"), "p_crosses_threshold": extra["p_crosses_threshold"], "full_label": f.get("label"), "loo_label": r.get("label"), "label_changed": extra["label_changed"], "excluded_capside": r["excluded_capside"], "run_label": r["run_label"], "dominance_flags": flags, "stability_label": label, "warning_flags": _phase10_join_flags(str(f.get("warning_flags", "")).split(";")+str(r.get("warning_flags", "")).split(";"))})
+    return {"centered": pd.DataFrame(centered_rows), "ranking": pd.DataFrame(ranking_rows), "model": pd.DataFrame(model_rows), "distance": pd.DataFrame(distance_rows), "topology": pd.DataFrame(topo_rows)}
+
+
+def build_overall_stability_summary(comparisons: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    specs = {"centered": ("centered_geometry_association", ["h", "patch_R", "predictor"], "predictor", "full_slope", "loo_slope", "relative_change_slope"), "ranking": ("ranking", ["h", "patch_R", "comparison_id"], "comparison_id", "full_median_spearman_rho", "loo_median_spearman_rho", None), "model": ("additive_model", ["h", "patch_R", "comparison_id"], "comparison_id", "full_delta_loocv_rmse", "loo_delta_loocv_rmse", "relative_change_delta_r_squared"), "distance": ("distance_matrix", ["h", "patch_R", "comparison_id"], "comparison_id", "full_mantel_r_pearson", "loo_mantel_r_pearson", "relative_change_mantel_r_pearson"), "topology": ("topology", ["h", "patch_R", "analysis_type", "comparison_or_predictor"], "comparison_or_predictor", "full_metric_value", "loo_metric_value", "relative_change_metric_value")}
+    rows: List[Dict[str, Any]] = []
+    for name, df in comparisons.items():
+        if df.empty or name not in specs: continue
+        fam, keys, cid_col, full_col, loo_col, rel_col = specs[name]
+        for key, g in df.groupby(keys, sort=True, dropna=False):
+            if not isinstance(key, tuple): key = (key,)
+            vals = pd.to_numeric(g[loo_col], errors="coerce").dropna()
+            full_val = _phase10_float(g[full_col].iloc[0]) if full_col in g else np.nan
+            rels = pd.to_numeric(g[rel_col], errors="coerce") if rel_col and rel_col in g else pd.Series(dtype=float)
+            flags = ";".join(g.get("dominance_flags", pd.Series(dtype=str)).fillna(""))
+            labels = g.get("stability_label", pd.Series(dtype=str)).astype(str).tolist()
+            final = "stable"
+            if labels.count("dominated_by_single_capsid"):
+                final = "dominated_by_single_capsid"
+            elif labels.count("stable") == 0 and labels:
+                final = "unstable_across_exclusions"
+            elif any(l == "moderately_sensitive" for l in labels):
+                final = "moderately_sensitive"
+            invalid = int(flags.count("loo_run_invalid"))
+            if invalid >= 2: final = "unstable_across_exclusions"
+            abs_deltas = (pd.to_numeric(g[loo_col], errors="coerce") - full_val).abs()
+            max_idx = abs_deltas.idxmax() if len(abs_deltas.dropna()) else g.index[0]
+            dom = str(g.loc[max_idx, "excluded_capside"]) if max_idx in g.index else ""
+            h = key[0]; r = key[1]; conclusion_id = key[-1] if name != "topology" else f"{key[2]}:{key[3]}"
+            rows.append({"analysis_family": fam, "h": h, "patch_R": r, "conclusion_id": conclusion_id, "full_metric_name": full_col.replace("full_", ""), "full_metric_value": full_val, "n_exclusions_tested": int(len(g)), "n_valid_exclusions": int(len(g) - invalid), "n_invalid_exclusions": invalid, "min_loo_value": float(vals.min()) if len(vals) else np.nan, "max_loo_value": float(vals.max()) if len(vals) else np.nan, "mean_loo_value": float(vals.mean()) if len(vals) else np.nan, "sd_loo_value": float(vals.std(ddof=1)) if len(vals) > 1 else np.nan, "max_abs_delta": float(abs_deltas.max()) if len(abs_deltas.dropna()) else np.nan, "max_relative_change": float(rels.max()) if len(rels.dropna()) else np.nan, "capsid_causing_max_change": dom, "n_sign_flips": flags.count("sign_flip"), "capsids_causing_sign_flip": _phase10_join_flags(g.loc[g["dominance_flags"].fillna("").str.contains("sign_flip"), "excluded_capside"].astype(str).tolist()) if "dominance_flags" in g else "", "n_label_changes": flags.count("interpretation_label_changed"), "capsids_causing_label_change": _phase10_join_flags(g.loc[g["dominance_flags"].fillna("").str.contains("interpretation_label_changed"), "excluded_capside"].astype(str).tolist()) if "dominance_flags" in g else "", "n_support_losses": flags.count("support_lost_after_exclusion"), "capsids_causing_support_loss": _phase10_join_flags(g.loc[g["dominance_flags"].fillna("").str.contains("support_lost_after_exclusion"), "excluded_capside"].astype(str).tolist()) if "dominance_flags" in g else "", "n_loocv_reversals": flags.count("loocv_reversal"), "capsids_causing_loocv_reversal": _phase10_join_flags(g.loc[g["dominance_flags"].fillna("").str.contains("loocv_reversal"), "excluded_capside"].astype(str).tolist()) if "dominance_flags" in g else "", "final_stability_label": final, "dominant_capsid_candidate": dom if final in ["dominated_by_single_capsid", "unstable_across_exclusions"] else "", "warning_flags": _phase10_join_flags((";".join(g.get("warning_flags", pd.Series(dtype=str)).fillna("")).split(";")) + (["unstable_across_exclusions"] if final == "unstable_across_exclusions" else []))})
+    out = pd.DataFrame(rows)
+    return out.sort_values(["analysis_family", "h", "patch_R", "conclusion_id"], key=lambda s: s.astype(str), kind="mergesort") if not out.empty else out
+
+
+def build_dominated_conclusions_table(summary: pd.DataFrame) -> pd.DataFrame:
+    if summary.empty:
+        return pd.DataFrame(columns=["analysis_family", "h", "patch_R", "conclusion_id", "full_result_summary", "dominant_capsid_candidate", "exclusion_effect_summary", "triggered_criteria", "recommended_interpretation", "warning_flags"])
+    rows=[]
+    bad=summary[summary["final_stability_label"].isin(["dominated_by_single_capsid", "unstable_across_exclusions"])]
+    for _, r in bad.iterrows():
+        caps = r.get("dominant_capsid_candidate", "") or r.get("capsid_causing_max_change", "")
+        crit=[]
+        for col, lab in [("n_sign_flips","direction_reversal"),("n_support_losses","support_loss"),("n_loocv_reversals","loocv_reversal"),("n_label_changes","label_change")]:
+            if int(r.get(col,0) or 0)>0: crit.append(lab)
+        rows.append({"analysis_family": r["analysis_family"], "h": r["h"], "patch_R": r["patch_R"], "conclusion_id": r["conclusion_id"], "full_result_summary": f"{r['full_metric_name']}={r['full_metric_value']}", "dominant_capsid_candidate": caps, "exclusion_effect_summary": f"max_abs_delta={r['max_abs_delta']}; max_relative_change={r['max_relative_change']}", "triggered_criteria": _phase10_join_flags(crit) or r["final_stability_label"], "recommended_interpretation": f"Do not treat this as a general capsid-level relationship; the result is sensitive to excluding {caps}.", "warning_flags": r.get("warning_flags", "")})
+    out=pd.DataFrame(rows)
+    return out.sort_values(["analysis_family","h","patch_R","dominant_capsid_candidate","conclusion_id"], key=lambda s:s.astype(str), kind="mergesort") if not out.empty else out
+
+def make_phase10_figures(comparisons: Dict[str, pd.DataFrame], args: argparse.Namespace) -> Tuple[List[str], List[str]]:
+    if args.no_plots:
+        return [], []
+    files: List[str] = []; warnings: List[str] = []
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+        fig_specs = [
+            ("centered", "predictor", "loo_slope", "full_slope", "Slope", "phase10_centered_association_sensitivity.png"),
+            ("model", "comparison_id", "loo_delta_loocv_rmse", "full_delta_loocv_rmse", "Delta LOOCV RMSE", "phase10_model_sensitivity.png"),
+            ("distance", "comparison_id", "loo_mantel_r_pearson", "full_mantel_r_pearson", "Mantel Pearson r", "phase10_distance_sensitivity.png"),
+            ("topology", "comparison_or_predictor", "loo_metric_value", "full_metric_value", "Metric value", "phase10_topology_sensitivity.png"),
+        ]
+        for key, xcol, ycol, fcol, ylabel, fname in fig_specs:
+            df = comparisons.get(key, pd.DataFrame())
+            if df.empty or ycol not in df.columns: continue
+            fig, ax = plt.subplots(figsize=(max(7, min(14, df[xcol].astype(str).nunique()*1.2)), 4.8))
+            cats = sorted(df[xcol].astype(str).unique().tolist())
+            xpos = {c:i for i,c in enumerate(cats)}
+            for _, r in df.iterrows():
+                x = xpos[str(r[xcol])]
+                ax.scatter(x, r[ycol], s=30, alpha=0.8, label=str(r["excluded_capside"]) if str(r["excluded_capside"]) not in ax.get_legend_handles_labels()[1] else None)
+            full_points = df.drop_duplicates(["h","patch_R",xcol])
+            ax.scatter([xpos[str(v)] for v in full_points[xcol]], pd.to_numeric(full_points[fcol], errors="coerce"), marker="D", s=70, color="black", label="full")
+            ax.axhline(0, color="0.5", lw=0.8); ax.set_xticks(range(len(cats))); ax.set_xticklabels(cats, rotation=30, ha="right"); ax.set_ylabel(ylabel); ax.set_title(fname.replace(".png", "")); ax.legend(fontsize=7, ncol=2)
+            fig.tight_layout(); path=args.outdir/fname; fig.savefig(path,dpi=150); plt.close(fig); files.append(str(path))
+    except Exception as exc:
+        warnings.append(f"plot_failed:{exc}")
+    return files, warnings
+
+
+def write_phase10_summary(path: Path, report: Dict[str, Any], stability: pd.DataFrame, dominated: pd.DataFrame, run_index: pd.DataFrame) -> None:
+    counts = stability["final_stability_label"].value_counts().to_dict() if not stability.empty else {}
+    lines = [f"Phase 10 leave-one-capsid-out sensitivity: {report['status']}", f"Capsids tested: {report.get('n_capsides_full', 0)}", "Excluded-capsid runs: " + ", ".join(run_index.loc[run_index["run_type"]=="leave_one_capsid_out", "run_label"].astype(str).tolist()), "", f"Stable conclusions: {counts.get('stable',0)}", f"Moderately sensitive conclusions: {counts.get('moderately_sensitive',0)}", f"Dominated conclusions: {counts.get('dominated_by_single_capsid',0)}", f"Unstable conclusions: {counts.get('unstable_across_exclusions',0)}"]
+    if not dominated.empty:
+        top = dominated["dominant_capsid_candidate"].astype(str).value_counts().idxmax()
+        lines.append(f"Most frequent dominant capsid candidate: {top}")
+        lines.append("")
+        lines.append("Dominated or unstable conclusions:")
+        for _, r in dominated.iterrows():
+            lines.append(f"  - {r['analysis_family']} {r['conclusion_id']}: {r['recommended_interpretation']} Criteria: {r['triggered_criteria']}.")
+    if any("low_capsid_count" in str(w) or "very_low" in str(w) for w in report.get("warnings", [])):
+        lines.append("")
+        lines.append("Warning: low capsid count means these leave-one-capsid-out diagnostics are descriptive only.")
+    lines.append("")
+    lines.append("Interpretation note: Phase 10 is a robustness stress test. It does not prove robustness, causality, mechanism, or significance.")
+    path.write_text("\n".join(lines)+"\n", encoding="utf-8")
+
+
+def run_phase10(input_df: pd.DataFrame, phase01_report: Dict, phase02_report: Dict, phase03_report: Dict, phase04_report: Dict, phase05_report: Dict, phase06_report: Dict, phase07_report: Dict, phase08_report: Dict, phase09_report: Dict, args: argparse.Namespace) -> Dict[str, Any]:
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    validation = validate_phase10_input(input_df)
+    warnings: List[str] = list(validation.get("warning_flags", [])); severe: List[str] = []
+    for pn, rep in [("phase02", phase02_report),("phase03", phase03_report),("phase04", phase04_report),("phase05", phase05_report),("phase06", phase06_report),("phase07", phase07_report),("phase08", phase08_report),("phase09", phase09_report)]:
+        if rep.get("status") == "WARN": warnings.append(f"upstream_{pn}_warn")
+    if phase01_report.get("status") == "FAIL": severe.append("phase01_validation_failed")
+    if phase02_report.get("status") == "FAIL": severe.append("phase02_validation_failed")
+    if validation["missing_required_columns"]: severe.append("missing_required_column")
+    if validation["duplicate_key_status"]["n_duplicate_rows"]: severe.append("duplicate_observation_key")
+    if validation["n_capsides"] < 3: severe.append("insufficient_capsids_for_loo")
+    run_index = build_loo_run_index(input_df, validation, args) if "capside" in input_df.columns else pd.DataFrame()
+    output_files = {"run_index": str(args.outdir/"phase10_loo_run_index.csv"), "centered_association_sensitivity": str(args.outdir/"phase10_centered_association_sensitivity.csv"), "ranking_sensitivity": str(args.outdir/"phase10_ranking_sensitivity.csv"), "model_sensitivity": str(args.outdir/"phase10_model_sensitivity.csv"), "distance_sensitivity": str(args.outdir/"phase10_distance_sensitivity.csv"), "overall_stability_summary": str(args.outdir/"phase10_overall_stability_summary.csv"), "dominated_conclusions": str(args.outdir/"phase10_dominated_conclusions.csv"), "report": str(args.outdir/"phase10_report.json"), "summary": str(args.outdir/"phase10_summary.txt"), "figures": []}
+    if severe:
+        for pth in ["run_index","centered_association_sensitivity","ranking_sensitivity","model_sensitivity","distance_sensitivity","overall_stability_summary","dominated_conclusions"]:
+            _phase10_csv(Path(output_files[pth]), run_index if pth=="run_index" else pd.DataFrame())
+        report = {"phase":10,"status":"FAIL","timestamp":datetime.now(timezone.utc).isoformat(),"input_file":str(args.input),"output_directory":str(args.outdir),"upstream_phase01_status":phase01_report.get("status"),"upstream_phase02_status":phase02_report.get("status"),"upstream_phase03_status":phase03_report.get("status"),"upstream_phase04_status":phase04_report.get("status"),"upstream_phase05_status":phase05_report.get("status"),"upstream_phase06_status":phase06_report.get("status"),"upstream_phase07_status":phase07_report.get("status"),"upstream_phase08_status":phase08_report.get("status"),"upstream_phase09_status":phase09_report.get("status"),"n_rows_input":int(len(input_df)),"n_capsides_full":validation["n_capsides"],"capsides_tested":[],"h_values":[],"patch_R_values":[],"loo_design":"full dataset plus one run excluding each capsid; no CLI recursion","run_labels":[],"analyses_repeated":[],"stability_thresholds":{},"topology_sensitivity_enabled":False,"optional_composite_sensitivity_enabled":False,"optional_anisotropy_sensitivity_enabled":False,"output_files":output_files,"warnings":sorted(set(warnings)),"severe_flags":sorted(set(severe))}
+        Path(output_files["report"]).write_text(json.dumps(_nan_to_none(report), indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8"); write_phase10_summary(Path(output_files["summary"]), report, pd.DataFrame(), pd.DataFrame(), run_index)
+        return report
+    caps = sorted(input_df["capside"].dropna().astype(str).unique().tolist())
+    all_runs: List[Dict[str, Any]] = []
+    for i, cap in enumerate(["NONE"] + caps):
+        sub = input_df.copy() if cap == "NONE" else input_df[input_df["capside"].astype(str) != cap].copy()
+        old_seed = args.seed; args.seed = int(old_seed) + i
+        outs = run_key_analyses_for_loo_dataset(sub, "full" if cap=="NONE" else f"without_{cap}", cap, args)
+        args.seed = old_seed
+        if args.loo_save_subrun_outputs and cap != "NONE":
+            sd = args.outdir/"phase10_leave_one_out"/f"without_{cap}"; sd.mkdir(parents=True, exist_ok=True)
+            for k, df in outs.items():
+                if not df.empty: df.to_csv(sd/f"{k}_summary.csv", index=False)
+        all_runs.append({"excluded_capside": cap, "outputs": outs})
+    full = all_runs[0]["outputs"]; loo_outputs = all_runs[1:]
+    comparisons = compare_full_vs_loo(full, loo_outputs, args)
+    stability = build_overall_stability_summary(comparisons)
+    dominated = build_dominated_conclusions_table(stability)
+    figs, fig_warn = make_phase10_figures(comparisons, args); output_files["figures"] = figs; warnings.extend(fig_warn)
+    if not comparisons.get("topology", pd.DataFrame()).empty:
+        output_files["topology_sensitivity"] = str(args.outdir/"phase10_topology_sensitivity.csv")
+        _phase10_csv(Path(output_files["topology_sensitivity"]), comparisons["topology"])
+    else:
+        warnings.append("phase09_loo_skipped" if validation.get("missing_topology_columns") else "topology_unavailable")
+    _phase10_csv(Path(output_files["run_index"]), run_index)
+    _phase10_csv(Path(output_files["centered_association_sensitivity"]), comparisons["centered"])
+    _phase10_csv(Path(output_files["ranking_sensitivity"]), comparisons["ranking"])
+    _phase10_csv(Path(output_files["model_sensitivity"]), comparisons["model"])
+    _phase10_csv(Path(output_files["distance_sensitivity"]), comparisons["distance"])
+    _phase10_csv(Path(output_files["overall_stability_summary"]), stability)
+    _phase10_csv(Path(output_files["dominated_conclusions"]), dominated)
+    any_valid = any(not df.empty for df in comparisons.values())
+    if not any_valid: severe.append("no_stability_comparison_produced")
+    status = "FAIL" if severe else ("WARN" if warnings or any(stability.get("final_stability_label", pd.Series(dtype=str)).isin(["dominated_by_single_capsid","unstable_across_exclusions","moderately_sensitive"])) else "PASS")
+    report = {"phase":10,"status":status,"timestamp":datetime.now(timezone.utc).isoformat(),"input_file":str(args.input),"output_directory":str(args.outdir),"upstream_phase01_status":phase01_report.get("status"),"upstream_phase02_status":phase02_report.get("status"),"upstream_phase03_status":phase03_report.get("status"),"upstream_phase04_status":phase04_report.get("status"),"upstream_phase05_status":phase05_report.get("status"),"upstream_phase06_status":phase06_report.get("status"),"upstream_phase07_status":phase07_report.get("status"),"upstream_phase08_status":phase08_report.get("status"),"upstream_phase09_status":phase09_report.get("status"),"n_rows_input":int(len(input_df)),"n_capsides_full":int(len(caps)),"capsides_tested":caps,"h_values":_sorted_json_values(input_df["h"]),"patch_R_values":_sorted_json_values(input_df["patch_R"]),"loo_design":"full dataset baseline plus deterministic leave-one-capsid-out exclusions, preserving h and patch_R strata and avoiding CLI recursion","run_labels":run_index["run_label"].astype(str).tolist(),"analyses_repeated":[k for k,v in comparisons.items() if not v.empty],"stability_thresholds":{"p_threshold":float(args.p_threshold),"relative_change_threshold":float(args.loo_relative_change_threshold),"near_zero_threshold":float(args.near_zero_threshold),"stability_epsilon":float(args.stability_epsilon)},"p_threshold":float(args.p_threshold),"relative_change_threshold":float(args.loo_relative_change_threshold),"near_zero_threshold":float(args.near_zero_threshold),"stability_epsilon":float(args.stability_epsilon),"topology_sensitivity_enabled":not comparisons.get("topology", pd.DataFrame()).empty,"optional_composite_sensitivity_enabled":False,"optional_anisotropy_sensitivity_enabled":False,"output_files":output_files,"warnings":sorted(set([w for w in warnings if w])),"severe_flags":sorted(set(severe))}
+    Path(output_files["report"]).write_text(json.dumps(_nan_to_none(report), indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+    write_phase10_summary(Path(output_files["summary"]), report, stability, dominated, run_index)
+    return report
+
+
+def _print_phase10_summary(report: Dict[str, Any]) -> None:
+    print(f"[{report.get('status')}] Phase 10 completed.")
+    files = report.get("output_files", {})
+    for label, key in [("LOO run index","run_index"),("Centered association sensitivity","centered_association_sensitivity"),("Ranking sensitivity","ranking_sensitivity"),("Model sensitivity","model_sensitivity"),("Distance sensitivity","distance_sensitivity"),("Overall stability summary","overall_stability_summary"),("Dominated conclusions","dominated_conclusions"),("Topology sensitivity","topology_sensitivity"),("Phase 10 report","report")]:
+        if key in files: print(f"[INFO] {label}: {files[key]}")
+    try:
+        stab = pd.read_csv(files.get("overall_stability_summary", "")); counts = stab["final_stability_label"].value_counts().to_dict()
+        print(f"[STABILITY] stable={counts.get('stable',0)} moderately_sensitive={counts.get('moderately_sensitive',0)} dominated={counts.get('dominated_by_single_capsid',0)} unstable={counts.get('unstable_across_exclusions',0)} insufficient={counts.get('insufficient_data',0)}")
+        dom = pd.read_csv(files.get("dominated_conclusions", ""))
+        for _, r in dom.head(20).iterrows(): print(f"[DOMINATED] analysis={r['analysis_family']} conclusion={r['conclusion_id']} dominant_capsid={r['dominant_capsid_candidate']} reason={r['triggered_criteria']}")
+    except Exception:
+        pass
+    if report.get("warnings"):
+        print("[WARN] Phase 10 completed with warnings. See phase10_report.json.")
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -4453,9 +4931,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--phase",
-        choices=["1", "2", "3", "4", "5", "6", "7", "8", "9"],
+        choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
         default="1",
-        help="Analysis phase to run. Phase 1 is the default. Phase 9 runs Phases 1 through 9, then integrates normalized H1/H2 topological descriptors with mechanical/geometric distance analyses."
+        help="Analysis phase to run. Phase 1 is the default. Phase 10 runs Phases 1 through 10 and performs leave-one-capsid-out sensitivity diagnostics."
     )
 
     parser.add_argument(
@@ -4483,7 +4961,7 @@ def parse_args() -> argparse.Namespace:
         "--outdir",
         default=Path("results"),
         type=Path,
-        help="Output directory for Phase 2 through Phase 9 artifacts."
+        help="Output directory for Phase 2 through Phase 10 artifacts."
     )
 
     parser.add_argument(
@@ -4538,7 +5016,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-plots",
         action="store_true",
-        help="Skip Phase 3 centered scatterplots, Phase 4 ordinal ranking plots, Phase 5 model comparison figures, Phase 6 figures, Phase 7 heatmaps, Phase 8 figures, and Phase 9 heatmaps/scatterplots."
+        help="Skip Phase 3 centered scatterplots, Phase 4 ordinal ranking plots, Phase 5 model comparison figures, Phase 6 figures, Phase 7 heatmaps, Phase 8 figures, Phase 9 heatmaps/scatterplots, and Phase 10 summary figures."
     )
 
     parser.add_argument(
@@ -4655,6 +5133,59 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--loo-relative-change-threshold",
+        default=0.50,
+        type=float,
+        help="Phase 10 relative change threshold for leave-one-capsid-out sensitivity flagging. Default: 0.50."
+    )
+
+    parser.add_argument(
+        "--p-threshold",
+        default=0.05,
+        type=float,
+        help="Phase 10 empirical p-value threshold for support-crossing flags; not proof of significance. Default: 0.05."
+    )
+
+    parser.add_argument(
+        "--near-zero-threshold",
+        default=1e-12,
+        type=float,
+        help="Phase 10 near-zero threshold for sign-flip detection. Default: 1e-12."
+    )
+
+    parser.add_argument(
+        "--stability-epsilon",
+        default=1e-12,
+        type=float,
+        help="Phase 10 denominator stabilizer for relative-change calculations. Default: 1e-12."
+    )
+
+    parser.add_argument(
+        "--loo-save-subrun-outputs",
+        action="store_true",
+        help="Phase 10: save selected summary outputs under phase10_leave_one_out/without_<capside>/."
+    )
+
+    parser.add_argument(
+        "--loo-no-subrun-plots",
+        action="store_true",
+        default=True,
+        help="Phase 10: do not generate plots inside leave-one-capsid-out subruns (default true)."
+    )
+
+    parser.add_argument(
+        "--phase10-include-phase6",
+        action="store_true",
+        help="Phase 10: include optional Phase 6 composite sensitivity if implemented."
+    )
+
+    parser.add_argument(
+        "--phase10-include-phase8",
+        action="store_true",
+        help="Phase 10: include optional Phase 8 anisotropy sensitivity if implemented."
+    )
+
+    parser.add_argument(
         "--fail-on-warning",
         action="store_true",
         help="Exit with non-zero status if the requested phase status is not PASS."
@@ -4732,6 +5263,11 @@ def main() -> int:
     if not 0 <= args.rank_consistency_threshold <= 1:
         print("[ERROR] --rank-consistency-threshold must be between 0 and 1.", file=sys.stderr)
         return 2
+
+    if args.loo_relative_change_threshold < 0 or args.p_threshold < 0 or args.near_zero_threshold < 0 or args.stability_epsilon <= 0:
+        print("[ERROR] Phase 10 thresholds must be non-negative and --stability-epsilon must be positive.", file=sys.stderr)
+        return 2
+
 
     if args.model_min_n < 2:
         print("[ERROR] --model-min-n must be at least 2.", file=sys.stderr)
@@ -4898,9 +5434,20 @@ def main() -> int:
                 pass
     phase09_report = run_phase09(phase09_input_df, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, phase06_report, phase07_report, phase08_report, args)
     _print_phase09_summary(phase09_report)
-    if phase09_report["status"] == "FAIL":
+
+    if args.phase == "9":
+        if phase09_report["status"] == "FAIL":
+            return 1
+        if args.fail_on_warning and phase09_report["status"] != "PASS":
+            return 1
+        return 0
+
+    phase10_input_df = phase09_input_df if not phase09_input_df.empty else (centered_phase02_df if not centered_phase02_df.empty else normalized_df)
+    phase10_report = run_phase10(phase10_input_df, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, phase06_report, phase07_report, phase08_report, phase09_report, args)
+    _print_phase10_summary(phase10_report)
+    if phase10_report["status"] == "FAIL":
         return 1
-    if args.fail_on_warning and phase09_report["status"] != "PASS":
+    if args.fail_on_warning and phase10_report["status"] != "PASS":
         return 1
     return 0
 
