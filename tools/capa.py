@@ -2772,6 +2772,428 @@ def _print_phase05_summary(report: Dict) -> None:
     if report.get("warnings"):
         print("[WARN] Phase 5 completed with warnings. See phase05_report.json.")
 
+# ---------------------------------------------------------------------
+# Phase 6: composite geometric descriptors
+# ---------------------------------------------------------------------
+
+PHASE06_REQUIRED_COLUMNS = ["capside", "fold", "h", "patch_R", "d_max_pct", "delta_d_max_pct", "t", "Hout", "Hin"]
+PHASE06_PRESERVE_COLUMNS = [
+    "d_mag_max", "D", "rel_delta_d_max_pct", "t_c", "Hout_c", "Hin_c", "H1", "H2", "H1_norm",
+    "H2_norm", "H0", "H0_norm", "patch_elems", "size_h", "E", "rank_d_max_pct", "rank_t",
+    "rank_t_thinnest", "rank_Hout", "rank_Hin",
+]
+PHASE06_COMPOSITES = ["delta_H", "H_mean", "H_asym", "G_out", "G_in", "Q_in", "Q_out"]
+PHASE06_CENTERED = [f"{c}_c" for c in PHASE06_COMPOSITES]
+PHASE06_RAW_BY_CENTERED = {f"{c}_c": c for c in PHASE06_COMPOSITES}
+PHASE06_CENTER_GROUP_COLS = ["capside", "h", "patch_R"]
+PHASE06_CONDITION_COLS = ["h", "patch_R"]
+PHASE06_MODEL_IDS = [
+    "M3_base_simple_geometry", "M4_simple", "M3_base_delta_H", "M4_delta_H", "M3_base_H_mean", "M4_H_mean",
+    "M3_base_H_asym", "M4_H_asym", "M3_base_G_out", "M4_G_out", "M3_base_G_in", "M4_G_in",
+    "M3_base_Q_in", "M4_Q_in", "M3_base_Q_out", "M4_Q_out", "M3_base_composite_block", "M5_composite_block",
+]
+PHASE06_MODEL_FORMULAS = {
+    "M3_base_simple_geometry": {"label": "d_max_pct ~ capside + fold", "categorical": ["capside", "fold"], "numeric": [], "dataset_type": "simple_geometry"},
+    "M4_simple": {"label": "d_max_pct ~ capside + fold + t + Hout + Hin", "categorical": ["capside", "fold"], "numeric": ["t", "Hout", "Hin"], "dataset_type": "simple_geometry"},
+    "M3_base_composite_block": {"label": "d_max_pct ~ capside + fold", "categorical": ["capside", "fold"], "numeric": [], "dataset_type": "composite_block"},
+    "M5_composite_block": {"label": "d_max_pct ~ capside + fold + delta_H + H_mean + H_asym + G_out + G_in + Q_in + Q_out", "categorical": ["capside", "fold"], "numeric": PHASE06_COMPOSITES, "dataset_type": "composite_block"},
+}
+for _c in PHASE06_COMPOSITES:
+    PHASE06_MODEL_FORMULAS[f"M3_base_{_c}"] = {"label": "d_max_pct ~ capside + fold", "categorical": ["capside", "fold"], "numeric": [], "dataset_type": _c}
+    PHASE06_MODEL_FORMULAS[f"M4_{_c}"] = {"label": f"d_max_pct ~ capside + fold + {_c}", "categorical": ["capside", "fold"], "numeric": [_c], "dataset_type": _c}
+
+
+def validate_phase06_input(df: pd.DataFrame) -> Dict[str, Any]:
+    missing = [c for c in PHASE06_REQUIRED_COLUMNS if c not in df.columns]
+    dup_rows = 0; dup_examples: List[Dict[str, Any]] = []
+    if all(c in df.columns for c in OBSERVATION_KEY):
+        dup = df.duplicated(subset=OBSERVATION_KEY, keep=False); dup_rows = int(dup.sum())
+        if dup_rows:
+            dup_examples = df.loc[dup, OBSERVATION_KEY].drop_duplicates().head(20).to_dict(orient="records")
+    nonfinite: Dict[str, int] = {}
+    for c in [x for x in PHASE06_REQUIRED_COLUMNS if x not in ["capside", "fold"] and x in df.columns]:
+        bad = int((~np.isfinite(pd.to_numeric(df[c], errors="coerce"))).sum())
+        if bad:
+            nonfinite[c] = bad
+    return {"required_columns_checked": PHASE06_REQUIRED_COLUMNS, "missing_columns": missing,
+            "duplicate_key_status": {"observation_key": OBSERVATION_KEY, "is_unique": dup_rows == 0, "n_duplicate_rows": dup_rows, "duplicate_examples": dup_examples},
+            "nonfinite_counts": nonfinite}
+
+
+def compute_composite_geometry(df: pd.DataFrame, epsilon: float) -> pd.DataFrame:
+    out = df.copy(); out["phase06_warning_flags"] = ""
+    out["fold"] = out["fold"].astype(str)
+    for c in ["h", "patch_R", "d_max_pct", "delta_d_max_pct", "t", "Hout", "Hin"]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+    for c in ["t", "Hout", "Hin", "delta_d_max_pct"]:
+        if c in out.columns:
+            bad = ~np.isfinite(out[c])
+            if bad.any():
+                flag = "nonfinite_delta_d_max_pct" if c == "delta_d_max_pct" else f"nonfinite_{c}"
+                out.loc[bad, "phase06_warning_flags"] = out.loc[bad, "phase06_warning_flags"].apply(lambda x, f=flag: _append_flag(x, f))
+    t = out["t"]; hout = out["Hout"]; hin = out["Hin"]
+    out["delta_H"] = hout - hin
+    out["H_mean"] = (hout + hin) / 2.0
+    denom = np.abs(hout) + np.abs(hin) + float(epsilon)
+    out["H_asym"] = (hout - hin) / denom
+    bad_den = ~np.isfinite(denom)
+    if bad_den.any():
+        out.loc[bad_den, "H_asym"] = np.nan
+        out.loc[bad_den, "phase06_warning_flags"] = out.loc[bad_den, "phase06_warning_flags"].apply(lambda x: _append_flag(x, "invalid_H_asym_denominator"))
+    out["G_out"] = t * np.abs(hout); out["G_in"] = t * np.abs(hin)
+    valid_t = np.isfinite(t) & (t > 0)
+    out["Q_in"] = np.where(valid_t, np.abs(hin) / t, np.nan)
+    out["Q_out"] = np.where(valid_t, np.abs(hout) / t, np.nan)
+    bad_t = ~valid_t
+    if bad_t.any():
+        out.loc[bad_t, "phase06_warning_flags"] = out.loc[bad_t, "phase06_warning_flags"].apply(lambda x: _append_flag(_append_flag(x, "invalid_thickness_for_Q_in"), "invalid_thickness_for_Q_out"))
+    for c in PHASE06_COMPOSITES:
+        bad = ~np.isfinite(pd.to_numeric(out[c], errors="coerce"))
+        if bad.any():
+            out.loc[bad, "phase06_warning_flags"] = out.loc[bad, "phase06_warning_flags"].apply(lambda x: _append_flag(x, "nonfinite_composite_variable"))
+    return out
+
+
+def center_composite_geometry(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for raw in PHASE06_COMPOSITES:
+        mean_col = f"mean_{raw}_s"; centered_col = f"{raw}_c"
+        out[mean_col] = out.groupby(PHASE06_CENTER_GROUP_COLS, sort=False, dropna=False)[raw].transform("mean")
+        out[centered_col] = out[raw] - out[mean_col]
+    ordered = ["capside", "h", "patch_R", "fold", "d_max_pct", "delta_d_max_pct", "t", "Hout", "Hin"]
+    for c in PHASE06_COMPOSITES:
+        ordered.append(c)
+        if c != "Q_out":
+            ordered += [f"mean_{c}_s", f"{c}_c"]
+    ordered += ["mean_Q_out_s", "Q_out_c", "phase06_warning_flags"]
+    preserve = [c for c in PHASE06_PRESERVE_COLUMNS if c in out.columns and c not in ordered]
+    return out[[c for c in ordered if c in out.columns] + preserve + [c for c in out.columns if c not in ordered + preserve]].sort_values(OBSERVATION_KEY, kind="mergesort").reset_index(drop=True)
+
+
+def check_phase06_centering_integrity(df: pd.DataFrame, tol: float = 1e-10) -> Dict[str, Any]:
+    checks = {"tolerance_abs": tol, "by_variable": {}, "failed_delta_strata": [], "failed_composite_strata": [], "nonfinite_warning_strata": []}
+    for var in ["delta_d_max_pct"] + PHASE06_CENTERED:
+        rows = []
+        for key, g in df.groupby(PHASE06_CENTER_GROUP_COLS, sort=True, dropna=False):
+            vals_all = pd.to_numeric(g[var], errors="coerce")
+            vals = vals_all[np.isfinite(vals_all)]
+            s = float(vals.sum()) if len(vals) else np.nan
+            passed = bool(np.isfinite(s) and np.isclose(s, 0.0, atol=tol, rtol=tol))
+            entry = {"capside": _json_scalar(key[0]), "h": _json_scalar(key[1]), "patch_R": _json_scalar(key[2]), "variable": var, "n_finite": int(len(vals)), "n_nonfinite": int((~np.isfinite(vals_all)).sum()), "sum": s, "passes": passed}
+            rows.append(entry)
+            if not passed:
+                if var == "delta_d_max_pct": checks["failed_delta_strata"].append(entry)
+                elif entry["n_nonfinite"]:
+                    checks["nonfinite_warning_strata"].append(entry)
+                else:
+                    checks["failed_composite_strata"].append(entry)
+        checks["by_variable"][var] = rows
+    checks["delta_passes"] = len(checks["failed_delta_strata"]) == 0
+    checks["composite_passes_or_missing_only"] = len(checks["failed_composite_strata"]) == 0
+    return checks
+
+
+def fit_phase06_centered_associations(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    rng = np.random.default_rng(int(args.seed) + 6000); rows: List[Dict[str, Any]] = []; ci = float(args.ci); alpha = (1-ci)/2
+    for (h, r), cdf in df.groupby(PHASE06_CONDITION_COLS, sort=True, dropna=False):
+        for pred in PHASE06_CENTERED:
+            raw = PHASE06_RAW_BY_CENTERED[pred]; flags: List[str] = []
+            model_df = cdf[np.isfinite(pd.to_numeric(cdf[pred], errors="coerce")) & np.isfinite(pd.to_numeric(cdf[PHASE03_RESPONSE], errors="coerce"))].copy().reset_index(drop=True)
+            n = len(model_df); nc = int(model_df["capside"].nunique()) if n else 0; ns = int(model_df[PHASE06_CENTER_GROUP_COLS].drop_duplicates().shape[0]) if n else 0
+            if n < 4: flags.append("insufficient_observations")
+            if nc < 2: flags.append("low_capsid_count")
+            xvar = float(pd.to_numeric(model_df[pred], errors="coerce").var(ddof=0)) if n else 0.0; yvar = float(pd.to_numeric(model_df[PHASE03_RESPONSE], errors="coerce").var(ddof=0)) if n else 0.0
+            if xvar <= 0: flags.append("zero_predictor_variance")
+            if yvar <= 0: flags.append("zero_response_variance")
+            fit = _ols_fit(model_df, pred) if n >= 4 and nc >= 2 and xvar > 0 and yvar > 0 else None
+            boot = {"slopes": [], "successful": 0}; perm = {"slopes": [], "successful": 0}
+            if fit:
+                if nc < 3: flags.append("low_capsid_count_for_bootstrap")
+                boot, _ = bootstrap_centered_slope(model_df, pred, args, rng)
+                if args.bootstrap_n and boot["successful"] == 0: flags.append("bootstrap_failed")
+                elif args.bootstrap_n and boot["successful"] < 0.7 * args.bootstrap_n: flags.append("unstable_bootstrap")
+                perm, _ = permute_centered_slope(model_df, pred, args, rng)
+                if args.perm_n and perm["successful"] == 0: flags.append("permutation_failed")
+                elif args.perm_n and perm["successful"] < 0.7 * args.perm_n: flags.append("unstable_permutation")
+            bs = np.asarray(boot.get("slopes", []), dtype=float); ps = np.asarray(perm.get("slopes", []), dtype=float)
+            pval = (1 + int(np.sum(np.abs(ps) >= abs(fit["slope"])))) / (1 + len(ps)) if fit and len(ps) else np.nan
+            rows.append({"h": h, "patch_R": r, "predictor": pred, "raw_predictor": raw, "response": PHASE03_RESPONSE,
+                "n_observations": n, "n_capsides": nc, "n_strata": ns, "slope": fit["slope"] if fit else np.nan, "intercept": fit["intercept"] if fit else np.nan,
+                "r_value": fit["r_value"] if fit else np.nan, "r_squared": fit["r_squared"] if fit else np.nan, "residual_std_error": fit["residual_std_error"] if fit else np.nan,
+                "slope_bootstrap_mean": float(np.mean(bs)) if len(bs) else np.nan, "slope_bootstrap_sd": float(np.std(bs, ddof=1)) if len(bs)>1 else np.nan,
+                "slope_ci_low": float(np.quantile(bs, alpha)) if len(bs) else np.nan, "slope_ci_high": float(np.quantile(bs, 1-alpha)) if len(bs) else np.nan,
+                "ci_level": ci, "bootstrap_n_requested": int(args.bootstrap_n), "bootstrap_n_successful": int(len(bs)), "bootstrap_method": "cluster_by_capside_within_h_patch_R",
+                "p_perm_two_sided": pval, "perm_n_requested": int(args.perm_n), "perm_n_successful": int(len(ps)), "permutation_method": "within_capside_h_patch_R_shuffle_delta_d_max_pct",
+                "perm_slope_mean": float(np.mean(ps)) if len(ps) else np.nan, "perm_slope_sd": float(np.std(ps, ddof=1)) if len(ps)>1 else np.nan, "perm_slope_min": float(np.min(ps)) if len(ps) else np.nan, "perm_slope_max": float(np.max(ps)) if len(ps) else np.nan,
+                "valid_model": bool(fit), "warning_flags": _phase05_join_flags(flags)})
+    return pd.DataFrame(rows)
+
+def _phase06_clean_df(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    out = df.copy()
+    for c in ["capside", "fold"]:
+        if c in out.columns: out[c] = out[c].astype(str)
+    for c in [x for x in columns if x not in ["capside", "fold"]]:
+        if c in out.columns: out[c] = pd.to_numeric(out[c], errors="coerce")
+    mask = pd.Series(True, index=out.index)
+    for c in columns:
+        mask &= out[c].notna() if c in ["capside", "fold"] else np.isfinite(pd.to_numeric(out[c], errors="coerce"))
+    return out.loc[mask].sort_values(["h", "patch_R", "capside", "fold"], kind="mergesort").reset_index(drop=True)
+
+
+def _phase06_build_design_matrix(df: pd.DataFrame, spec: Dict[str, Any], levels: Optional[Dict[str, List[str]]] = None) -> Tuple[np.ndarray, List[str], Dict[str, List[str]]]:
+    return _phase05_build_design_matrix(df, spec, levels)
+
+
+def _phase06_invalid_fit(h: Any, r: Any, model_id: str, dataset_type: str, df: pd.DataFrame, flags: List[str]) -> Dict[str, Any]:
+    y = pd.to_numeric(df["d_max_pct"], errors="coerce") if "d_max_pct" in df.columns and len(df) else pd.Series(dtype=float)
+    return {"h": h, "patch_R": r, "model_id": model_id, "model_formula_label": PHASE06_MODEL_FORMULAS[model_id]["label"], "dataset_type": dataset_type,
+        "n_observations": int(len(df)), "n_capsides": int(df["capside"].nunique()) if "capside" in df.columns and len(df) else 0, "n_folds": int(df["fold"].nunique()) if "fold" in df.columns and len(df) else 0,
+        "n_predictor_columns": np.nan, "n_effective_parameters": np.nan, "df_model": np.nan, "df_residual": np.nan, "response_mean": float(y.mean()) if len(y) else np.nan, "response_sd": float(y.std(ddof=1)) if len(y)>1 else np.nan,
+        "rss": np.nan, "tss": np.nan, "mse": np.nan, "rmse": np.nan, "mae": np.nan, "r_squared": np.nan, "r_squared_adjusted": np.nan, "loocv_mse": np.nan, "loocv_rmse": np.nan, "loocv_mae": np.nan,
+        "loocv_n_predictions": 0, "loocv_n_failed_predictions": int(len(df)), "aic": np.nan, "bic": np.nan, "design_matrix_rank": np.nan, "design_matrix_condition_number": np.nan, "rank_deficient": False,
+        "overfit_warning": _phase05_join_flags([f for f in flags if "overfit" in f or "saturated" in f or "loocv" in f]), "valid_model": False, "warning_flags": _phase05_join_flags(flags)}
+
+
+def _phase06_loocv(df: pd.DataFrame, model_id: str, args: argparse.Namespace) -> Dict[str, Any]:
+    spec = PHASE06_MODEL_FORMULAS[model_id]
+    n = int(len(df)); y = pd.to_numeric(df["d_max_pct"], errors="coerce").to_numpy(dtype=float)
+    preds = np.full(n, np.nan); valid = np.zeros(n, dtype=bool); row_flags = [""] * n
+    for i in range(n):
+        train = df.drop(index=df.index[i]).reset_index(drop=True); test = df.iloc[[i]].reset_index(drop=True); split_flags = []
+        if len(train) < args.model_min_n: split_flags.append("insufficient_observations")
+        for cat in spec["categorical"]:
+            if str(test.iloc[0][cat]) not in set(train[cat].astype(str).unique().tolist()): split_flags.append("loocv_unseen_category")
+        if split_flags:
+            row_flags[i] = _phase05_join_flags(split_flags); continue
+        try:
+            levels = {cat: sorted(train[cat].dropna().astype(str).unique().tolist()) for cat in spec["categorical"]}
+            Xtr, _, _ = _phase06_build_design_matrix(train, spec, levels=levels); ytr = pd.to_numeric(train["d_max_pct"], errors="coerce").to_numpy(dtype=float)
+            if not np.isfinite(Xtr).all() or not np.isfinite(ytr).all() or float(np.sum((ytr - np.mean(ytr)) ** 2)) <= 0: raise ValueError("invalid_training_split")
+            beta, _, _, _ = np.linalg.lstsq(Xtr, ytr, rcond=None); Xte, _, _ = _phase06_build_design_matrix(test, spec, levels=levels); preds[i] = float(Xte @ beta); valid[i] = np.isfinite(preds[i])
+            if not valid[i]: row_flags[i] = "loocv_failed"
+        except Exception:
+            row_flags[i] = "loocv_failed"
+    errors = y[valid] - preds[valid]; n_pred = int(valid.sum()); flags = []
+    if n_pred == 0: flags.append("loocv_failed"); mse = rmse = mae = np.nan
+    else: mse = float(np.mean(errors**2)); rmse = float(np.sqrt(mse)); mae = float(np.mean(np.abs(errors)))
+    if n_pred < max(3, float(args.loocv_min_success_fraction) * n): flags.append("unstable_loocv")
+    if any("loocv_unseen_category" in f for f in row_flags): flags.append("loocv_unseen_category")
+    return {"mse": mse, "rmse": rmse, "mae": mae, "n_predictions": n_pred, "n_failed": int(n - n_pred), "model_flags": flags, "row_flags": row_flags}
+
+
+def fit_phase06_model(df: pd.DataFrame, model_id: str, h: Any, r: Any, args: argparse.Namespace) -> Dict[str, Any]:
+    spec = PHASE06_MODEL_FORMULAS[model_id]; flags: List[str] = []; n = int(len(df)); dataset_type = spec["dataset_type"]
+    n_caps = int(df["capside"].nunique()) if "capside" in df.columns and n else 0; n_folds = int(df["fold"].nunique()) if "fold" in df.columns and n else 0
+    if n < args.model_min_n: flags.append("insufficient_observations")
+    if n_caps < 2: flags.append("insufficient_capsides")
+    if n_folds < 2: flags.append("insufficient_folds")
+    y = pd.to_numeric(df["d_max_pct"], errors="coerce").to_numpy(dtype=float) if n else np.array([])
+    tss = float(np.sum((y - np.mean(y)) ** 2)) if n else np.nan
+    if n and (not np.isfinite(y).all()): flags.append("nonfinite_d_max_pct")
+    if n and (not np.isfinite(tss) or tss <= 0): flags.append("zero_response_variance")
+    if model_id == "M5_composite_block":
+        try:
+            X0, _, _ = _phase06_build_design_matrix(df, spec); ncols = X0.shape[1]
+            if n < ncols + 3: flags.append("insufficient_observations_for_composite_block")
+        except Exception: flags.append("insufficient_observations_for_composite_block")
+    fatal = {"insufficient_observations", "insufficient_capsides", "insufficient_folds", "zero_response_variance", "nonfinite_d_max_pct", "insufficient_observations_for_composite_block"}
+    if any(f in flags for f in fatal): return _phase06_invalid_fit(h, r, model_id, dataset_type, df, flags)
+    try:
+        X, _, _ = _phase06_build_design_matrix(df, spec)
+        if not np.isfinite(X).all(): return _phase06_invalid_fit(h, r, model_id, dataset_type, df, flags + ["design_matrix_nonfinite"])
+        beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None); fitv = X @ beta; resid = y - fitv; rss = float(np.sum(resid**2))
+        rank = int(np.linalg.matrix_rank(X)); ncols = int(X.shape[1]); rank_def = rank < ncols
+        if rank_def: flags.append("rank_deficient_design")
+        cond = float(np.linalg.cond(X)) if ncols and rank else np.nan
+        if np.isfinite(cond) and cond > args.condition_number_threshold: flags.append("high_condition_number")
+        p_eff = max(rank - 1, 0); df_resid = n - rank
+        if n <= rank or n <= p_eff: flags.append("saturated_or_overfit_model")
+        if df_resid <= 0: flags.append("no_residual_degrees_of_freedom")
+        r2 = np.nan if tss <= 0 else 1.0 - rss / tss
+        if np.isfinite(r2) and np.isclose(r2, 1.0) and ("saturated_or_overfit_model" in flags or df_resid <= 1): flags.append("saturated_r2_not_interpretable")
+        if n - p_eff - 1 <= 0 or not np.isfinite(r2): adj = np.nan; flags.append("adjusted_r2_undefined")
+        else: adj = 1.0 - (1.0 - r2) * (n - 1) / (n - p_eff - 1)
+        mse = rss/n; rmse = float(np.sqrt(mse)); mae = float(np.mean(np.abs(resid)))
+        aic = float(n*np.log(rss/n)+2*rank) if rss > 0 else np.nan; bic = float(n*np.log(rss/n)+np.log(n)*rank) if rss > 0 else np.nan
+        loocv = _phase06_loocv(df, model_id, args); flags.extend(loocv["model_flags"])
+        over = [f for f in flags if f in {"saturated_or_overfit_model", "no_residual_degrees_of_freedom", "saturated_r2_not_interpretable", "high_condition_number", "unstable_loocv", "loocv_failed"}]
+        return {"h": h, "patch_R": r, "model_id": model_id, "model_formula_label": spec["label"], "dataset_type": dataset_type, "n_observations": n, "n_capsides": n_caps, "n_folds": n_folds,
+            "n_predictor_columns": ncols-1, "n_effective_parameters": p_eff, "df_model": p_eff, "df_residual": df_resid, "response_mean": float(np.mean(y)), "response_sd": float(np.std(y, ddof=1)) if n>1 else np.nan,
+            "rss": rss, "tss": tss, "mse": mse, "rmse": rmse, "mae": mae, "r_squared": float(r2) if np.isfinite(r2) else np.nan, "r_squared_adjusted": float(adj) if np.isfinite(adj) else np.nan,
+            "loocv_mse": loocv["mse"], "loocv_rmse": loocv["rmse"], "loocv_mae": loocv["mae"], "loocv_n_predictions": loocv["n_predictions"], "loocv_n_failed_predictions": loocv["n_failed"],
+            "aic": aic, "bic": bic, "design_matrix_rank": rank, "design_matrix_condition_number": cond, "rank_deficient": bool(rank_def), "overfit_warning": _phase05_join_flags(over), "valid_model": bool(np.isfinite(rss)), "warning_flags": _phase05_join_flags(flags)}
+    except Exception as exc:
+        return _phase06_invalid_fit(h, r, model_id, dataset_type, df, flags + [f"fit_failed:{exc}"])
+
+
+def fit_phase06_composite_models(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    fits: List[Dict[str, Any]] = []
+    datasets: Dict[Tuple[Any, Any], Dict[str, pd.DataFrame]] = {}
+    all_types = {"simple_geometry": ["d_max_pct", "capside", "fold", "h", "patch_R", "t", "Hout", "Hin"], "composite_block": ["d_max_pct", "capside", "fold", "h", "patch_R"] + PHASE06_COMPOSITES}
+    for c in PHASE06_COMPOSITES: all_types[c] = ["d_max_pct", "capside", "fold", "h", "patch_R", c]
+    for dtype, cols in all_types.items():
+        if all(c in df.columns for c in cols): datasets[dtype] = _phase06_clean_df(df, cols)
+        else: datasets[dtype] = pd.DataFrame(columns=df.columns)
+    conds = sorted(set().union(*[set(map(tuple, d[PHASE06_CONDITION_COLS].drop_duplicates().to_numpy().tolist())) for d in datasets.values() if not d.empty]), key=lambda x:(str(x[0]),str(x[1])))
+    for h, r in conds:
+        for mid in PHASE06_MODEL_IDS:
+            dtype = PHASE06_MODEL_FORMULAS[mid]["dataset_type"]; d = datasets[dtype]
+            cdf = d[(d["h"] == h) & (d["patch_R"] == r)].reset_index(drop=True) if not d.empty else pd.DataFrame(columns=df.columns)
+            fits.append(fit_phase06_model(cdf, mid, h, r, args))
+    cols = ["h","patch_R","model_id","model_formula_label","dataset_type","n_observations","n_capsides","n_folds","n_predictor_columns","n_effective_parameters","df_model","df_residual","response_mean","response_sd","rss","tss","mse","rmse","mae","r_squared","r_squared_adjusted","loocv_mse","loocv_rmse","loocv_mae","loocv_n_predictions","loocv_n_failed_predictions","aic","bic","design_matrix_rank","design_matrix_condition_number","rank_deficient","overfit_warning","valid_model","warning_flags"]
+    out = pd.DataFrame([{c: f.get(c, np.nan) for c in cols} for f in fits])
+    if not out.empty: out["_o"] = out["model_id"].map({m:i for i,m in enumerate(PHASE06_MODEL_IDS)}); out = out.sort_values(["h","patch_R","_o"], kind="mergesort").drop(columns="_o")
+    return out
+
+
+def compute_phase06_model_contributions(metrics: pd.DataFrame) -> pd.DataFrame:
+    specs = [("simple_geometry_added_after_capside_fold", "t,Hout,Hin", "M3_base_simple_geometry", "M4_simple")]
+    specs += [(f"{c}_added_after_capside_fold", c, f"M3_base_{c}", f"M4_{c}") for c in PHASE06_COMPOSITES]
+    specs += [("composite_block_added_after_capside_fold", ";".join(PHASE06_COMPOSITES), "M3_base_composite_block", "M5_composite_block")]
+    rows=[]
+    for (h,r), g in metrics.groupby(["h","patch_R"], sort=True, dropna=False):
+        by={row["model_id"]:row for _,row in g.iterrows()}
+        for cid,preds,bid,eid in specs:
+            b=by.get(bid); e=by.get(eid); flags=[]
+            same=bool(b is not None and e is not None and int(b.get("n_observations",-1))==int(e.get("n_observations",-2)) and b.get("dataset_type")==e.get("dataset_type"))
+            valid=bool(b is not None and e is not None and b.get("valid_model",False) and e.get("valid_model",False) and same)
+            if not valid: flags.append("comparison_invalid")
+            def v(row,col): return row[col] if row is not None and col in row else np.nan
+            dr2=v(e,"r_squared")-v(b,"r_squared") if b is not None and e is not None else np.nan; dadj=v(e,"r_squared_adjusted")-v(b,"r_squared_adjusted") if b is not None and e is not None else np.nan; drm=v(e,"loocv_rmse")-v(b,"loocv_rmse") if b is not None and e is not None else np.nan; dmae=v(e,"loocv_mae")-v(b,"loocv_mae") if b is not None and e is not None else np.nan; daic=v(e,"aic")-v(b,"aic") if b is not None and e is not None else np.nan; dbic=v(e,"bic")-v(b,"bic") if b is not None and e is not None else np.nan
+            label="comparison_invalid" if not valid else ("added_variance_and_improved_loocv" if np.isfinite(dr2) and dr2>0 and np.isfinite(drm) and drm<0 else "added_in_sample_variance_only" if np.isfinite(dr2) and dr2>0 else "no_in_sample_gain" if np.isfinite(dr2) else "inconclusive")
+            rows.append({"h":h,"patch_R":r,"comparison_id":cid,"predictor_set":preds,"base_model":bid,"extended_model":eid,"base_n_observations":v(b,"n_observations"),"extended_n_observations":v(e,"n_observations"),"same_rows_for_comparison":same,"base_r_squared":v(b,"r_squared"),"extended_r_squared":v(e,"r_squared"),"delta_r_squared":dr2,"base_r_squared_adjusted":v(b,"r_squared_adjusted"),"extended_r_squared_adjusted":v(e,"r_squared_adjusted"),"delta_r_squared_adjusted":dadj,"base_loocv_rmse":v(b,"loocv_rmse"),"extended_loocv_rmse":v(e,"loocv_rmse"),"delta_loocv_rmse":drm,"base_loocv_mae":v(b,"loocv_mae"),"extended_loocv_mae":v(e,"loocv_mae"),"delta_loocv_mae":dmae,"base_aic":v(b,"aic"),"extended_aic":v(e,"aic"),"delta_aic":daic,"base_bic":v(b,"bic"),"extended_bic":v(e,"bic"),"delta_bic":dbic,"interpretation_label":label,"warning_flags":_phase05_join_flags(flags)})
+    return pd.DataFrame(rows)
+
+def compare_simple_vs_composite(contrib: pd.DataFrame) -> pd.DataFrame:
+    rows=[]
+    for (h,r), g in contrib.groupby(["h","patch_R"], sort=True, dropna=False):
+        simple = g[g["comparison_id"]=="simple_geometry_added_after_capside_fold"]
+        if simple.empty: continue
+        s=simple.iloc[0]
+        for c in PHASE06_COMPOSITES:
+            cg=g[g["comparison_id"]==f"{c}_added_after_capside_fold"]
+            if cg.empty: continue
+            x=cg.iloc[0]
+            br2 = _phase05_float(x["delta_r_squared"]) > _phase05_float(s["delta_r_squared"])
+            badj = _phase05_float(x["delta_r_squared_adjusted"]) > _phase05_float(s["delta_r_squared_adjusted"])
+            bloo = _phase05_float(x["delta_loocv_rmse"]) < _phase05_float(s["delta_loocv_rmse"])
+            label = "composite_more_stable_than_simple_geometry" if bloo and badj else "composite_in_sample_only" if br2 and not bloo else "composite_not_better_than_simple_geometry" if (not br2 and not bloo) else "mixed_evidence"
+            rows.append({"h":h,"patch_R":r,"composite_predictor":c,"simple_geometry_delta_r_squared":s["delta_r_squared"],"simple_geometry_delta_r_squared_adjusted":s["delta_r_squared_adjusted"],"simple_geometry_delta_loocv_rmse":s["delta_loocv_rmse"],"simple_geometry_interpretation_label":s["interpretation_label"],"composite_delta_r_squared":x["delta_r_squared"],"composite_delta_r_squared_adjusted":x["delta_r_squared_adjusted"],"composite_delta_loocv_rmse":x["delta_loocv_rmse"],"composite_interpretation_label":x["interpretation_label"],"composite_beats_simple_by_r2":br2,"composite_beats_simple_by_adjusted_r2":badj,"composite_beats_simple_by_loocv":bloo,"summary_label":label,"warning_flags":x["warning_flags"]})
+    return pd.DataFrame(rows)
+
+
+def compute_predictor_redundancy(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    vars_ = ["t","Hout","Hin","delta_H","H_mean","H_asym","G_out","G_in","Q_in"]
+    rows=[]
+    for (h,r), g in df.groupby(["h","patch_R"], sort=True, dropna=False):
+        for i,a in enumerate(vars_):
+            for b in vars_[i+1:]:
+                sub=g[[a,b]].apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).dropna()
+                n=len(sub); pr=sr=np.nan; flags=[]
+                if n>=2 and sub[a].var(ddof=0)>0 and sub[b].var(ddof=0)>0:
+                    pr=float(sub[a].corr(sub[b], method="pearson")); sr=float(sub[a].corr(sub[b], method="spearman"))
+                else:
+                    flags.append("zero_predictor_variance" if n>=2 else "insufficient_observations")
+                high=bool(np.isfinite(pr) and abs(pr)>=float(args.redundancy_threshold))
+                if high: flags.append("high_predictor_redundancy")
+                rows.append({"h":h,"patch_R":r,"predictor_a":a,"predictor_b":b,"n_observations":n,"pearson_r":pr,"spearman_rho":sr,"abs_pearson_r":abs(pr) if np.isfinite(pr) else np.nan,"high_redundancy":high,"warning_flags":_phase05_join_flags(flags)})
+    return pd.DataFrame(rows)
+
+
+def make_phase06_figures(comp_df: pd.DataFrame, assoc: pd.DataFrame, contrib: pd.DataFrame, redund: pd.DataFrame, args: argparse.Namespace) -> Tuple[List[str], List[str]]:
+    files=[]; warnings=[]
+    if args.no_plots: return files,warnings
+    try:
+        import matplotlib.pyplot as plt
+        groups=list(comp_df.groupby(["h","patch_R"], sort=True, dropna=False)); single=len(groups)==1
+        for (h,r), g in groups:
+            for pred in ["delta_H_c","H_mean_c","H_asym_c","G_out_c","G_in_c","Q_in_c"]:
+                fig, ax = plt.subplots(figsize=(7,5))
+                for cap, cg in g.groupby("capside", sort=True):
+                    ax.scatter(pd.to_numeric(cg[pred], errors="coerce"), pd.to_numeric(cg["delta_d_max_pct"], errors="coerce"), label=str(cap), s=35)
+                    for _, row in cg.iterrows(): ax.annotate(str(row["fold"]), (row[pred], row["delta_d_max_pct"]), fontsize=7)
+                ar=assoc[(assoc["h"]==h)&(assoc["patch_R"]==r)&(assoc["predictor"]==pred)]
+                title=f"{pred}, h={h}, patch_R={r}"
+                if not ar.empty and bool(ar.iloc[0]["valid_model"]):
+                    rr=ar.iloc[0]; xs=np.asarray(ax.get_xlim()); ax.plot(xs, rr["slope"]*xs+rr["intercept"], color="black"); title += f", slope={rr['slope']:.3g}, CI=({rr['slope_ci_low']:.3g},{rr['slope_ci_high']:.3g}), p_perm={rr['p_perm_two_sided']:.3g}"
+                ax.axhline(0,color="grey",lw=0.8); ax.axvline(0,color="grey",lw=0.8); ax.set_xlabel(pred); ax.set_ylabel("delta_d_max_pct"); ax.set_title(title); ax.legend(fontsize=7, loc="best"); fig.tight_layout()
+                name=f"phase06_scatter_centered_{pred}.png" if single else f"phase06_scatter_h_{_phase05_condition_label(h)}_R_{_phase05_condition_label(r)}_{pred}.png"
+                path=args.outdir/name; fig.savefig(path,dpi=150); plt.close(fig); files.append(str(path))
+            cg=contrib[(contrib["h"]==h)&(contrib["patch_R"]==r)&contrib["comparison_id"].isin(["simple_geometry_added_after_capside_fold"]+[f"{c}_added_after_capside_fold" for c in PHASE06_COMPOSITES])]
+            fig, axes=plt.subplots(2,2,figsize=(13,8)); labels=cg["predictor_set"].astype(str).tolist(); x=np.arange(len(cg))
+            for ax,col,title in [(axes[0,0],"delta_r_squared","Delta R2"),(axes[0,1],"delta_r_squared_adjusted","Delta adjusted R2"),(axes[1,0],"delta_loocv_rmse","Delta LOOCV RMSE (negative improves)")]:
+                ax.bar(x,pd.to_numeric(cg[col],errors="coerce")); ax.axhline(0,color="grey",lw=.8); ax.set_xticks(x); ax.set_xticklabels(labels,rotation=35,ha="right",fontsize=8); ax.set_title(title)
+            rg=redund[(redund["h"]==h)&(redund["patch_R"]==r)]; axes[1,1].bar(np.arange(len(rg)), pd.to_numeric(rg["abs_pearson_r"], errors="coerce")); axes[1,1].axhline(float(args.redundancy_threshold), color="red", ls="--"); axes[1,1].set_title("Predictor redundancy |Pearson r|"); axes[1,1].set_xticks([])
+            fig.suptitle(f"Phase 6 composite model comparison: h={h}, patch_R={r}"); fig.tight_layout(); name="phase06_composite_model_comparison.png" if single else f"phase06_composite_model_comparison_h_{_phase05_condition_label(h)}_R_{_phase05_condition_label(r)}.png"; path=args.outdir/name; fig.savefig(path,dpi=150); plt.close(fig); files.append(str(path))
+    except Exception as exc:
+        warnings.append(f"plot_failed:{exc}")
+    return files,warnings
+
+
+def write_phase06_summary(path: Path, report: Dict[str, Any], assoc: pd.DataFrame, contrib: pd.DataFrame, svc: pd.DataFrame, redund: pd.DataFrame) -> None:
+    best = assoc[assoc["valid_model"] == True].sort_values("r_squared", ascending=False).head(1) if not assoc.empty else pd.DataFrame()
+    improved = contrib[(pd.to_numeric(contrib.get("delta_loocv_rmse", pd.Series(dtype=float)), errors="coerce") < 0) & (contrib.get("comparison_id", pd.Series(dtype=str)).astype(str).str.contains("_added_after"))] if not contrib.empty else pd.DataFrame()
+    beats = svc[svc.get("composite_beats_simple_by_loocv", pd.Series(dtype=bool)) == True] if not svc.empty else pd.DataFrame()
+    lines=[f"Phase 6 composite geometric descriptors: {report['status']}", f"Capsids: {report['n_capsides']}", f"Folds: {report['n_folds']}", f"h values: {report['h_values']}", f"patch_R values: {report['patch_R_values']}", f"epsilon: {report['epsilon']}", f"Composite variables computed: {', '.join(PHASE06_COMPOSITES)}"]
+    if not best.empty: lines.append(f"Strongest centered association by R2: {best.iloc[0]['predictor']} at h={best.iloc[0]['h']}, patch_R={best.iloc[0]['patch_R']} (R2={best.iloc[0]['r_squared']:.6g}).")
+    lines.append(f"Composite comparisons with improved LOOCV relative to categorical baseline: {', '.join(improved['comparison_id'].astype(str).tolist()) if not improved.empty else 'none'}.")
+    lines.append(f"Any composite beat simple geometry by LOOCV: {'yes' if not beats.empty else 'no'}.")
+    lines.append(f"Redundancy warnings: {int(redund['high_redundancy'].sum()) if not redund.empty and 'high_redundancy' in redund else 0} high-redundancy predictor pairs.")
+    lines.append(f"Overfit warnings: {sum('overfit' in str(x) or 'saturated' in str(x) for x in report.get('warnings', []))} warning categories in report.")
+    path.write_text("\n".join(lines)+"\n", encoding="utf-8")
+
+
+def run_phase06(input_df: pd.DataFrame, phase01_report: Dict, phase02_report: Dict, phase03_report: Dict, phase04_report: Dict, phase05_report: Dict, args: argparse.Namespace) -> Dict[str, Any]:
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    output_files={"composite_geometry": str(args.outdir/"phase06_composite_geometry.csv"), "centered_associations": str(args.outdir/"phase06_composite_centered_associations.csv"), "model_metrics": str(args.outdir/"phase06_composite_model_metrics.csv"), "model_contributions": str(args.outdir/"phase06_composite_model_contributions.csv"), "simple_vs_composite": str(args.outdir/"phase06_simple_vs_composite_comparison.csv"), "predictor_redundancy": str(args.outdir/"phase06_predictor_redundancy.csv"), "report": str(args.outdir/"phase06_report.json"), "summary": str(args.outdir/"phase06_summary.txt")}
+    validation=validate_phase06_input(input_df); warnings=[]; severe=[]
+    for pn, rep in [("phase02",phase02_report),("phase03",phase03_report),("phase04",phase04_report),("phase05",phase05_report)]:
+        if rep.get("status") == "WARN": warnings.append(f"upstream_{pn}_warn")
+    if phase01_report.get("status") == "FAIL" or phase02_report.get("status") == "FAIL": severe.append("upstream_required_phase_failed")
+    if validation["missing_columns"]: severe.append("missing_required_column")
+    if not validation["duplicate_key_status"]["is_unique"]: severe.append("duplicate_observational_key")
+    if severe:
+        status="FAIL"; empty=pd.DataFrame();
+        for key in ["composite_geometry","centered_associations","model_metrics","model_contributions","simple_vs_composite","predictor_redundancy"]: empty.to_csv(output_files[key], index=False)
+        report=_phase06_report(input_df, validation, {}, output_files, warnings, severe, status, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, args)
+        (args.outdir/"phase06_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"); write_phase06_summary(args.outdir/"phase06_summary.txt", report, empty, empty, empty, empty); return report
+    comp=center_composite_geometry(compute_composite_geometry(input_df, float(args.epsilon)))
+    integrity=check_phase06_centering_integrity(comp)
+    if not integrity["delta_passes"]: severe.append("centered_mechanical_integrity_failed")
+    if not integrity["composite_passes_or_missing_only"]: warnings.append("centered_sum_check_failed")
+    assoc=fit_phase06_centered_associations(comp, args); metrics=fit_phase06_composite_models(comp, args); contrib=compute_phase06_model_contributions(metrics); svc=compare_simple_vs_composite(contrib); redund=compute_predictor_redundancy(comp, args)
+    fig_files, fig_warnings=make_phase06_figures(comp, assoc, contrib, redund, args); warnings.extend([w.split(':')[0] for w in fig_warnings])
+    if any("high_predictor_redundancy" in str(x) for x in redund.get("warning_flags", [])): warnings.append("high_predictor_redundancy")
+    if any(str(x) for x in metrics.get("warning_flags", [])): warnings.append("model_warnings_present")
+    if assoc.empty or metrics.empty: severe.append("no_valid_phase06_analysis")
+    status="FAIL" if severe else ("WARN" if warnings or any(str(x) for x in comp.get("phase06_warning_flags", [])) else "PASS")
+    comp.to_csv(output_files["composite_geometry"], index=False); assoc.to_csv(output_files["centered_associations"], index=False); metrics.to_csv(output_files["model_metrics"], index=False); contrib.to_csv(output_files["model_contributions"], index=False); svc.to_csv(output_files["simple_vs_composite"], index=False); redund.to_csv(output_files["predictor_redundancy"], index=False)
+    output_files["figures"] = fig_files
+    report=_phase06_report(comp, validation, integrity, output_files, sorted(set(warnings)), sorted(set(severe)), status, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, args)
+    (args.outdir/"phase06_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"); write_phase06_summary(args.outdir/"phase06_summary.txt", report, assoc, contrib, svc, redund)
+    return report
+
+
+def _phase06_report(df: pd.DataFrame, validation: Dict[str, Any], integrity: Dict[str, Any], output_files: Dict[str, Any], warnings: List[str], severe: List[str], status: str, p1: Dict, p2: Dict, p3: Dict, p4: Dict, p5: Dict, args: argparse.Namespace) -> Dict[str, Any]:
+    return {"phase": 6, "status": status, "timestamp": datetime.now(timezone.utc).isoformat(), "input_file": str(args.input), "output_directory": str(args.outdir), "upstream_phase01_status": p1.get("status"), "upstream_phase02_status": p2.get("status"), "upstream_phase03_status": p3.get("status"), "upstream_phase04_status": p4.get("status"), "upstream_phase05_status": p5.get("status"), "required_columns_checked": validation.get("required_columns_checked", PHASE06_REQUIRED_COLUMNS), "missing_columns": validation.get("missing_columns", []), "n_rows_input": int(len(df)), "n_rows_output": int(len(df)), "n_capsides": int(df["capside"].nunique()) if "capside" in df.columns and len(df) else 0, "n_folds": int(df["fold"].nunique()) if "fold" in df.columns and len(df) else 0, "h_values": [_json_scalar(x) for x in sorted(df["h"].dropna().unique().tolist(), key=str)] if "h" in df.columns else [], "patch_R_values": [_json_scalar(x) for x in sorted(df["patch_R"].dropna().unique().tolist(), key=str)] if "patch_R" in df.columns else [], "n_conditions": int(df[["h","patch_R"]].drop_duplicates().shape[0]) if all(c in df.columns for c in ["h","patch_R"]) else 0, "composite_variable_definitions": {"delta_H":"Hout - Hin; same units as curvature","H_mean":"(Hout + Hin)/2; same units as curvature","H_asym":"(Hout - Hin)/(abs(Hout)+abs(Hin)+epsilon); dimensionless ratio","G_out":"t * abs(Hout); dimensionless if t is length and Hout inverse length","G_in":"t * abs(Hin); dimensionless if t is length and Hin inverse length","Q_in":"abs(Hin)/t; usually inverse length squared","Q_out":"abs(Hout)/t; usually inverse length squared"}, "epsilon": float(args.epsilon), "centered_group_cols": PHASE06_CENTER_GROUP_COLS, "centered_predictors": PHASE06_CENTERED, "response_centered_association": PHASE03_RESPONSE, "bootstrap_n": int(args.bootstrap_n), "bootstrap_method": "cluster_by_capside_within_h_patch_R", "ci_level": float(args.ci), "perm_n": int(args.perm_n), "permutation_method": "within_capside_h_patch_R_shuffle_delta_d_max_pct", "seed": int(args.seed), "additive_model_definitions": {k:v["label"] for k,v in PHASE06_MODEL_FORMULAS.items()}, "complete_case_policy": "Each M3 baseline is refit on exactly the complete-case rows used by its matching extended model.", "loocv_method": "leave_one_row_out_refit_without_unseen_category_shortcuts", "redundancy_threshold": float(args.redundancy_threshold), "centered_integrity_checks": integrity, "output_files": output_files, "warnings": sorted(set(warnings)), "severe_flags": sorted(set(severe))}
+
+
+def _print_phase06_summary(report: Dict[str, Any]) -> None:
+    print(f"[{report['status']}] Phase 6 completed."); files=report.get("output_files", {})
+    for label,key in [("Composite geometry table","composite_geometry"),("Centered composite associations","centered_associations"),("Composite model metrics","model_metrics"),("Composite model contributions","model_contributions"),("Simple vs composite comparison","simple_vs_composite"),("Predictor redundancy table","predictor_redundancy"),("Phase 6 report","report")]: print(f"[INFO] {label}: {files.get(key,'not written')}")
+    try:
+        assoc=pd.read_csv(files["centered_associations"]); valid=assoc[assoc["valid_model"]==True]
+        for (h,r), g in valid.groupby(["h","patch_R"], sort=True):
+            row=g.sort_values("r_squared", ascending=False).iloc[0]; print(f"[COMP] h={h} patch_R={r} best_centered_predictor={row['predictor']} r2={row['r_squared']:.6g} p_perm={row['p_perm_two_sided']:.6g}")
+        svc=pd.read_csv(files["simple_vs_composite"])
+        for (h,r), g in svc.groupby(["h","patch_R"], sort=True):
+            gg=g.dropna(subset=["composite_delta_loocv_rmse"])
+            if not gg.empty:
+                row=gg.sort_values("composite_delta_loocv_rmse").iloc[0]; print(f"[MODEL] h={h} patch_R={r} best_LOOCV_composite={row['composite_predictor']} delta_LOOCV_RMSE={row['composite_delta_loocv_rmse']:.6g} label={row['summary_label']}")
+    except Exception: pass
+    if report.get("warnings"): print("[WARN] Phase 6 completed with warnings. See phase06_report.json.")
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -2784,9 +3206,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--phase",
-        choices=["1", "2", "3", "4", "5"],
+        choices=["1", "2", "3", "4", "5", "6"],
         default="1",
-        help="Analysis phase to run. Phase 1 is the default. Phase 5 runs Phases 1 through 5, then fits simple additive variance-partitioning models."
+        help="Analysis phase to run. Phase 1 is the default. Phase 6 runs Phases 1 through 6, then computes composite geometric descriptors and comparisons."
     )
 
     parser.add_argument(
@@ -2814,7 +3236,7 @@ def parse_args() -> argparse.Namespace:
         "--outdir",
         default=Path("results"),
         type=Path,
-        help="Output directory for Phase 2, Phase 3, Phase 4, and Phase 5 artifacts."
+        help="Output directory for Phase 2, Phase 3, Phase 4, Phase 5, and Phase 6 artifacts."
     )
 
     parser.add_argument(
@@ -2869,7 +3291,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-plots",
         action="store_true",
-        help="Skip Phase 3 centered scatterplots, Phase 4 ordinal ranking plots, and Phase 5 model comparison figures."
+        help="Skip Phase 3 centered scatterplots, Phase 4 ordinal ranking plots, Phase 5 model comparison figures, and Phase 6 figures."
     )
 
     parser.add_argument(
@@ -2924,6 +3346,20 @@ def parse_args() -> argparse.Namespace:
         default=3.0,
         type=float,
         help="Phase 5 observations-per-parameter overfit warning threshold. Default: 3."
+    )
+
+    parser.add_argument(
+        "--epsilon",
+        default=1e-12,
+        type=float,
+        help="Small positive value for Phase 6 H_asym denominator. Default: 1e-12."
+    )
+
+    parser.add_argument(
+        "--redundancy-threshold",
+        default=0.90,
+        type=float,
+        help="Phase 6 absolute Pearson-r threshold for high predictor redundancy. Default: 0.90."
     )
 
     parser.add_argument(
@@ -3017,6 +3453,10 @@ def main() -> int:
         print("[ERROR] Phase 5 threshold options must be positive.", file=sys.stderr)
         return 2
 
+    if args.epsilon <= 0 or args.redundancy_threshold <= 0:
+        print("[ERROR] --epsilon and --redundancy-threshold must be positive.", file=sys.stderr)
+        return 2
+
     try:
         normalized_df, phase01_report = run_phase01(args)
     except Exception as exc:
@@ -3081,9 +3521,30 @@ def main() -> int:
     phase05_report = run_phase05(phase05_input_df, phase01_report, phase02_report, phase03_report, phase04_report, args)
     _print_phase05_summary(phase05_report)
 
-    if phase05_report["status"] == "FAIL":
+    if args.phase == "5":
+        if phase05_report["status"] == "FAIL":
+            return 1
+        if args.fail_on_warning and phase05_report["status"] != "PASS":
+            return 1
+        return 0
+
+    phase06_input_df = phase05_input_df
+    phase06_path = args.outdir / "phase04_fold_rankings.csv"
+    phase03_path = args.outdir / "phase03_centered_geometry.csv"
+    for candidate in [phase06_path, phase03_path, centered_path]:
+        if candidate.exists() and candidate.stat().st_size > 0:
+            try:
+                tmp = pd.read_csv(candidate)
+                if all(c in tmp.columns for c in ["capside", "fold", "h", "patch_R", "d_max_pct", "delta_d_max_pct"]):
+                    phase06_input_df = tmp
+                    break
+            except Exception:
+                pass
+    phase06_report = run_phase06(phase06_input_df, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, args)
+    _print_phase06_summary(phase06_report)
+    if phase06_report["status"] == "FAIL":
         return 1
-    if args.fail_on_warning and phase05_report["status"] != "PASS":
+    if args.fail_on_warning and phase06_report["status"] != "PASS":
         return 1
     return 0
 
