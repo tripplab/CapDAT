@@ -2104,6 +2104,674 @@ def _print_phase04_summary(report: Dict) -> None:
 # Main CLI
 # ---------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------
+# Phase 5: simple additive variance partitioning models
+# ---------------------------------------------------------------------
+
+PHASE05_CONDITION_COLS = ["h", "patch_R"]
+PHASE05_REQUIRED_COLUMNS = ["capside", "fold", "h", "patch_R", "d_max_pct", "t", "Hout", "Hin"]
+PHASE05_CORE_COLUMNS = ["d_max_pct", "capside", "fold", "h", "patch_R"]
+PHASE05_GEOMETRY_COLUMNS = ["t", "Hout", "Hin"]
+PHASE05_MODEL_ORDER = [
+    "M0",
+    "M1_capside",
+    "M2_fold",
+    "M3_capside_fold",
+    "M3_geometry_base",
+    "M4_capside_fold_geometry",
+]
+PHASE05_COMPARISON_ORDER = [
+    "capside_vs_null",
+    "fold_vs_null",
+    "fold_added_after_capside",
+    "capside_added_after_fold",
+    "capside_plus_fold_vs_null",
+    "geometry_added_after_capside_fold",
+]
+PHASE05_MODEL_FORMULAS = {
+    "M0": {"label": "d_max_pct ~ 1", "categorical": [], "numeric": [], "dataset_type": "core_complete_case"},
+    "M1_capside": {"label": "d_max_pct ~ capside", "categorical": ["capside"], "numeric": [], "dataset_type": "core_complete_case"},
+    "M2_fold": {"label": "d_max_pct ~ fold", "categorical": ["fold"], "numeric": [], "dataset_type": "core_complete_case"},
+    "M3_capside_fold": {"label": "d_max_pct ~ capside + fold", "categorical": ["capside", "fold"], "numeric": [], "dataset_type": "core_complete_case"},
+    "M3_geometry_base": {"label": "d_max_pct ~ capside + fold", "categorical": ["capside", "fold"], "numeric": [], "dataset_type": "geometry_complete_case"},
+    "M4_capside_fold_geometry": {"label": "d_max_pct ~ capside + fold + t + Hout + Hin", "categorical": ["capside", "fold"], "numeric": ["t", "Hout", "Hin"], "dataset_type": "geometry_complete_case"},
+}
+PHASE05_PRESERVE_COLUMNS = [
+    "d_mag_max", "D", "delta_d_max_pct", "rel_delta_d_max_pct", "t_c", "Hout_c", "Hin_c",
+    "H1", "H2", "H1_norm", "H2_norm", "H0", "H0_norm", "patch_elems", "size_h", "E",
+    "rank_d_max_pct", "rank_t", "rank_t_thinnest", "rank_Hout", "rank_Hin",
+]
+
+
+def _phase05_float(value: Any) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return float("nan")
+    return out if np.isfinite(out) else float("nan")
+
+
+def _phase05_condition_label(value: Any) -> str:
+    text = str(value).strip().replace("-", "m").replace(".", "p")
+    return "NA" if text == "" or text.lower() == "nan" else "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in text)
+
+
+def _phase05_join_flags(flags: List[str]) -> str:
+    return ";".join(dict.fromkeys([f for f in flags if f]))
+
+
+def validate_phase05_input(df: pd.DataFrame) -> Dict[str, Any]:
+    key_required = ["capside", "fold", "h", "patch_R", "d_max_pct"]
+    missing_key = [c for c in key_required if c not in df.columns]
+    missing_geometry = [c for c in PHASE05_GEOMETRY_COLUMNS if c not in df.columns]
+    dup_rows = 0
+    dup_examples: List[Dict[str, Any]] = []
+    if all(c in df.columns for c in OBSERVATION_KEY):
+        dup_mask = df.duplicated(subset=OBSERVATION_KEY, keep=False)
+        dup_rows = int(dup_mask.sum())
+        if dup_rows:
+            dup_examples = df.loc[dup_mask, OBSERVATION_KEY].drop_duplicates().head(20).to_dict(orient="records")
+    nonfinite: Dict[str, int] = {}
+    for col in ["d_max_pct"] + [c for c in PHASE05_GEOMETRY_COLUMNS if c in df.columns]:
+        vals = pd.to_numeric(df[col], errors="coerce")
+        bad = int((~np.isfinite(vals)).sum())
+        if bad:
+            nonfinite[col] = bad
+    return {
+        "required_columns_checked": PHASE05_REQUIRED_COLUMNS,
+        "missing_key_columns": missing_key,
+        "missing_geometry_columns": missing_geometry,
+        "missing_columns": missing_key + missing_geometry,
+        "duplicate_key_status": {"observation_key": OBSERVATION_KEY, "is_unique": dup_rows == 0, "n_duplicate_rows": dup_rows, "duplicate_examples": dup_examples},
+        "nonfinite_counts": nonfinite,
+    }
+
+
+def _phase05_clean_model_df(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    out = df.copy()
+    for col in ["capside", "fold"]:
+        if col in out.columns:
+            out[col] = out[col].astype(str)
+    for col in ["d_max_pct", "h", "patch_R", "t", "Hout", "Hin"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    mask = pd.Series(True, index=out.index)
+    for col in columns:
+        if col in ["capside", "fold"]:
+            mask &= out[col].notna()
+        else:
+            mask &= np.isfinite(pd.to_numeric(out[col], errors="coerce"))
+    return out.loc[mask].sort_values(["h", "patch_R", "capside", "fold"], kind="mergesort").reset_index(drop=True)
+
+
+def prepare_phase05_model_datasets(df: pd.DataFrame) -> Dict[Tuple[Any, Any], Dict[str, pd.DataFrame]]:
+    core = _phase05_clean_model_df(df, PHASE05_CORE_COLUMNS)
+    geom_cols = PHASE05_CORE_COLUMNS + PHASE05_GEOMETRY_COLUMNS
+    geometry = _phase05_clean_model_df(df, geom_cols) if all(c in df.columns for c in geom_cols) else pd.DataFrame(columns=df.columns)
+    conditions = sorted(
+        set(map(tuple, core[PHASE05_CONDITION_COLS].drop_duplicates().to_numpy().tolist())) |
+        (set(map(tuple, geometry[PHASE05_CONDITION_COLS].drop_duplicates().to_numpy().tolist())) if not geometry.empty else set()),
+        key=lambda x: (str(x[0]), str(x[1])),
+    )
+    out: Dict[Tuple[Any, Any], Dict[str, pd.DataFrame]] = {}
+    for h, r in conditions:
+        out[(h, r)] = {
+            "core_complete_case": core[(core["h"] == h) & (core["patch_R"] == r)].reset_index(drop=True),
+            "geometry_complete_case": geometry[(geometry["h"] == h) & (geometry["patch_R"] == r)].reset_index(drop=True) if not geometry.empty else pd.DataFrame(columns=df.columns),
+        }
+    return out
+
+
+def _phase05_reference_levels(df: pd.DataFrame, cat_cols: List[str]) -> Dict[str, str]:
+    refs = {}
+    for col in cat_cols:
+        levels = sorted(df[col].dropna().astype(str).unique().tolist())
+        refs[col] = levels[0] if levels else ""
+    return refs
+
+
+def _phase05_build_design_matrix(df: pd.DataFrame, spec: Dict[str, Any], levels: Optional[Dict[str, List[str]]] = None) -> Tuple[np.ndarray, List[str], Dict[str, List[str]]]:
+    n = len(df)
+    cols = [np.ones(n, dtype=float)]
+    names = ["Intercept"]
+    used_levels: Dict[str, List[str]] = {}
+    for cat in spec["categorical"]:
+        if levels and cat in levels:
+            cat_levels = levels[cat]
+        else:
+            cat_levels = sorted(df[cat].dropna().astype(str).unique().tolist())
+        used_levels[cat] = cat_levels
+        for level in cat_levels[1:]:
+            cols.append((df[cat].astype(str).to_numpy() == level).astype(float))
+            names.append(f"{cat}[T.{level}]")
+    for num in spec["numeric"]:
+        vals = pd.to_numeric(df[num], errors="coerce").to_numpy(dtype=float)
+        cols.append(vals)
+        names.append(num)
+    X = np.column_stack(cols) if cols else np.empty((n, 0))
+    return X, names, used_levels
+
+
+def _phase05_invalid_fit(h: Any, patch_R: Any, model_id: str, dataset_type: str, df: pd.DataFrame, flags: List[str]) -> Dict[str, Any]:
+    y = pd.to_numeric(df["d_max_pct"], errors="coerce") if "d_max_pct" in df.columns and len(df) else pd.Series(dtype=float)
+    return {
+        "h": h, "patch_R": patch_R, "model_id": model_id, "model_formula_label": PHASE05_MODEL_FORMULAS[model_id]["label"], "dataset_type": dataset_type,
+        "n_observations": int(len(df)), "n_capsides": int(df["capside"].nunique()) if "capside" in df.columns and len(df) else 0,
+        "n_folds": int(df["fold"].nunique()) if "fold" in df.columns and len(df) else 0, "n_predictor_columns": np.nan,
+        "n_effective_parameters": np.nan, "df_model": np.nan, "df_residual": np.nan,
+        "response_mean": float(y.mean()) if len(y) else np.nan, "response_sd": float(y.std(ddof=1)) if len(y) > 1 else np.nan,
+        "rss": np.nan, "tss": np.nan, "mse": np.nan, "rmse": np.nan, "mae": np.nan, "r_squared": np.nan, "r_squared_adjusted": np.nan,
+        "loocv_mse": np.nan, "loocv_rmse": np.nan, "loocv_mae": np.nan, "loocv_n_predictions": 0, "loocv_n_failed_predictions": int(len(df)),
+        "aic": np.nan, "bic": np.nan, "design_matrix_rank": np.nan, "design_matrix_condition_number": np.nan,
+        "rank_deficient": False, "overfit_warning": _phase05_join_flags([f for f in flags if "overfit" in f or "saturated" in f]),
+        "valid_model": False, "warning_flags": _phase05_join_flags(flags),
+        "fitted_values": np.full(len(df), np.nan), "residuals": np.full(len(df), np.nan), "coefficients": [], "loocv_predictions": np.full(len(df), np.nan),
+        "loocv_valid": np.zeros(len(df), dtype=bool), "loocv_flags": ["model_invalid"] * len(df), "design_levels": {}, "coef_names": [], "params": np.array([]),
+    }
+
+
+def fit_phase05_model(df: pd.DataFrame, model_id: str, h: Any, patch_R: Any, args: argparse.Namespace) -> Dict[str, Any]:
+    spec = PHASE05_MODEL_FORMULAS[model_id]
+    dataset_type = spec["dataset_type"]
+    flags: List[str] = []
+    n = int(len(df))
+    n_caps = int(df["capside"].nunique()) if "capside" in df.columns and n else 0
+    n_folds = int(df["fold"].nunique()) if "fold" in df.columns and n else 0
+    if n < args.model_min_n:
+        flags.append("insufficient_observations")
+    if model_id in ["M1_capside", "M3_capside_fold", "M3_geometry_base", "M4_capside_fold_geometry"] and n_caps < 2:
+        flags.append("insufficient_capsides")
+    if model_id in ["M2_fold", "M3_capside_fold", "M3_geometry_base", "M4_capside_fold_geometry"] and n_folds < 2:
+        flags.append("insufficient_folds")
+    if model_id == "M4_capside_fold_geometry":
+        if any(c not in df.columns for c in PHASE05_GEOMETRY_COLUMNS):
+            flags.append("m4_not_available")
+        elif not any(float(pd.to_numeric(df[c], errors="coerce").var(ddof=0)) > 0 for c in PHASE05_GEOMETRY_COLUMNS if c in df.columns):
+            flags.append("zero_geometry_variance")
+    y = pd.to_numeric(df["d_max_pct"], errors="coerce").to_numpy(dtype=float) if "d_max_pct" in df.columns else np.array([])
+    if n and (not np.isfinite(y).all()):
+        flags.append("nonfinite_d_max_pct")
+    tss = float(np.sum((y - np.mean(y)) ** 2)) if n else np.nan
+    if n and (not np.isfinite(tss) or tss <= 0):
+        flags.append("zero_response_variance")
+    fatal = ["insufficient_observations", "insufficient_capsides", "insufficient_folds", "zero_response_variance", "nonfinite_d_max_pct", "zero_geometry_variance", "m4_not_available"]
+    if any(f in flags for f in fatal):
+        return _phase05_invalid_fit(h, patch_R, model_id, dataset_type, df, flags)
+    try:
+        X, coef_names, design_levels = _phase05_build_design_matrix(df, spec)
+        if not np.isfinite(X).all():
+            return _phase05_invalid_fit(h, patch_R, model_id, dataset_type, df, flags + ["design_matrix_nonfinite"])
+        params, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+        fitted = X @ params
+        resid = y - fitted
+        rss = float(np.sum(resid ** 2))
+        rank = int(np.linalg.matrix_rank(X))
+        n_cols = int(X.shape[1])
+        rank_def = rank < n_cols
+        if rank_def:
+            flags.append("rank_deficient_design")
+        cond = float(np.linalg.cond(X)) if n_cols and rank else np.nan
+        if np.isfinite(cond) and cond > args.condition_number_threshold:
+            flags.append("high_condition_number")
+        p_eff = max(rank - 1, 0)
+        df_model = p_eff
+        df_resid = n - rank
+        if n <= rank or n <= p_eff:
+            flags.append("saturated_or_overfit_model")
+        if df_resid <= 0:
+            flags.append("no_residual_degrees_of_freedom")
+        r2 = np.nan if tss <= 0 else 1.0 - rss / tss
+        if np.isfinite(r2) and np.isclose(r2, 1.0) and ("saturated_or_overfit_model" in flags or df_resid <= 1):
+            flags.append("saturated_r2_not_interpretable")
+        if n - p_eff - 1 <= 0 or not np.isfinite(r2):
+            adj_r2 = np.nan
+            flags.append("adjusted_r2_undefined")
+        else:
+            adj_r2 = 1.0 - (1.0 - r2) * (n - 1) / (n - p_eff - 1)
+        mse = rss / n
+        rmse = float(np.sqrt(mse))
+        mae = float(np.mean(np.abs(resid)))
+        k = rank
+        aic = float(n * np.log(rss / n) + 2 * k) if rss > 0 else np.nan
+        bic = float(n * np.log(rss / n) + np.log(n) * k) if rss > 0 else np.nan
+        loocv = compute_loocv_metrics(df, model_id, args)
+        flags.extend(loocv["model_flags"])
+        coefs = []
+        se = np.full(len(params), np.nan)
+        tvals = np.full(len(params), np.nan)
+        pvals = np.full(len(params), np.nan)
+        if df_resid > 0 and not rank_def and rss >= 0:
+            try:
+                sigma2 = rss / df_resid
+                cov = sigma2 * np.linalg.pinv(X.T @ X)
+                se = np.sqrt(np.diag(cov))
+                tvals = params / se
+            except Exception:
+                flags.append("coefficient_standard_errors_unavailable")
+        for name, val, sev, tv, pv in zip(coef_names, params, se, tvals, pvals):
+            coefs.append({
+                "h": h, "patch_R": patch_R, "model_id": model_id, "coefficient_name": name,
+                "coefficient_value": float(val), "coefficient_standard_error": float(sev) if np.isfinite(sev) else np.nan,
+                "coefficient_t_value": float(tv) if np.isfinite(tv) else np.nan,
+                "coefficient_p_value": float(pv) if np.isfinite(pv) else np.nan,
+                "coefficient_warning_flags": "" if np.isfinite(sev) else "standard_error_unavailable",
+            })
+        overfit_flags = [f for f in flags if f in {"saturated_or_overfit_model", "no_residual_degrees_of_freedom", "saturated_r2_not_interpretable", "high_condition_number", "unstable_loocv", "loocv_failed"}]
+        return {
+            "h": h, "patch_R": patch_R, "model_id": model_id, "model_formula_label": spec["label"], "dataset_type": dataset_type,
+            "n_observations": n, "n_capsides": n_caps, "n_folds": n_folds, "n_predictor_columns": n_cols - 1,
+            "n_effective_parameters": p_eff, "df_model": df_model, "df_residual": df_resid,
+            "response_mean": float(np.mean(y)), "response_sd": float(np.std(y, ddof=1)) if n > 1 else np.nan,
+            "rss": rss, "tss": tss, "mse": mse, "rmse": rmse, "mae": mae, "r_squared": float(r2) if np.isfinite(r2) else np.nan,
+            "r_squared_adjusted": float(adj_r2) if np.isfinite(adj_r2) else np.nan, "loocv_mse": loocv["mse"], "loocv_rmse": loocv["rmse"], "loocv_mae": loocv["mae"],
+            "loocv_n_predictions": loocv["n_predictions"], "loocv_n_failed_predictions": loocv["n_failed"], "aic": aic, "bic": bic,
+            "design_matrix_rank": rank, "design_matrix_condition_number": cond, "rank_deficient": bool(rank_def),
+            "overfit_warning": _phase05_join_flags(overfit_flags), "valid_model": bool(np.isfinite(rss) and np.isfinite(fitted).all()), "warning_flags": _phase05_join_flags(flags),
+            "fitted_values": fitted, "residuals": resid, "coefficients": coefs, "loocv_predictions": loocv["predictions"], "loocv_valid": loocv["valid"],
+            "loocv_flags": loocv["row_flags"], "design_levels": design_levels, "coef_names": coef_names, "params": params,
+        }
+    except Exception as exc:
+        return _phase05_invalid_fit(h, patch_R, model_id, dataset_type, df, flags + [f"fit_failed:{exc}"])
+
+
+def compute_loocv_metrics(df: pd.DataFrame, model_id: str, args: argparse.Namespace) -> Dict[str, Any]:
+    spec = PHASE05_MODEL_FORMULAS[model_id]
+    n = int(len(df))
+    y = pd.to_numeric(df["d_max_pct"], errors="coerce").to_numpy(dtype=float)
+    preds = np.full(n, np.nan)
+    valid = np.zeros(n, dtype=bool)
+    row_flags: List[str] = [""] * n
+    failed = 0
+    model_flags: List[str] = []
+    for i in range(n):
+        train = df.drop(index=df.index[i]).reset_index(drop=True)
+        test = df.iloc[[i]].reset_index(drop=True)
+        split_flags: List[str] = []
+        if len(train) < args.model_min_n:
+            split_flags.append("insufficient_observations")
+        for cat in spec["categorical"]:
+            if str(test.iloc[0][cat]) not in set(train[cat].astype(str).unique().tolist()):
+                split_flags.append("loocv_unseen_category")
+        if split_flags:
+            failed += 1
+            row_flags[i] = _phase05_join_flags(split_flags)
+            continue
+        try:
+            levels = {cat: sorted(train[cat].dropna().astype(str).unique().tolist()) for cat in spec["categorical"]}
+            Xtr, _, _ = _phase05_build_design_matrix(train, spec, levels=levels)
+            ytr = pd.to_numeric(train["d_max_pct"], errors="coerce").to_numpy(dtype=float)
+            if not np.isfinite(Xtr).all() or not np.isfinite(ytr).all() or float(np.sum((ytr - np.mean(ytr)) ** 2)) <= 0:
+                raise ValueError("invalid_training_split")
+            beta, _, _, _ = np.linalg.lstsq(Xtr, ytr, rcond=None)
+            Xte, _, _ = _phase05_build_design_matrix(test, spec, levels=levels)
+            preds[i] = float(Xte @ beta)
+            valid[i] = np.isfinite(preds[i])
+            if not valid[i]:
+                row_flags[i] = "loocv_failed"
+                failed += 1
+        except Exception:
+            failed += 1
+            row_flags[i] = "loocv_failed"
+    errors = y[valid] - preds[valid]
+    n_pred = int(valid.sum())
+    if n_pred == 0:
+        model_flags.append("loocv_failed")
+        mse = rmse = mae = np.nan
+    else:
+        mse = float(np.mean(errors ** 2))
+        rmse = float(np.sqrt(mse))
+        mae = float(np.mean(np.abs(errors)))
+    min_success = max(3, float(args.loocv_min_success_fraction) * n)
+    if n_pred < min_success:
+        model_flags.append("unstable_loocv")
+    if any("loocv_unseen_category" in f for f in row_flags):
+        model_flags.append("loocv_unseen_category")
+    return {"mse": mse, "rmse": rmse, "mae": mae, "n_predictions": n_pred, "n_failed": int(n - n_pred), "predictions": preds, "valid": valid, "row_flags": row_flags, "model_flags": model_flags}
+
+
+def _phase05_metric_rows(fits: List[Dict[str, Any]]) -> pd.DataFrame:
+    cols = [
+        "h", "patch_R", "model_id", "model_formula_label", "dataset_type", "n_observations", "n_capsides", "n_folds", "n_predictor_columns", "n_effective_parameters", "df_model", "df_residual", "response_mean", "response_sd",
+        "rss", "tss", "mse", "rmse", "mae", "r_squared", "r_squared_adjusted", "loocv_mse", "loocv_rmse", "loocv_mae", "loocv_n_predictions", "loocv_n_failed_predictions", "aic", "bic",
+        "design_matrix_rank", "design_matrix_condition_number", "rank_deficient", "overfit_warning", "valid_model", "warning_flags",
+    ]
+    df = pd.DataFrame([{c: f.get(c, np.nan) for c in cols} for f in fits])
+    df["_order"] = df["model_id"].map({m: i for i, m in enumerate(PHASE05_MODEL_ORDER)})
+    return df.sort_values(["h", "patch_R", "_order"], kind="mergesort").drop(columns="_order")
+
+
+def build_phase05_predictions_table(condition_datasets: Dict[Tuple[Any, Any], Dict[str, pd.DataFrame]], fits: List[Dict[str, Any]]) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for fit in fits:
+        df = condition_datasets[(fit["h"], fit["patch_R"])][fit["dataset_type"]]
+        y = pd.to_numeric(df["d_max_pct"], errors="coerce").to_numpy(dtype=float) if len(df) else np.array([])
+        fitted = fit.get("fitted_values", np.full(len(df), np.nan))
+        loocv = fit.get("loocv_predictions", np.full(len(df), np.nan))
+        valid = fit.get("loocv_valid", np.zeros(len(df), dtype=bool))
+        row_flags = fit.get("loocv_flags", [""] * len(df))
+        for i, row in df.reset_index(drop=True).iterrows():
+            resid = y[i] - fitted[i] if i < len(fitted) and np.isfinite(fitted[i]) else np.nan
+            cv_resid = y[i] - loocv[i] if i < len(loocv) and np.isfinite(loocv[i]) else np.nan
+            rows.append({
+                "h": fit["h"], "patch_R": fit["patch_R"], "model_id": fit["model_id"], "capside": row["capside"], "fold": row["fold"],
+                "observed_d_max_pct": y[i], "fitted_d_max_pct": fitted[i] if i < len(fitted) else np.nan, "residual": resid,
+                "abs_residual": abs(resid) if np.isfinite(resid) else np.nan, "squared_residual": resid ** 2 if np.isfinite(resid) else np.nan,
+                "loocv_predicted_d_max_pct": loocv[i] if i < len(loocv) else np.nan, "loocv_residual": cv_resid,
+                "loocv_abs_residual": abs(cv_resid) if np.isfinite(cv_resid) else np.nan, "loocv_squared_residual": cv_resid ** 2 if np.isfinite(cv_resid) else np.nan,
+                "loocv_prediction_valid": bool(valid[i]) if i < len(valid) else False, "loocv_warning_flags": row_flags[i] if i < len(row_flags) else "",
+            })
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out["_order"] = out["model_id"].map({m: i for i, m in enumerate(PHASE05_MODEL_ORDER)})
+        out = out.sort_values(["h", "patch_R", "_order", "capside", "fold"], kind="mergesort").drop(columns="_order")
+    return out
+
+
+def build_phase05_coefficients_table(fits: List[Dict[str, Any]]) -> pd.DataFrame:
+    rows = [coef for fit in fits for coef in fit.get("coefficients", [])]
+    cols = ["h", "patch_R", "model_id", "coefficient_name", "coefficient_value", "coefficient_standard_error", "coefficient_t_value", "coefficient_p_value", "coefficient_warning_flags"]
+    out = pd.DataFrame(rows, columns=cols)
+    if not out.empty:
+        out["_order"] = out["model_id"].map({m: i for i, m in enumerate(PHASE05_MODEL_ORDER)})
+        out = out.sort_values(["h", "patch_R", "_order", "coefficient_name"], kind="mergesort").drop(columns="_order")
+    return out
+
+
+def compute_phase05_contributions(metrics_df: pd.DataFrame) -> pd.DataFrame:
+    comp_specs = [
+        ("capside_vs_null", "capside_vs_null", "M0", "M1_capside"),
+        ("fold_vs_null", "fold_vs_null", "M0", "M2_fold"),
+        ("fold_added_after_capside", "fold_added_after_capside", "M1_capside", "M3_capside_fold"),
+        ("capside_added_after_fold", "capside_added_after_fold", "M2_fold", "M3_capside_fold"),
+        ("capside_plus_fold_vs_null", "capside_plus_fold_vs_null", "M0", "M3_capside_fold"),
+        ("geometry_added_after_capside_fold", "geometry_added_after_capside_fold", "M3_geometry_base", "M4_capside_fold_geometry"),
+    ]
+    rows: List[Dict[str, Any]] = []
+    for (h, r), group in metrics_df.groupby(["h", "patch_R"], sort=True, dropna=False):
+        by_model = {row["model_id"]: row for _, row in group.iterrows()}
+        for comp_id, label, base_id, ext_id in comp_specs:
+            flags: List[str] = []
+            base = by_model.get(base_id)
+            ext = by_model.get(ext_id)
+            if base is None or ext is None or not bool(base.get("valid_model", False)) or not bool(ext.get("valid_model", False)):
+                flags.append("comparison_invalid")
+                interp = "comparison_invalid"
+            else:
+                interp = "comparison_invalid"
+            same_rows = bool(base is not None and ext is not None and base["dataset_type"] == ext["dataset_type"] and int(base["n_observations"]) == int(ext["n_observations"]))
+            if not same_rows:
+                flags.append("different_rows_for_comparison")
+            def val(row, col):
+                return row[col] if row is not None else np.nan
+            d_r2 = val(ext, "r_squared") - val(base, "r_squared") if base is not None and ext is not None else np.nan
+            d_adj = val(ext, "r_squared_adjusted") - val(base, "r_squared_adjusted") if base is not None and ext is not None else np.nan
+            d_rmse = val(ext, "loocv_rmse") - val(base, "loocv_rmse") if base is not None and ext is not None else np.nan
+            d_mae = val(ext, "loocv_mae") - val(base, "loocv_mae") if base is not None and ext is not None else np.nan
+            if "comparison_invalid" not in flags:
+                if np.isfinite(d_r2) and d_r2 > 0 and np.isfinite(d_rmse) and d_rmse < 0:
+                    interp = "added_variance_and_improved_loocv"
+                elif np.isfinite(d_r2) and d_r2 > 0:
+                    interp = "added_in_sample_variance_only"
+                elif np.isfinite(d_r2):
+                    interp = "no_in_sample_gain"
+                else:
+                    interp = "comparison_invalid"; flags.append("comparison_invalid")
+            rows.append({
+                "h": h, "patch_R": r, "comparison_id": comp_id, "contribution_label": label, "base_model": base_id, "extended_model": ext_id,
+                "base_dataset_type": val(base, "dataset_type"), "extended_dataset_type": val(ext, "dataset_type"), "same_rows_for_comparison": same_rows,
+                "base_n_observations": val(base, "n_observations"), "extended_n_observations": val(ext, "n_observations"),
+                "base_r_squared": val(base, "r_squared"), "extended_r_squared": val(ext, "r_squared"), "delta_r_squared": d_r2,
+                "base_r_squared_adjusted": val(base, "r_squared_adjusted"), "extended_r_squared_adjusted": val(ext, "r_squared_adjusted"), "delta_r_squared_adjusted": d_adj,
+                "base_loocv_rmse": val(base, "loocv_rmse"), "extended_loocv_rmse": val(ext, "loocv_rmse"), "delta_loocv_rmse": d_rmse,
+                "base_loocv_mae": val(base, "loocv_mae"), "extended_loocv_mae": val(ext, "loocv_mae"), "delta_loocv_mae": d_mae,
+                "interpretation_label": interp, "warning_flags": _phase05_join_flags(flags),
+            })
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out["_order"] = out["comparison_id"].map({m: i for i, m in enumerate(PHASE05_COMPARISON_ORDER)})
+        out = out.sort_values(["h", "patch_R", "_order"], kind="mergesort").drop(columns="_order")
+    return out
+
+
+def build_phase05_overfit_diagnostics(metrics_df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    rows = []
+    for _, row in metrics_df.iterrows():
+        n_params = _phase05_float(row["n_effective_parameters"])
+        n_obs = _phase05_float(row["n_observations"])
+        denom = n_params + 1 if np.isfinite(n_params) else np.nan
+        opp = n_obs / denom if np.isfinite(denom) and denom > 0 else np.nan
+        cond = _phase05_float(row["design_matrix_condition_number"])
+        flags = [] if pd.isna(row["warning_flags"]) or row["warning_flags"] == "" else str(row["warning_flags"]).split(";")
+        if np.isfinite(opp) and opp < args.min_observations_per_parameter:
+            flags.append("low_observations_per_parameter")
+        if np.isfinite(cond) and cond > args.condition_number_threshold:
+            flags.append("high_condition_number")
+        if _phase05_float(row["df_residual"]) <= 1:
+            flags.append("low_residual_degrees_of_freedom")
+        rows.append({
+            "h": row["h"], "patch_R": row["patch_R"], "model_id": row["model_id"], "n_observations": row["n_observations"],
+            "n_effective_parameters": row["n_effective_parameters"], "df_residual": row["df_residual"], "observations_per_parameter": opp,
+            "design_matrix_rank": row["design_matrix_rank"], "rank_deficient": row["rank_deficient"], "condition_number": row["design_matrix_condition_number"],
+            "r_squared": row["r_squared"], "r_squared_adjusted": row["r_squared_adjusted"], "loocv_rmse": row["loocv_rmse"],
+            "saturated_or_near_saturated": bool("saturated_or_overfit_model" in flags or "low_residual_degrees_of_freedom" in flags),
+            "high_condition_number": bool("high_condition_number" in flags), "loocv_unstable": bool("unstable_loocv" in flags or "loocv_failed" in flags),
+            "overfit_warning": row["overfit_warning"], "warning_flags": _phase05_join_flags(flags),
+        })
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out["_order"] = out["model_id"].map({m: i for i, m in enumerate(PHASE05_MODEL_ORDER)})
+        out = out.sort_values(["h", "patch_R", "_order"], kind="mergesort").drop(columns="_order")
+    return out
+
+
+def make_phase05_model_comparison_figures(metrics_df: pd.DataFrame, contrib_df: pd.DataFrame, outdir: Path) -> Tuple[List[str], List[str]]:
+    files: List[str] = []
+    warnings: List[str] = []
+    try:
+        import matplotlib.pyplot as plt
+        groups = list(metrics_df.groupby(["h", "patch_R"], sort=True, dropna=False))
+        for (h, r), group in groups:
+            fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+            x = np.arange(len(group))
+            labels = group["model_id"].tolist()
+            for ax, col, title in [(axes[0,0], "r_squared", "R2"), (axes[0,1], "r_squared_adjusted", "Adjusted R2"), (axes[1,0], "loocv_rmse", "LOOCV RMSE")]:
+                vals = pd.to_numeric(group[col], errors="coerce").to_numpy(dtype=float)
+                ax.bar(x, vals)
+                ax.set_xticks(x); ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+                ax.set_title(title)
+                for j, (_, rr) in enumerate(group.iterrows()):
+                    if not bool(rr["valid_model"]):
+                        ax.text(j, 0, "invalid", rotation=90, ha="center", va="bottom", fontsize=7, color="red")
+                    elif "saturated" in str(rr["warning_flags"]):
+                        ax.text(j, vals[j] if np.isfinite(vals[j]) else 0, "sat", ha="center", va="bottom", fontsize=7, color="orange")
+            cg = contrib_df[(contrib_df["h"] == h) & (contrib_df["patch_R"] == r)]
+            axes[1,1].bar(np.arange(len(cg)), pd.to_numeric(cg["delta_r_squared"], errors="coerce"))
+            axes[1,1].set_xticks(np.arange(len(cg))); axes[1,1].set_xticklabels(cg["contribution_label"].tolist(), rotation=35, ha="right", fontsize=8)
+            axes[1,1].set_title("Delta R2")
+            fig.suptitle(f"Phase 5 additive model comparison: h={h}, patch_R={r}")
+            fig.tight_layout()
+            name = "phase05_model_comparison.png" if len(groups) == 1 else f"phase05_model_comparison_h_{_phase05_condition_label(h)}_R_{_phase05_condition_label(r)}.png"
+            path = outdir / name
+            fig.savefig(path, dpi=150)
+            plt.close(fig)
+            files.append(str(path))
+    except Exception as exc:
+        warnings.append(f"plot_failed:{exc}")
+    return files, warnings
+
+
+def write_phase05_summary(path: Path, report: Dict[str, Any], metrics_df: pd.DataFrame, contrib_df: pd.DataFrame, overfit_df: pd.DataFrame) -> None:
+    lines = [
+        f"Phase 5 additive variance partitioning: {report['status']}",
+        f"Capsids: {report['n_capsides']}",
+        f"Folds: {report['n_folds']}",
+        f"h values: {report['h_values']}",
+        f"patch_R values: {report['patch_R_values']}",
+        "",
+    ]
+    for (h, r), group in metrics_df.groupby(["h", "patch_R"], sort=True, dropna=False):
+        lines.append(f"Condition h={h}, patch_R={r}")
+        for _, row in group.iterrows():
+            lines.append(f"  {row['model_id']}: R2={row['r_squared']:.6g} adjusted_R2={row['r_squared_adjusted']:.6g} LOOCV_RMSE={row['loocv_rmse']:.6g} warnings={row['warning_flags'] or 'none'}")
+        cg = contrib_df[(contrib_df["h"] == h) & (contrib_df["patch_R"] == r)]
+        for _, row in cg.iterrows():
+            lines.append(f"  Delta {row['contribution_label']}: delta_R2={row['delta_r_squared']:.6g} delta_LOOCV_RMSE={row['delta_loocv_rmse']:.6g} label={row['interpretation_label']}")
+        geom = cg[cg["comparison_id"] == "geometry_added_after_capside_fold"]
+        if not geom.empty:
+            grow = geom.iloc[0]
+            if np.isfinite(_phase05_float(grow["delta_loocv_rmse"])) and grow["delta_loocv_rmse"] > 0:
+                lines.append("  Conservative interpretation: M4 increases in-sample R2 relative to M3, but LOOCV RMSE does not improve, suggesting that the added geometry terms may not provide stable predictive information under this dataset.")
+        od = overfit_df[(overfit_df["h"] == h) & (overfit_df["patch_R"] == r)]
+        warn = sorted(set(";".join(od["warning_flags"].dropna().astype(str)).split(";")) - {""})
+        lines.append(f"  strongest overfit warning: {warn[0] if warn else 'none'}")
+        lines.append("")
+    lines.append("Warnings:")
+    lines.extend([f"  - {w}" for w in report.get("warnings", [])] or ["  none"])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def run_phase05(input_df: pd.DataFrame, phase01_report: Dict, phase02_report: Dict, phase03_report: Dict, phase04_report: Dict, args: argparse.Namespace) -> Dict:
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    output_files = {
+        "model_metrics": str(args.outdir / "phase05_model_metrics.csv"),
+        "model_contributions": str(args.outdir / "phase05_model_contributions.csv"),
+        "model_predictions": str(args.outdir / "phase05_model_predictions.csv"),
+        "model_coefficients": str(args.outdir / "phase05_model_coefficients.csv"),
+        "overfit_diagnostics": str(args.outdir / "phase05_overfit_diagnostics.csv"),
+        "report": str(args.outdir / "phase05_report.json"),
+        "summary": str(args.outdir / "phase05_summary.txt"),
+        "figures": [],
+    }
+    validation = validate_phase05_input(input_df)
+    warnings: List[str] = []
+    severe_flags: List[str] = []
+    for phase_name, rep in [("phase02", phase02_report), ("phase03", phase03_report), ("phase04", phase04_report)]:
+        if rep.get("status") == "WARN":
+            warnings.append(f"upstream_{phase_name}_warn")
+    if phase01_report.get("status") == "FAIL":
+        severe_flags.append("phase01_validation_failed")
+    if phase02_report.get("status") == "FAIL":
+        severe_flags.append("phase02_validation_failed")
+    if validation["missing_key_columns"]:
+        severe_flags.append("missing_required_column")
+    if not validation["duplicate_key_status"]["is_unique"]:
+        severe_flags.append("duplicate_observation_key")
+    if validation["nonfinite_counts"].get("d_max_pct", 0):
+        warnings.append("nonfinite_d_max_pct")
+    if validation["missing_geometry_columns"]:
+        warnings.append("missing_geometry_column")
+    for geom in PHASE05_GEOMETRY_COLUMNS:
+        if validation["nonfinite_counts"].get(geom, 0):
+            warnings.append(f"nonfinite_{geom}")
+    empty_cols = {
+        "metrics": ["h", "patch_R", "model_id"],
+        "contrib": ["h", "patch_R", "comparison_id"],
+    }
+    if severe_flags:
+        pd.DataFrame(columns=empty_cols["metrics"]).to_csv(output_files["model_metrics"], index=False)
+        pd.DataFrame(columns=empty_cols["contrib"]).to_csv(output_files["model_contributions"], index=False)
+        pd.DataFrame().to_csv(output_files["model_predictions"], index=False)
+        pd.DataFrame().to_csv(output_files["model_coefficients"], index=False)
+        pd.DataFrame().to_csv(output_files["overfit_diagnostics"], index=False)
+        report = _phase05_report(input_df, validation, output_files, warnings, severe_flags, "FAIL", phase01_report, phase02_report, phase03_report, phase04_report, args)
+        with (args.outdir / "phase05_report.json").open("w", encoding="utf-8") as f:
+            json.dump(_nan_to_none(report), f, indent=2, ensure_ascii=False, allow_nan=False)
+        write_phase05_summary(args.outdir / "phase05_summary.txt", report, pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+        return report
+    condition_datasets = prepare_phase05_model_datasets(input_df)
+    fits: List[Dict[str, Any]] = []
+    reference_levels: Dict[str, Dict[str, str]] = {}
+    for (h, r), datasets in condition_datasets.items():
+        for model_id in PHASE05_MODEL_ORDER:
+            ds_type = PHASE05_MODEL_FORMULAS[model_id]["dataset_type"]
+            fit = fit_phase05_model(datasets[ds_type], model_id, h, r, args)
+            fits.append(fit)
+            refs = _phase05_reference_levels(datasets[ds_type], PHASE05_MODEL_FORMULAS[model_id]["categorical"])
+            reference_levels[f"h={h};patch_R={r};{model_id}"] = refs
+    metrics_df = _phase05_metric_rows(fits)
+    contrib_df = compute_phase05_contributions(metrics_df)
+    predictions_df = build_phase05_predictions_table(condition_datasets, fits)
+    coef_df = build_phase05_coefficients_table(fits)
+    overfit_df = build_phase05_overfit_diagnostics(metrics_df, args)
+    warnings.extend(sorted(set(";".join(metrics_df["warning_flags"].dropna().astype(str)).split(";")) - {""}))
+    warnings.extend(sorted(set(";".join(contrib_df["warning_flags"].dropna().astype(str)).split(";")) - {""}))
+    if not bool(metrics_df["valid_model"].any()):
+        severe_flags.append("no_valid_model")
+    if not condition_datasets:
+        severe_flags.append("no_valid_model_condition")
+    if not args.no_plots:
+        figs, plot_warnings = make_phase05_model_comparison_figures(metrics_df, contrib_df, args.outdir)
+        output_files["figures"] = figs
+        warnings.extend(plot_warnings)
+    status = "FAIL" if severe_flags else ("WARN" if warnings or not metrics_df["valid_model"].all() else "PASS")
+    report = _phase05_report(input_df, validation, output_files, sorted(dict.fromkeys(warnings)), severe_flags, status, phase01_report, phase02_report, phase03_report, phase04_report, args)
+    report["categorical_encoding"]["reference_levels_by_condition_model"] = reference_levels
+    metrics_df.to_csv(output_files["model_metrics"], index=False)
+    contrib_df.to_csv(output_files["model_contributions"], index=False)
+    predictions_df.to_csv(output_files["model_predictions"], index=False)
+    coef_df.to_csv(output_files["model_coefficients"], index=False)
+    overfit_df.to_csv(output_files["overfit_diagnostics"], index=False)
+    with (args.outdir / "phase05_report.json").open("w", encoding="utf-8") as f:
+        json.dump(_nan_to_none(report), f, indent=2, ensure_ascii=False, allow_nan=False)
+    write_phase05_summary(args.outdir / "phase05_summary.txt", report, metrics_df, contrib_df, overfit_df)
+    return report
+
+
+def _phase05_report(input_df: pd.DataFrame, validation: Dict[str, Any], output_files: Dict[str, Any], warnings: List[str], severe_flags: List[str], status: str, phase01_report: Dict, phase02_report: Dict, phase03_report: Dict, phase04_report: Dict, args: argparse.Namespace) -> Dict[str, Any]:
+    return {
+        "phase": "05_simple_additive_variance_partitioning", "status": status, "timestamp": datetime.now(timezone.utc).isoformat(),
+        "input_file": str(args.input), "output_directory": str(args.outdir),
+        "upstream_phase01_status": phase01_report.get("status"), "upstream_phase02_status": phase02_report.get("status"),
+        "upstream_phase03_status": phase03_report.get("status"), "upstream_phase04_status": phase04_report.get("status"),
+        "required_columns_checked": validation["required_columns_checked"], "missing_columns": validation["missing_columns"],
+        "n_rows_input": int(len(input_df)), "n_capsides": int(input_df["capside"].nunique(dropna=True)) if "capside" in input_df.columns else 0,
+        "n_folds": int(input_df["fold"].astype(str).nunique(dropna=True)) if "fold" in input_df.columns else 0,
+        "h_values": _sorted_json_values(input_df["h"]) if "h" in input_df.columns else [],
+        "patch_R_values": _sorted_json_values(input_df["patch_R"]) if "patch_R" in input_df.columns else [],
+        "n_model_conditions": int(input_df[PHASE05_CONDITION_COLS].drop_duplicates().shape[0]) if all(c in input_df.columns for c in PHASE05_CONDITION_COLS) else 0,
+        "response_variable": "d_max_pct", "model_condition_cols": PHASE05_CONDITION_COLS,
+        "model_definitions": {k: v["label"] for k, v in PHASE05_MODEL_FORMULAS.items()},
+        "categorical_encoding": {"coding": "treatment/reference", "reference_level_rule": "lexicographically first category per condition/model"},
+        "complete_case_policy": {"core_complete_case": PHASE05_CORE_COLUMNS, "geometry_complete_case": PHASE05_CORE_COLUMNS + PHASE05_GEOMETRY_COLUMNS, "m3_vs_m4": "M3_geometry_base is refit on the same geometry complete-case rows as M4"},
+        "loocv_method": "leave-one-out cross-validation", "loocv_unseen_category_policy": "held-out rows with categorical levels absent from training are marked failed and excluded from LOOCV error metrics",
+        "overfit_thresholds": {"model_min_n": int(args.model_min_n), "loocv_min_success_fraction": float(args.loocv_min_success_fraction), "condition_number_threshold": float(args.condition_number_threshold), "min_observations_per_parameter": float(args.min_observations_per_parameter)},
+        "duplicate_key_status": validation["duplicate_key_status"], "nonfinite_counts": validation["nonfinite_counts"],
+        "output_files": output_files, "warnings": warnings, "severe_flags": severe_flags,
+    }
+
+
+def _print_phase05_summary(report: Dict) -> None:
+    print(f"[{report['status']}] Phase 5 completed.")
+    files = report.get("output_files", {})
+    print(f"[INFO] Model metrics table: {files.get('model_metrics', 'not written')}")
+    print(f"[INFO] Model contributions table: {files.get('model_contributions', 'not written')}")
+    print(f"[INFO] Model predictions table: {files.get('model_predictions', 'not written')}")
+    print(f"[INFO] Overfit diagnostics table: {files.get('overfit_diagnostics', 'not written')}")
+    print(f"[INFO] Phase 5 report: {files.get('report', 'not written')}")
+    metrics_path = Path(files.get("model_metrics", ""))
+    contrib_path = Path(files.get("model_contributions", ""))
+    if metrics_path.exists() and metrics_path.stat().st_size > 0:
+        try:
+            metrics = pd.read_csv(metrics_path)
+            for (h, r), group in metrics.groupby(["h", "patch_R"], sort=True, dropna=False):
+                ok = group[np.isfinite(pd.to_numeric(group["loocv_rmse"], errors="coerce"))]
+                if not ok.empty:
+                    best = ok.sort_values("loocv_rmse", kind="mergesort").iloc[0]
+                    print(f"[MODEL] h={h} patch_R={r} best_LOOCV_model={best['model_id']} loocv_rmse={best['loocv_rmse']:.6g}")
+        except Exception:
+            pass
+    if contrib_path.exists() and contrib_path.stat().st_size > 0:
+        try:
+            contrib = pd.read_csv(contrib_path)
+            geom = contrib[contrib["comparison_id"] == "geometry_added_after_capside_fold"]
+            for _, row in geom.iterrows():
+                print(f"[GEOM] h={row['h']} patch_R={row['patch_R']} delta_R2_M4_vs_M3={row['delta_r_squared']:.6g} delta_LOOCV_RMSE={row['delta_loocv_rmse']:.6g} label={row['interpretation_label']}")
+        except Exception:
+            pass
+    if report.get("warnings"):
+        print("[WARN] Phase 5 completed with warnings. See phase05_report.json.")
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -2116,9 +2784,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--phase",
-        choices=["1", "2", "3", "4"],
+        choices=["1", "2", "3", "4", "5"],
         default="1",
-        help="Analysis phase to run. Phase 1 is the default. Phase 2 runs Phase 1 first; Phase 3 runs Phases 1 and 2 first; Phase 4 runs Phases 1, 2, and 3 first."
+        help="Analysis phase to run. Phase 1 is the default. Phase 5 runs Phases 1 through 5, then fits simple additive variance-partitioning models."
     )
 
     parser.add_argument(
@@ -2146,7 +2814,7 @@ def parse_args() -> argparse.Namespace:
         "--outdir",
         default=Path("results"),
         type=Path,
-        help="Output directory for Phase 2, Phase 3, and Phase 4 artifacts."
+        help="Output directory for Phase 2, Phase 3, Phase 4, and Phase 5 artifacts."
     )
 
     parser.add_argument(
@@ -2201,7 +2869,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-plots",
         action="store_true",
-        help="Skip Phase 3 centered scatterplots and Phase 4 ordinal ranking plots."
+        help="Skip Phase 3 centered scatterplots, Phase 4 ordinal ranking plots, and Phase 5 model comparison figures."
     )
 
     parser.add_argument(
@@ -2228,6 +2896,34 @@ def parse_args() -> argparse.Namespace:
         "--save-permutation-distributions",
         action="store_true",
         help="Save full Phase 3 permutation slope distributions."
+    )
+
+    parser.add_argument(
+        "--model-min-n",
+        default=3,
+        type=int,
+        help="Phase 5 minimum number of observations required to attempt a model. Default: 3."
+    )
+
+    parser.add_argument(
+        "--loocv-min-success-fraction",
+        default=0.70,
+        type=float,
+        help="Phase 5 minimum fraction of successful LOOCV predictions before LOOCV is considered stable. Default: 0.70."
+    )
+
+    parser.add_argument(
+        "--condition-number-threshold",
+        default=1000.0,
+        type=float,
+        help="Phase 5 high condition number warning threshold. Default: 1000."
+    )
+
+    parser.add_argument(
+        "--min-observations-per-parameter",
+        default=3.0,
+        type=float,
+        help="Phase 5 observations-per-parameter overfit warning threshold. Default: 3."
     )
 
     parser.add_argument(
@@ -2309,6 +3005,18 @@ def main() -> int:
         print("[ERROR] --rank-consistency-threshold must be between 0 and 1.", file=sys.stderr)
         return 2
 
+    if args.model_min_n < 2:
+        print("[ERROR] --model-min-n must be at least 2.", file=sys.stderr)
+        return 2
+
+    if not 0 < args.loocv_min_success_fraction <= 1:
+        print("[ERROR] --loocv-min-success-fraction must be between 0 and 1.", file=sys.stderr)
+        return 2
+
+    if args.condition_number_threshold <= 0 or args.min_observations_per_parameter <= 0:
+        print("[ERROR] Phase 5 threshold options must be positive.", file=sys.stderr)
+        return 2
+
     try:
         normalized_df, phase01_report = run_phase01(args)
     except Exception as exc:
@@ -2360,9 +3068,22 @@ def main() -> int:
     phase04_report = run_phase04(phase04_input_df, phase01_report, phase02_report, phase03_report, args)
     _print_phase04_summary(phase04_report)
 
-    if phase04_report["status"] == "FAIL":
+    if args.phase == "4":
+        if phase04_report["status"] == "FAIL":
+            return 1
+        if args.fail_on_warning and phase04_report["status"] != "PASS":
+            return 1
+        return 0
+
+    phase05_input_df = phase04_input_df
+    if phase05_input_df.empty or not all(c in phase05_input_df.columns for c in ["capside", "fold", "h", "patch_R", "d_max_pct"]):
+        phase05_input_df = centered_phase02_df if not centered_phase02_df.empty else normalized_df
+    phase05_report = run_phase05(phase05_input_df, phase01_report, phase02_report, phase03_report, phase04_report, args)
+    _print_phase05_summary(phase05_report)
+
+    if phase05_report["status"] == "FAIL":
         return 1
-    if args.fail_on_warning and phase04_report["status"] != "PASS":
+    if args.fail_on_warning and phase05_report["status"] != "PASS":
         return 1
     return 0
 
