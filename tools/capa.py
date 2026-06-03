@@ -4080,6 +4080,367 @@ def _print_phase08_summary(report: Dict[str, Any]) -> None:
     if report.get("warnings"):
         print("[WARN] Phase 8 completed with warnings. See phase08_report.json.")
 
+
+# ---------------------------------------------------------------------
+# Phase 9: topological integration (H1/H2 normalized descriptors)
+# ---------------------------------------------------------------------
+
+PHASE09_KEY_COLS = ["capside", "h", "patch_R", "fold"]
+PHASE09_CONDITION_COLS = ["h", "patch_R"]
+PHASE09_CENTER_GROUP_COLS = ["capside", "h", "patch_R"]
+PHASE09_PRIMARY_TOPO = ["H1_norm", "H2_norm"]
+PHASE09_GEOM_SIMPLE = ["t", "Hout", "Hin"]
+PHASE09_RESPONSE = "delta_d_max_pct"
+
+
+def _phase09_topology_vars(df: pd.DataFrame, args: argparse.Namespace) -> Tuple[List[str], List[str]]:
+    optional = []
+    if getattr(args, "include_H0", False) and "H0_norm" in df.columns:
+        vals = pd.to_numeric(df["H0_norm"], errors="coerce")
+        if np.isfinite(vals).any():
+            optional.append("H0_norm")
+    return PHASE09_PRIMARY_TOPO + optional, optional
+
+
+def validate_phase09_input(df: pd.DataFrame) -> Dict[str, Any]:
+    required = PHASE09_KEY_COLS + ["d_max_pct", "delta_d_max_pct"] + PHASE09_PRIMARY_TOPO
+    missing = [c for c in required if c not in df.columns]
+    missing_key = [c for c in PHASE09_KEY_COLS if c not in df.columns]
+    dup_rows = 0; dup_examples: List[Dict[str, Any]] = []
+    if not missing_key:
+        dup = df.duplicated(subset=PHASE09_KEY_COLS, keep=False)
+        dup_rows = int(dup.sum())
+        if dup_rows:
+            dup_examples = df.loc[dup, PHASE09_KEY_COLS].drop_duplicates().head(20).to_dict(orient="records")
+    nonfinite = {}
+    for c in ["d_max_pct", "delta_d_max_pct", "H1_norm", "H2_norm", "H0_norm", "t", "Hout", "Hin"]:
+        if c in df.columns:
+            vals = pd.to_numeric(df[c], errors="coerce")
+            n_bad = int((~np.isfinite(vals)).sum())
+            if n_bad:
+                nonfinite[c] = n_bad
+    return {"required_columns_checked": required, "missing_columns": missing, "missing_key_columns": missing_key, "duplicate_key_status": {"is_unique": dup_rows == 0, "n_duplicate_rows": dup_rows, "duplicate_examples": dup_examples}, "nonfinite_counts": nonfinite}
+
+
+def ensure_phase09_topology_normalization(df: pd.DataFrame, args: argparse.Namespace) -> Tuple[pd.DataFrame, Dict[str, Any], List[str]]:
+    out = df.copy(); warnings: List[str] = []
+    info = {"topology_normalization_source": "phase01_or_input_normalized_columns", "patch_volume_definition": "patch_elems * size_h^3", "recomputed_H0_norm": False, "recomputed_H1_norm": False, "recomputed_H2_norm": False}
+    if "patch_volume" not in out.columns and all(c in out.columns for c in ["patch_elems", "size_h"]):
+        out["patch_volume"] = pd.to_numeric(out["patch_elems"], errors="coerce") * (pd.to_numeric(out["size_h"], errors="coerce") ** 3)
+    for raw, norm in [("H1", "H1_norm"), ("H2", "H2_norm"), ("H0", "H0_norm")]:
+        if norm not in out.columns and raw in out.columns and "patch_volume" in out.columns:
+            pv = pd.to_numeric(out["patch_volume"], errors="coerce")
+            good = np.isfinite(pv) & (pv > 0)
+            out[norm] = np.nan
+            out.loc[good, norm] = pd.to_numeric(out.loc[good, raw], errors="coerce") / pv.loc[good]
+            bad = int((~good).sum())
+            if bad:
+                warnings.append("invalid_patch_volume_for_topology_normalization")
+            info[f"recomputed_{norm}"] = True
+            info["topology_normalization_source"] = "phase09_recomputed_from_raw_counts_and_patch_volume"
+            warnings.append("recomputed_topology_normalization")
+    if any(c not in out.columns for c in PHASE09_PRIMARY_TOPO) and getattr(args, "topology_use_raw_fallback", False):
+        for raw, norm in [("H1", "H1_norm"), ("H2", "H2_norm")]:
+            if norm not in out.columns and raw in out.columns:
+                out[norm] = pd.to_numeric(out[raw], errors="coerce")
+                warnings.append("raw_topology_fallback_used")
+        info["topology_normalization_source"] = "raw_topology_fallback_used"
+    return out, info, sorted(set(warnings))
+
+
+def compute_phase09_centered_topology(df: pd.DataFrame, topo_vars: List[str], upstream_warnings: List[str]) -> pd.DataFrame:
+    out = make_observation_ids(df).copy()
+    out["phase09_warning_flags"] = ""
+    for flag in upstream_warnings:
+        out["phase09_warning_flags"] = out["phase09_warning_flags"].apply(lambda x, f=flag: _append_flag(x, f))
+    for c in ["d_max_pct", "delta_d_max_pct", "t", "Hout", "Hin"] + topo_vars:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+    for v in topo_vars:
+        bad = ~np.isfinite(pd.to_numeric(out[v], errors="coerce"))
+        if bad.any():
+            out.loc[bad, "phase09_warning_flags"] = out.loc[bad, "phase09_warning_flags"].apply(lambda x, vv=v: _append_flag(x, f"nonfinite_{vv}"))
+        mean_col = f"mean_{v}_s"; ccol = f"{v}_c"
+        out[mean_col] = out.groupby(PHASE09_CENTER_GROUP_COLS, sort=False, dropna=False)[v].transform("mean")
+        out[ccol] = out[v] - out[mean_col]
+    return out.sort_values(["h", "patch_R", "capside", "fold"], key=lambda s: s.astype(str), kind="mergesort").reset_index(drop=True)
+
+
+def check_phase09_centering_integrity(df: pd.DataFrame, topo_vars: List[str], tol: float = 1e-10) -> Dict[str, Any]:
+    checks = {"tolerance_abs": tol, "delta_passes": True, "topology_passes": True, "failed_delta_strata": [], "topology_warning_strata": []}
+    for key, group in df.groupby(PHASE09_CENTER_GROUP_COLS, sort=True, dropna=False):
+        vals = pd.to_numeric(group["delta_d_max_pct"], errors="coerce"); vals = vals[np.isfinite(vals)]
+        s = float(vals.sum()) if len(vals) else np.nan
+        if not (np.isfinite(s) and np.isclose(s, 0.0, atol=tol, rtol=tol)):
+            checks["delta_passes"] = False
+            checks["failed_delta_strata"].append({"capside": _json_scalar(key[0]), "h": _json_scalar(key[1]), "patch_R": _json_scalar(key[2]), "sum": s})
+        for v in topo_vars:
+            ccol = f"{v}_c"
+            tv = pd.to_numeric(group[ccol], errors="coerce"); finite = tv[np.isfinite(tv)]
+            ts = float(finite.sum()) if len(finite) else np.nan
+            if not (np.isfinite(ts) and np.isclose(ts, 0.0, atol=tol, rtol=tol)):
+                checks["topology_passes"] = False
+                checks["topology_warning_strata"].append({"variable": ccol, "capside": _json_scalar(key[0]), "h": _json_scalar(key[1]), "patch_R": _json_scalar(key[2]), "sum": ts})
+    return checks
+
+
+def fit_phase09_centered_associations(df: pd.DataFrame, topo_vars: List[str], args: argparse.Namespace) -> pd.DataFrame:
+    rng = np.random.default_rng(int(args.seed) + 9000)
+    rows: List[Dict[str, Any]] = []
+    ci = float(args.ci); alpha = (1.0 - ci) / 2.0
+    for (h_value, r_value), condition_df in df.groupby(PHASE09_CONDITION_COLS, sort=True, dropna=False):
+        preds = [f"{v}_c" for v in topo_vars]
+        for predictor in preds:
+            flags: List[str] = []
+            raw = predictor[:-2]
+            model_df = condition_df[np.isfinite(pd.to_numeric(condition_df[predictor], errors="coerce")) & np.isfinite(pd.to_numeric(condition_df[PHASE09_RESPONSE], errors="coerce"))].copy().reset_index(drop=True)
+            n_obs = int(len(model_df)); n_caps = int(model_df["capside"].nunique(dropna=True)) if n_obs else 0
+            n_strata = int(model_df[PHASE09_CENTER_GROUP_COLS].drop_duplicates().shape[0]) if n_obs else 0
+            x_var = float(np.var(pd.to_numeric(model_df[predictor], errors="coerce"), ddof=0)) if n_obs else 0.0
+            y_var = float(np.var(pd.to_numeric(model_df[PHASE09_RESPONSE], errors="coerce"), ddof=0)) if n_obs else 0.0
+            if n_obs < 4: flags.append("insufficient_observations")
+            if n_caps < 3: flags.append("low_capsid_count_for_bootstrap")
+            if x_var <= 0: flags.append("zero_topology_variance")
+            if y_var <= 0: flags.append("zero_response_variance")
+            fit = _ols_fit(model_df, predictor, PHASE09_RESPONSE) if n_obs >= 4 and x_var > 0 and y_var > 0 else None
+            base = {"h": h_value, "patch_R": r_value, "predictor": predictor, "raw_predictor": raw, "response": PHASE09_RESPONSE, "n_observations": n_obs, "n_capsides": n_caps, "n_strata": n_strata, "slope": np.nan, "intercept": np.nan, "r_value": np.nan, "r_squared": np.nan, "residual_std_error": np.nan, "slope_bootstrap_mean": np.nan, "slope_bootstrap_sd": np.nan, "slope_ci_low": np.nan, "slope_ci_high": np.nan, "ci_level": ci, "bootstrap_n_requested": int(args.bootstrap_n), "bootstrap_n_successful": 0, "bootstrap_method": "cluster_by_capside_within_h_patch_R", "p_perm_two_sided": np.nan, "perm_n_requested": int(args.perm_n), "perm_n_successful": 0, "permutation_method": "within_capside_h_patch_R_shuffle_delta_d_max_pct", "perm_slope_mean": np.nan, "perm_slope_sd": np.nan, "perm_slope_min": np.nan, "perm_slope_max": np.nan, "valid_model": False, "warning_flags": ""}
+            if fit is not None:
+                base.update(fit)
+                boot, _ = bootstrap_centered_slope(model_df, predictor, args, rng); b = np.asarray(boot["slopes"], dtype=float)
+                base["bootstrap_n_successful"] = int(boot["successful"])
+                if len(b):
+                    base["slope_bootstrap_mean"] = float(b.mean()); base["slope_bootstrap_sd"] = float(b.std(ddof=1)) if len(b) > 1 else 0.0; base["slope_ci_low"] = float(np.quantile(b, alpha)); base["slope_ci_high"] = float(np.quantile(b, 1-alpha))
+                else: flags.append("bootstrap_failed")
+                if int(args.bootstrap_n) > 0 and boot["successful"] < 0.7 * int(args.bootstrap_n): flags.append("unstable_bootstrap")
+                perm, _ = permute_centered_slope(model_df, predictor, args, rng); p = np.asarray(perm["slopes"], dtype=float)
+                base["perm_n_successful"] = int(perm["successful"])
+                if len(p):
+                    base["p_perm_two_sided"] = float((1 + np.sum(np.abs(p) >= abs(base["slope"]))) / (1 + len(p))); base["perm_slope_mean"] = float(p.mean()); base["perm_slope_sd"] = float(p.std(ddof=1)) if len(p) > 1 else 0.0; base["perm_slope_min"] = float(p.min()); base["perm_slope_max"] = float(p.max())
+                else: flags.append("permutation_failed")
+                if int(args.perm_n) > 0 and perm["successful"] < 0.7 * int(args.perm_n): flags.append("unstable_permutation")
+                base["valid_model"] = not any(f in flags for f in ["insufficient_observations", "zero_topology_variance", "zero_response_variance", "bootstrap_failed", "permutation_failed"])
+            base["warning_flags"] = _flag_string(flags); rows.append(base)
+        block_preds = preds
+        if len(condition_df) < len(block_preds) + 4:
+            rows.append({"h": h_value, "patch_R": r_value, "predictor": "+".join(block_preds), "raw_predictor": "+".join(topo_vars), "response": PHASE09_RESPONSE, "model_type": "topology_block_diagnostic", "n_observations": int(len(condition_df)), "n_capsides": int(condition_df["capside"].nunique()), "n_strata": int(condition_df[PHASE09_CENTER_GROUP_COLS].drop_duplicates().shape[0]), "valid_model": False, "warning_flags": "topology_block_model_skipped_insufficient_observations"})
+    out = pd.DataFrame(rows)
+    if "model_type" not in out.columns: out["model_type"] = "single_predictor_primary"
+    out["model_type"] = out["model_type"].fillna("single_predictor_primary")
+    return out.sort_values(["h", "patch_R", "predictor"], key=lambda s: s.astype(str), kind="mergesort").reset_index(drop=True)
+
+
+def zscore_phase09_variables(condition_df: pd.DataFrame, variables: List[str], kind: str) -> Tuple[pd.DataFrame, List[str], List[str]]:
+    out = condition_df.copy(); used: List[str] = []; flags: List[str] = []
+    for v in variables:
+        vals = pd.to_numeric(out[v], errors="coerce").to_numpy(dtype=float)
+        mean = float(np.mean(vals)) if len(vals) else np.nan
+        sd = float(np.std(vals, ddof=1)) if len(vals) > 1 else np.nan
+        if not np.isfinite(sd) or sd == 0:
+            out[f"z_{v}"] = np.nan; flags.append(f"{kind}_variable_dropped_zero_variance")
+        else:
+            out[f"z_{v}"] = (pd.to_numeric(out[v], errors="coerce") - mean) / sd; used.append(v)
+    return out, used, flags
+
+
+def phase09_distance_from_z(zdf: pd.DataFrame, variables: List[str]) -> np.ndarray:
+    return compute_geometric_distance(zdf, variables) if variables else np.empty((0, 0))
+
+
+def run_phase09_restricted_mantel_permutation(condition_df: pd.DataFrame, D_other: np.ndarray, args: argparse.Namespace, seed_offset: int) -> Tuple[Dict[str, Any], List[float]]:
+    return run_restricted_mantel_permutation(condition_df, D_other, args, seed_offset=900000 + seed_offset)
+
+
+def build_phase09_pair_table(cdf: pd.DataFrame, D_mech: np.ndarray, D_geom: np.ndarray, D_topo: np.ndarray, D_comb: np.ndarray, flags: List[str], topo_vars: List[str]) -> pd.DataFrame:
+    rows=[]; flag_str=_flag_string(flags); n=len(cdf)
+    for i in range(n):
+        for j in range(i+1,n):
+            ri=cdf.iloc[i]; rj=cdf.iloc[j]
+            row={"h":_json_scalar(ri["h"]),"patch_R":_json_scalar(ri["patch_R"]),"obs_i":ri["obs_id"],"obs_j":rj["obs_id"],"capside_i":ri["capside"],"fold_i":ri["fold"],"capside_j":rj["capside"],"fold_j":rj["fold"],"same_capside":bool(ri["capside"]==rj["capside"]),"same_fold":bool(ri["fold"]==rj["fold"]),"d_max_pct_i":ri["d_max_pct"],"d_max_pct_j":rj["d_max_pct"],"D_mech":D_mech[i,j],"t_i":ri.get("t",np.nan),"Hout_i":ri.get("Hout",np.nan),"Hin_i":ri.get("Hin",np.nan),"H1_norm_i":ri.get("H1_norm",np.nan),"H2_norm_i":ri.get("H2_norm",np.nan),"H0_norm_i":ri.get("H0_norm",np.nan),"t_j":rj.get("t",np.nan),"Hout_j":rj.get("Hout",np.nan),"Hin_j":rj.get("Hin",np.nan),"H1_norm_j":rj.get("H1_norm",np.nan),"H2_norm_j":rj.get("H2_norm",np.nan),"H0_norm_j":rj.get("H0_norm",np.nan),"D_geom_simple":D_geom[i,j] if D_geom.size else np.nan,"D_topo":D_topo[i,j] if D_topo.size else np.nan,"D_geom_topo":D_comb[i,j] if D_comb.size else np.nan,"phase09_warning_flags":flag_str}
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def phase09_mantel_row(h_value: Any, r_value: Any, comp_id: str, ma: str, mb: str, Da: np.ndarray, Db: np.ndarray, vars_a: List[str], vars_b: List[str], cdf: pd.DataFrame, args: argparse.Namespace, do_perm: bool, seed_offset: int, perm_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    flags: List[str] = []
+    stats = compute_mantel_statistics(Da, Db) if Da.size and Db.size and Da.shape == Db.shape and Da.shape[0] >= 4 else {"a_vec": np.array([]), "b_vec": np.array([]), "mantel_r_pearson": np.nan, "mantel_r_spearman": np.nan, "valid_comparison": False, "warning_flags": ["invalid_mantel_comparison"]}
+    flags.extend(stats["warning_flags"])
+    perm = {"perm_method": "", "perm_n_requested": np.nan, "perm_n_successful": np.nan, "p_perm_two_sided": np.nan, "p_perm_greater": np.nan, "p_perm_less": np.nan, "perm_r_mean": np.nan, "perm_r_sd": np.nan, "perm_r_min": np.nan, "perm_r_max": np.nan}
+    if do_perm and stats["valid_comparison"]:
+        perm, reps = run_phase09_restricted_mantel_permutation(cdf, Db, args, seed_offset)
+        perm = _phase07_pvals_from_reps(perm, reps, stats["mantel_r_pearson"]); flags.extend(perm.get("warning_flags", []))
+        if args.save_mantel_permutations:
+            for pi, rv in enumerate(reps, 1):
+                perm_rows.append({"h": _json_scalar(h_value), "patch_R": _json_scalar(r_value), "comparison_id": comp_id, "permutation_method": perm["perm_method"], "permutation_index": pi, "mantel_r_perm": rv})
+    valid = bool(stats["valid_comparison"] and (not do_perm or np.isfinite(perm["p_perm_two_sided"])))
+    return {"h": _json_scalar(h_value), "patch_R": _json_scalar(r_value), "comparison_id": comp_id, "matrix_a": ma, "matrix_b": mb, "n_observations": int(len(cdf)), "n_distance_pairs": int(len(stats["a_vec"])), "variables_used_matrix_a": ";".join(vars_a), "variables_used_matrix_b": ";".join(vars_b), "standardization_scope": "within_h_patch_R_condition", "standardization_method": "z_score_sample_sd_ddof_1", "mantel_r_pearson": stats["mantel_r_pearson"], "mantel_r_spearman": stats["mantel_r_spearman"], **{k: perm[k] for k in ["perm_method","perm_n_requested","perm_n_successful","p_perm_two_sided","p_perm_greater","p_perm_less","perm_r_mean","perm_r_sd","perm_r_min","perm_r_max"]}, "valid_comparison": valid, "interpretation_label": "descriptive_or_restricted_permutation_matrix_correspondence" if valid else "comparison_invalid", "warning_flags": _flag_string(flags)}
+
+
+def make_phase09_heatmaps(cdf: pd.DataFrame, mats: Dict[str, np.ndarray], h_value: Any, r_value: Any, tag: str, args: argparse.Namespace) -> Tuple[List[str], List[str]]:
+    if args.no_plots: return [], []
+    files=[]; warnings=[]
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+        labels=cdf["obs_id"].astype(str).tolist(); show=len(labels)<=25
+        for name in ["D_topo", "D_geom_topo"]:
+            mat=mats[name]
+            if not mat.size: continue
+            fig, ax=plt.subplots(figsize=(max(5,min(12,len(labels)*0.35)), max(4,min(12,len(labels)*0.35))))
+            im=ax.imshow(mat, interpolation="nearest", aspect="auto"); ax.set_title(f"Phase 9 {name}\nh={h_value}, patch_R={r_value}"); fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            if show:
+                ax.set_xticks(range(len(labels))); ax.set_yticks(range(len(labels))); ax.set_xticklabels(labels, rotation=90, fontsize=6); ax.set_yticklabels(labels, fontsize=6)
+            fig.tight_layout(); path=args.outdir/f"phase09_heatmap_{name}_{tag}.png"; fig.savefig(path,dpi=150); plt.close(fig); files.append(str(path))
+        fig, axes=plt.subplots(2,3,figsize=(15,9)); axes=axes.ravel()
+        for ax, name in zip(axes[:4], ["D_mech","D_geom_simple","D_topo","D_geom_topo"]):
+            mat=mats[name]; im=ax.imshow(mat, interpolation="nearest", aspect="auto"); ax.set_title(name); fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        axes[4].scatter(vectorize_upper_triangle(mats["D_topo"]), vectorize_upper_triangle(mats["D_mech"]), s=18); axes[4].set_xlabel("D_topo"); axes[4].set_ylabel("D_mech")
+        axes[5].scatter(vectorize_upper_triangle(mats["D_geom_topo"]), vectorize_upper_triangle(mats["D_mech"]), s=18); axes[5].set_xlabel("D_geom_topo"); axes[5].set_ylabel("D_mech")
+        fig.suptitle(f"Phase 9 topology comparison: h={h_value}, patch_R={r_value}"); fig.tight_layout(); path=args.outdir/f"phase09_heatmap_comparison_topology_{tag}.png"; fig.savefig(path,dpi=150); plt.close(fig); files.append(str(path))
+    except Exception as exc:
+        warnings.append(f"plot_failed:{exc}")
+    return files, warnings
+
+
+def make_phase09_scatterplots(df: pd.DataFrame, assoc: pd.DataFrame, topo_vars: List[str], args: argparse.Namespace) -> Tuple[List[str], List[str]]:
+    if args.no_plots: return [], []
+    files=[]; warnings=[]
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+        for (h_value, r_value), cdf in df.groupby(PHASE09_CONDITION_COLS, sort=True, dropna=False):
+            tag=_phase07_condition_tag(h_value, r_value)
+            for v in topo_vars:
+                pred=f"{v}_c"; row=assoc[(assoc["h"].astype(str)==str(h_value)) & (assoc["patch_R"].astype(str)==str(r_value)) & (assoc["predictor"]==pred)]
+                fig, ax=plt.subplots(figsize=(6,4.5))
+                for cap, g in cdf.groupby("capside", sort=True): ax.scatter(g[pred], g["delta_d_max_pct"], label=str(cap), s=30)
+                for _, rr in cdf.iterrows(): ax.annotate(str(rr["fold"]), (rr[pred], rr["delta_d_max_pct"]), fontsize=7)
+                ax.axhline(0,color="0.5",lw=0.8); ax.axvline(0,color="0.5",lw=0.8); ax.set_xlabel(pred); ax.set_ylabel("delta_d_max_pct")
+                slope=row["slope"].iloc[0] if not row.empty and "slope" in row else np.nan; p=row["p_perm_two_sided"].iloc[0] if not row.empty and "p_perm_two_sided" in row else np.nan
+                lo=row["slope_ci_low"].iloc[0] if not row.empty and "slope_ci_low" in row else np.nan; hi=row["slope_ci_high"].iloc[0] if not row.empty and "slope_ci_high" in row else np.nan
+                ax.set_title(f"{pred}, h={h_value}, patch_R={r_value}\nslope={slope:.3g}, CI=[{lo:.3g},{hi:.3g}], p_perm={p:.3g}"); ax.legend(fontsize=6, loc="best")
+                fig.tight_layout(); path=args.outdir/f"phase09_scatter_delta_d_vs_{pred}_{tag}.png"; fig.savefig(path,dpi=150); plt.close(fig); files.append(str(path))
+    except Exception as exc:
+        warnings.append(f"plot_failed:{exc}")
+    return files, warnings
+
+
+def run_phase09(input_df: pd.DataFrame, phase01_report: Dict, phase02_report: Dict, phase03_report: Dict, phase04_report: Dict, phase05_report: Dict, phase06_report: Dict, phase07_report: Dict, phase08_report: Dict, args: argparse.Namespace) -> Dict[str, Any]:
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    output_files: Dict[str, Any] = {"topology_table": str(args.outdir/"phase09_topology_table.csv"), "centered_associations": str(args.outdir/"phase09_topology_centered_associations.csv"), "mantel_summary": str(args.outdir/"phase09_mantel_summary.csv"), "geom_vs_geom_topo_comparison": str(args.outdir/"phase09_geom_vs_geom_topo_comparison.csv"), "report": str(args.outdir/"phase09_report.json"), "summary": str(args.outdir/"phase09_summary.txt"), "distance_matrices": [], "pair_tables": [], "figures": []}
+    warnings: List[str] = []; severe: List[str] = []
+    if phase01_report.get("status") != "PASS": severe.append("upstream_phase01_failed")
+    if phase02_report.get("status") == "FAIL": severe.append("upstream_phase02_failed")
+    for pn, rep in [("phase02", phase02_report),("phase03", phase03_report),("phase04", phase04_report),("phase05", phase05_report),("phase06", phase06_report),("phase07", phase07_report),("phase08", phase08_report)]:
+        if rep.get("status") == "WARN": warnings.append(f"upstream_{pn}_warn")
+        if pn in ["phase07", "phase08"] and rep.get("status") == "FAIL": warnings.append(f"upstream_{pn}_failed")
+    work, norm_info, norm_warn = ensure_phase09_topology_normalization(input_df, args); warnings.extend(norm_warn)
+    validation = validate_phase09_input(work)
+    if validation["missing_key_columns"] or "d_max_pct" in validation["missing_columns"] or "delta_d_max_pct" in validation["missing_columns"]: severe.append("missing_required_column")
+    if validation["duplicate_key_status"]["n_duplicate_rows"]: severe.append("duplicate_observation_key")
+    if any(c in validation["missing_columns"] for c in PHASE09_PRIMARY_TOPO): severe.append("missing_required_topology")
+    topo_vars, optional_topo = _phase09_topology_vars(work, args)
+    if not all(v in work.columns for v in PHASE09_PRIMARY_TOPO): severe.append("no_valid_topology_variable")
+    if "H0_norm" not in topo_vars: warnings.append("H0_not_used")
+    missing_geom = [g for g in PHASE09_GEOM_SIMPLE if g not in work.columns]
+    if missing_geom: warnings.append("missing_geometry_variables")
+    if severe:
+        for f in ["phase09_topology_table.csv","phase09_topology_centered_associations.csv","phase09_mantel_summary.csv","phase09_geom_vs_geom_topo_comparison.csv"]: pd.DataFrame().to_csv(args.outdir/f, index=False)
+        report={"phase":9,"status":"FAIL","timestamp":datetime.now(timezone.utc).isoformat(),"input_file":str(args.input),"output_directory":str(args.outdir),"upstream_phase01_status":phase01_report.get("status"),"upstream_phase02_status":phase02_report.get("status"),"upstream_phase03_status":phase03_report.get("status"),"upstream_phase04_status":phase04_report.get("status"),"upstream_phase05_status":phase05_report.get("status"),"upstream_phase06_status":phase06_report.get("status"),"upstream_phase07_status":phase07_report.get("status"),"upstream_phase08_status":phase08_report.get("status"),"required_columns_checked":validation["required_columns_checked"],"missing_columns":validation["missing_columns"],"warnings":sorted(set(warnings)),"severe_flags":sorted(set(severe)),"output_files":output_files}
+        (args.outdir/"phase09_report.json").write_text(json.dumps(_nan_to_none(report), indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8"); (args.outdir/"phase09_summary.txt").write_text("Phase 9 topological integration: FAIL\n", encoding="utf-8"); return report
+    centered = compute_phase09_centered_topology(work, topo_vars, warnings)
+    integrity = check_phase09_centering_integrity(centered, topo_vars)
+    if not integrity["delta_passes"]: severe.append("centered_sum_check_failed")
+    if not integrity["topology_passes"]: warnings.append("centered_sum_check_failed")
+    # row-level table
+    row_cols = PHASE09_KEY_COLS + ["d_max_pct","delta_d_max_pct","H1","H2","H1_norm","H2_norm","H0","H0_norm","mean_H1_norm_s","H1_norm_c","mean_H2_norm_s","H2_norm_c","mean_H0_norm_s","H0_norm_c","t","Hout","Hin","d_mag_max","D","rel_delta_d_max_pct","t_c","Hout_c","Hin_c","delta_H","H_mean","H_asym","G_out","G_in","Q_in","Q_out","patch_elems","size_h","patch_volume","E","phase09_warning_flags"]
+    for c in row_cols:
+        if c not in centered.columns: centered[c] = np.nan
+    centered[row_cols].to_csv(args.outdir/"phase09_topology_table.csv", index=False)
+    assoc = fit_phase09_centered_associations(centered, topo_vars, args); assoc.to_csv(args.outdir/"phase09_topology_centered_associations.csv", index=False)
+    summary_rows=[]; value_rows=[]; perm_rows=[]; dropped: Dict[str, List[str]]={}; valid_conditions=0
+    conditions = centered[["h","patch_R"]].drop_duplicates().sort_values(["h","patch_R"], key=lambda s: s.astype(str), kind="mergesort")
+    for cond_i, cond in conditions.reset_index(drop=True).iterrows():
+        h_value=cond["h"]; r_value=cond["patch_R"]; tag=_phase07_condition_tag(h_value, r_value); cflags=[]
+        vars_needed=["d_max_pct"] + [g for g in PHASE09_GEOM_SIMPLE if g in centered.columns] + PHASE09_PRIMARY_TOPO + optional_topo
+        cdf, n_excl = prepare_phase07_condition_dataset(centered, h_value, r_value, vars_needed)
+        if n_excl: cflags.append(f"complete_case_rows_excluded={n_excl}")
+        if len(cdf) < 4:
+            cflags.append("insufficient_observations"); warnings.extend(cflags); continue
+        zdf=cdf.copy(); zdf, geom_used, gf = zscore_phase09_variables(zdf, [g for g in PHASE09_GEOM_SIMPLE if g in zdf.columns], "geometry"); zdf, topo_used, tf = zscore_phase09_variables(zdf, topo_vars, "topology"); cflags.extend(gf+tf)
+        if len(topo_used) == 1: cflags.append("one_dimensional_topology_distance")
+        topo_valid = len(topo_used) >= 1
+        geom_valid = len(geom_used) >= 1
+        if not topo_valid: cflags.append("invalid_D_topo")
+        comb_used=geom_used+topo_used
+        comb_valid = geom_valid and topo_valid and len(comb_used) >= 2
+        if not comb_valid: cflags.append("invalid_D_geom_topo")
+        dropped[tag]=[v for v in PHASE09_GEOM_SIMPLE+topo_vars if v not in geom_used+topo_used]
+        D_mech=compute_mechanical_distance(zdf); D_geom=phase09_distance_from_z(zdf, geom_used) if geom_valid else np.empty((0,0)); D_topo=phase09_distance_from_z(zdf, topo_used) if topo_valid else np.empty((0,0)); D_comb=phase09_distance_from_z(zdf, comb_used) if comb_valid else np.empty((0,0))
+        mats={"D_mech":D_mech,"D_geom_simple":D_geom,"D_topo":D_topo,"D_geom_topo":D_comb}; obs=zdf["obs_id"].tolist()
+        for name, mat in mats.items():
+            if mat.size:
+                path=args.outdir/f"phase09_{name}_{tag}.csv"; pd.DataFrame(mat,index=obs,columns=obs).to_csv(path); output_files["distance_matrices"].append(str(path))
+        pair_df=build_phase09_pair_table(zdf,D_mech,D_geom,D_topo,D_comb,cflags,topo_vars); ppath=args.outdir/f"phase09_distance_pairs_{tag}.csv"; pair_df.to_csv(ppath,index=False); output_files["pair_tables"].append(str(ppath))
+        comps=[("D_mech_vs_D_geom_simple","D_mech","D_geom_simple",D_mech,D_geom,["d_max_pct"],geom_used,True),("D_mech_vs_D_topo","D_mech","D_topo",D_mech,D_topo,["d_max_pct"],topo_used,True),("D_mech_vs_D_geom_topo","D_mech","D_geom_topo",D_mech,D_comb,["d_max_pct"],comb_used,True),("D_geom_simple_vs_D_topo","D_geom_simple","D_topo",D_geom,D_topo,geom_used,topo_used,False)]
+        rows=[]
+        for ci,(cid,ma,mb,Da,Db,va,vb,dp) in enumerate(comps):
+            row=phase09_mantel_row(h_value,r_value,cid,ma,mb,Da,Db,va,vb,zdf,args,dp,int(cond_i)*1000+ci,perm_rows); row["warning_flags"]=_flag_string(cflags + str(row.get("warning_flags","")).split(";")); rows.append(row); summary_rows.append(row)
+        base=next((r for r in rows if r["comparison_id"]=="D_mech_vs_D_geom_simple"), None); ext=next((r for r in rows if r["comparison_id"]=="D_mech_vs_D_geom_topo"), None)
+        label="comparison_invalid"
+        if base and ext and base["valid_comparison"] and ext["valid_comparison"]:
+            dr=abs(ext["mantel_r_pearson"])-abs(base["mantel_r_pearson"])
+            if dr>0 and ext["p_perm_two_sided"]<=base["p_perm_two_sided"]: label="topology_improves_distance_correspondence"
+            elif dr>0: label="topology_increases_correlation_but_not_permutation_support"
+            else: label="topology_does_not_improve_distance_correspondence"; cflags.append("topology_does_not_improve_distance_correspondence")
+        value_rows.append({"h":_json_scalar(h_value),"patch_R":_json_scalar(r_value),"n_observations":int(len(zdf)),"n_distance_pairs":int(len(vectorize_upper_triangle(D_mech))),"same_observation_set":True,"base_comparison":"D_mech_vs_D_geom_simple","extended_comparison":"D_mech_vs_D_geom_topo","base_variables":";".join(geom_used),"extended_variables":";".join(comb_used),"base_mantel_r_pearson":base.get("mantel_r_pearson",np.nan) if base else np.nan,"extended_mantel_r_pearson":ext.get("mantel_r_pearson",np.nan) if ext else np.nan,"delta_mantel_r_pearson":(ext.get("mantel_r_pearson",np.nan)-base.get("mantel_r_pearson",np.nan)) if base and ext else np.nan,"base_abs_mantel_r_pearson":abs(base.get("mantel_r_pearson",np.nan)) if base else np.nan,"extended_abs_mantel_r_pearson":abs(ext.get("mantel_r_pearson",np.nan)) if ext else np.nan,"delta_abs_mantel_r_pearson":(abs(ext.get("mantel_r_pearson",np.nan))-abs(base.get("mantel_r_pearson",np.nan))) if base and ext else np.nan,"base_mantel_r_spearman":base.get("mantel_r_spearman",np.nan) if base else np.nan,"extended_mantel_r_spearman":ext.get("mantel_r_spearman",np.nan) if ext else np.nan,"delta_mantel_r_spearman":(ext.get("mantel_r_spearman",np.nan)-base.get("mantel_r_spearman",np.nan)) if base and ext else np.nan,"base_p_perm_two_sided":base.get("p_perm_two_sided",np.nan) if base else np.nan,"extended_p_perm_two_sided":ext.get("p_perm_two_sided",np.nan) if ext else np.nan,"delta_p_perm_two_sided":(ext.get("p_perm_two_sided",np.nan)-base.get("p_perm_two_sided",np.nan)) if base and ext else np.nan,"topology_value_add_label":label,"warning_flags":_flag_string(cflags)})
+        fig_files, fig_warn=make_phase09_heatmaps(zdf,mats,h_value,r_value,tag,args); output_files["figures"].extend(fig_files); warnings.extend(fig_warn); valid_conditions += int(any(r["valid_comparison"] for r in rows))
+        warnings.extend([f for f in cflags if not str(f).startswith("complete_case_rows_excluded=")])
+    mantel_df=pd.DataFrame(summary_rows).sort_values(["h","patch_R","comparison_id"], key=lambda s:s.astype(str), kind="mergesort") if summary_rows else pd.DataFrame(); mantel_df.to_csv(args.outdir/"phase09_mantel_summary.csv", index=False)
+    value_df=pd.DataFrame(value_rows).sort_values(["h","patch_R"], key=lambda s:s.astype(str), kind="mergesort") if value_rows else pd.DataFrame(); value_df.to_csv(args.outdir/"phase09_geom_vs_geom_topo_comparison.csv", index=False)
+    if args.save_mantel_permutations:
+        pd.DataFrame(perm_rows).to_csv(args.outdir/"phase09_mantel_permutation_distribution.csv", index=False); output_files["permutation_distribution"] = str(args.outdir/"phase09_mantel_permutation_distribution.csv")
+    sf, sw = make_phase09_scatterplots(centered, assoc, topo_vars, args); output_files["figures"].extend(sf); warnings.extend(sw)
+    if valid_conditions == 0: severe.append("no_valid_phase09_analysis")
+    status="FAIL" if severe else ("WARN" if warnings or missing_geom or optional_topo == [] else "PASS")
+    report={"phase":9,"status":status,"timestamp":datetime.now(timezone.utc).isoformat(),"input_file":str(args.input),"output_directory":str(args.outdir),"upstream_phase01_status":phase01_report.get("status"),"upstream_phase02_status":phase02_report.get("status"),"upstream_phase03_status":phase03_report.get("status"),"upstream_phase04_status":phase04_report.get("status"),"upstream_phase05_status":phase05_report.get("status"),"upstream_phase06_status":phase06_report.get("status"),"upstream_phase07_status":phase07_report.get("status"),"upstream_phase08_status":phase08_report.get("status"),"required_columns_checked":validation["required_columns_checked"],"missing_columns":validation["missing_columns"],"n_rows_input":int(len(input_df)),"n_rows_output":int(len(centered)),"n_capsides":int(centered["capside"].nunique()),"n_folds":int(centered["fold"].nunique()),"h_values":_sorted_json_values(centered["h"]),"patch_R_values":_sorted_json_values(centered["patch_R"]),"n_conditions":int(len(conditions)),"observation_key":PHASE09_KEY_COLS,"condition_cols":PHASE09_CONDITION_COLS,"center_group_cols":PHASE09_CENTER_GROUP_COLS,"obs_id_format":"capside|h=<h>|R=<patch_R>|fold=<fold>","topology_variables_primary":PHASE09_PRIMARY_TOPO,"topology_variables_optional":["H0_norm"],"topology_variables_used":topo_vars,"topology_variable_set":"H0_H1_H2_norm" if optional_topo else "H1_H2_norm","topology_normalization_policy":norm_info,"centered_topology_definitions":{v:f"{v}_c = {v} - mean within (capside,h,patch_R)" for v in topo_vars},"centered_integrity_checks":integrity,"centered_association_models":[f"delta_d_max_pct ~ {v}_c" for v in topo_vars],"bootstrap_n":int(args.bootstrap_n),"bootstrap_method":"cluster_by_capside_within_h_patch_R","ci_level":float(args.ci),"perm_n":int(args.perm_n),"permutation_method_centered":"within_capside_h_patch_R_shuffle_delta_d_max_pct","seed":int(args.seed),"distance_definitions":{"D_mech":"abs(d_max_pct_i-d_max_pct_j)","D_topo":"Euclidean z-scored topology","D_geom_simple":"Euclidean z-scored t,Hout,Hin","D_geom_topo":"Euclidean z-scored geometry plus topology"},"standardization_method":"z_score_sample_sd_ddof_1","standardization_scope":"within_h_patch_R_condition","mantel_comparisons":["D_mech_vs_D_geom_simple","D_mech_vs_D_topo","D_mech_vs_D_geom_topo","D_geom_simple_vs_D_topo"],"mantel_permutation_method":"restricted mechanical permutation within capside and condition","topology_value_add_definition":"absolute Mantel Pearson change from geometry-only to geometry+topology on the same observation set","variables_dropped_due_to_zero_variance":dropped,"output_files":output_files,"warnings":sorted(set(warnings)),"severe_flags":sorted(set(severe))}
+    (args.outdir/"phase09_report.json").write_text(json.dumps(_nan_to_none(report), indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+    lines=[f"Phase 9 topological integration: {status}",f"Conditions analyzed: {valid_conditions}",f"Topology variables used: {', '.join(topo_vars)}",f"H0 included: {bool(optional_topo)}",""]
+    if not assoc.empty:
+        lines.append("Strongest centered topology-mechanics association per condition:")
+        prim=assoc[assoc.get("model_type","").eq("single_predictor_primary")].copy(); prim["abs_r"]=pd.to_numeric(prim["r_value"], errors="coerce").abs()
+        for _, row in prim.sort_values(["h","patch_R","abs_r"], ascending=[True,True,False]).groupby(["h","patch_R"], sort=True).head(1).iterrows(): lines.append(f"  - h={row['h']}, patch_R={row['patch_R']}: {row['predictor']} r={row['r_value']:.6g}, p_perm={row['p_perm_two_sided']:.6g}")
+    if not mantel_df.empty:
+        lines.append("Mantel topology summaries:")
+        for _, row in mantel_df[mantel_df["comparison_id"].isin(["D_mech_vs_D_topo","D_mech_vs_D_geom_topo"])].iterrows(): lines.append(f"  - h={row['h']}, patch_R={row['patch_R']}, {row['comparison_id']}: r={row['mantel_r_pearson']:.6g}, empirical restricted-permutation p={row['p_perm_two_sided']:.6g}")
+    if not value_df.empty:
+        lines.append("Geometry versus geometry+topology:")
+        for _, row in value_df.iterrows(): lines.append(f"  - h={row['h']}, patch_R={row['patch_R']}: delta_abs_r={row['delta_abs_mantel_r_pearson']:.6g}, label={row['topology_value_add_label']}")
+    lines.append("Interpretation note: Phase 9 is descriptive and permutation-based; it does not establish mechanistic causality.")
+    if warnings: lines.append("Warnings: " + "; ".join(sorted(set(warnings))))
+    (args.outdir/"phase09_summary.txt").write_text("\n".join(lines)+"\n", encoding="utf-8")
+    return report
+
+
+def _print_phase09_summary(report: Dict[str, Any]) -> None:
+    print(f"[{report.get('status')}] Phase 9 completed.")
+    files = report.get("output_files", {})
+    print(f"[INFO] Topology table: {files.get('topology_table', 'not written')}")
+    print(f"[INFO] Centered topology associations: {files.get('centered_associations', 'not written')}")
+    print(f"[INFO] Mantel summary: {files.get('mantel_summary', 'not written')}")
+    print(f"[INFO] Geometry vs geometry+topology comparison: {files.get('geom_vs_geom_topo_comparison', 'not written')}")
+    print(f"[INFO] Phase 9 report: {files.get('report', 'not written')}")
+    mpath = Path(files.get("mantel_summary", "")); vpath = Path(files.get("geom_vs_geom_topo_comparison", ""))
+    if mpath.exists() and mpath.stat().st_size > 0:
+        try:
+            m = pd.read_csv(mpath)
+            for _, row in m[m["comparison_id"].eq("D_mech_vs_D_topo")].iterrows(): print(f"[TOPO] h={row['h']} patch_R={row['patch_R']} D_mech_vs_D_topo r={row['mantel_r_pearson']:.6g} p_perm={row['p_perm_two_sided']:.6g}")
+        except Exception: pass
+    if vpath.exists() and vpath.stat().st_size > 0:
+        try:
+            v = pd.read_csv(vpath)
+            for _, row in v.iterrows(): print(f"[VALUE-ADD] h={row['h']} patch_R={row['patch_R']} delta_abs_r={row['delta_abs_mantel_r_pearson']:.6g} label={row['topology_value_add_label']}")
+        except Exception: pass
+    if report.get("warnings"):
+        print("[WARN] Phase 9 completed with warnings. See phase09_report.json.")
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -4092,9 +4453,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--phase",
-        choices=["1", "2", "3", "4", "5", "6", "7", "8"],
+        choices=["1", "2", "3", "4", "5", "6", "7", "8", "9"],
         default="1",
-        help="Analysis phase to run. Phase 1 is the default. Phase 8 runs Phases 1 through 8, then compares capsid-level geometric and mechanical anisotropy."
+        help="Analysis phase to run. Phase 1 is the default. Phase 9 runs Phases 1 through 9, then integrates normalized H1/H2 topological descriptors with mechanical/geometric distance analyses."
     )
 
     parser.add_argument(
@@ -4122,7 +4483,7 @@ def parse_args() -> argparse.Namespace:
         "--outdir",
         default=Path("results"),
         type=Path,
-        help="Output directory for Phase 2 through Phase 8 artifacts."
+        help="Output directory for Phase 2 through Phase 9 artifacts."
     )
 
     parser.add_argument(
@@ -4177,7 +4538,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-plots",
         action="store_true",
-        help="Skip Phase 3 centered scatterplots, Phase 4 ordinal ranking plots, Phase 5 model comparison figures, Phase 6 figures, Phase 7 heatmaps, and Phase 8 scatter/ranking figures."
+        help="Skip Phase 3 centered scatterplots, Phase 4 ordinal ranking plots, Phase 5 model comparison figures, Phase 6 figures, Phase 7 heatmaps, Phase 8 figures, and Phase 9 heatmaps/scatterplots."
     )
 
     parser.add_argument(
@@ -4265,13 +4626,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--save-mantel-permutations",
         action="store_true",
-        help="Save full Phase 7 Mantel permutation distributions."
+        help="Save full Phase 7 and Phase 9 Mantel permutation distributions."
     )
 
     parser.add_argument(
         "--mantel-global-permutation",
         action="store_true",
         help="Also run Phase 7 diagnostic global-label Mantel permutation within h/patch_R conditions."
+    )
+
+    parser.add_argument(
+        "--include-H0",
+        action="store_true",
+        help="Phase 9: include H0_norm in optional topology analyses when available."
+    )
+
+    parser.add_argument(
+        "--topology-use-raw-fallback",
+        action="store_true",
+        help="Phase 9: permit raw H1/H2 fallback if normalized topology cannot be computed; marks analyses with WARN."
+    )
+
+    parser.add_argument(
+        "--topology-min-vars",
+        default=2,
+        type=int,
+        help="Phase 9 preferred minimum number of topology variables for D_topo. Default: 2."
     )
 
     parser.add_argument(
@@ -4498,9 +4878,29 @@ def main() -> int:
                 pass
     phase08_report = run_phase08(phase08_input_df, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, phase06_report, phase07_report, args)
     _print_phase08_summary(phase08_report)
-    if phase08_report["status"] == "FAIL":
+
+    if args.phase == "8":
+        if phase08_report["status"] == "FAIL":
+            return 1
+        if args.fail_on_warning and phase08_report["status"] != "PASS":
+            return 1
+        return 0
+
+    phase09_input_df = centered_phase02_df if not centered_phase02_df.empty else normalized_df
+    for candidate in [args.outdir / "phase06_composite_geometry.csv", args.outdir / "phase03_centered_geometry.csv", centered_path, args.output]:
+        if candidate.exists() and candidate.stat().st_size > 0:
+            try:
+                tmp = pd.read_csv(candidate)
+                if all(c in tmp.columns for c in ["capside", "fold", "h", "patch_R", "d_max_pct", "delta_d_max_pct"]):
+                    phase09_input_df = tmp
+                    break
+            except Exception:
+                pass
+    phase09_report = run_phase09(phase09_input_df, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, phase06_report, phase07_report, phase08_report, args)
+    _print_phase09_summary(phase09_report)
+    if phase09_report["status"] == "FAIL":
         return 1
-    if args.fail_on_warning and phase08_report["status"] != "PASS":
+    if args.fail_on_warning and phase09_report["status"] != "PASS":
         return 1
     return 0
 
