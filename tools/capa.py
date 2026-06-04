@@ -4919,6 +4919,502 @@ def _print_phase10_summary(report: Dict[str, Any]) -> None:
     if report.get("warnings"):
         print("[WARN] Phase 10 completed with warnings. See phase10_report.json.")
 
+
+# ---------------------------------------------------------------------
+# Phase 11: h / patch_R robustness diagnostics
+# ---------------------------------------------------------------------
+
+PHASE11_KEY_COLS = ["capside", "h", "patch_R", "fold"]
+PHASE11_REQUIRED_COLS = PHASE11_KEY_COLS + ["d_max_pct"]
+PHASE11_PRIMARY_METRICS = ["d_max_pct", "t", "Hout", "Hin", "H1_norm", "H2_norm"]
+PHASE11_OPTIONAL_METRICS = ["H0_norm", "delta_H", "H_mean", "H_asym", "G_out", "G_in", "Q_in"]
+PHASE11_RANKING_BASE = ["d_max_pct", "t", "Hout", "Hin", "H1_norm", "H2_norm"]
+
+
+def _phase11_condition_sort_key(value: Any) -> Tuple[int, Any]:
+    try:
+        f = float(value)
+        if np.isfinite(f):
+            return (0, f)
+    except Exception:
+        pass
+    return (1, str(value))
+
+
+def _phase11_sorted_unique(series: pd.Series) -> List[Any]:
+    vals = [_json_scalar(v) for v in series.dropna().unique().tolist()]
+    return sorted(vals, key=_phase11_condition_sort_key)
+
+
+def _phase11_select_reference(values: List[Any], requested: str, policy: str) -> Tuple[Any, str, List[str]]:
+    flags: List[str] = []
+    if not values:
+        return None, requested, [f"reference_{policy}_not_found"]
+    if str(requested).lower() == "auto":
+        ref = values[0] if policy == "h" else values[-1]
+        return ref, "auto_min_h" if policy == "h" else "auto_max_patch_R", flags
+    for v in values:
+        if str(v) == str(requested):
+            return v, "explicit", flags
+        try:
+            if float(v) == float(requested):
+                return v, "explicit", flags
+        except Exception:
+            pass
+    flags.append("reference_h_not_found" if policy == "h" else "reference_patch_R_not_found")
+    return requested, "explicit_not_found", flags
+
+
+def validate_phase11_input(df: pd.DataFrame) -> Dict[str, Any]:
+    missing = [c for c in PHASE11_REQUIRED_COLS if c not in df.columns]
+    duplicate_rows = int(df.duplicated(PHASE11_KEY_COLS).sum()) if not missing else 0
+    h_values = _phase11_sorted_unique(df["h"]) if "h" in df.columns else []
+    r_values = _phase11_sorted_unique(df["patch_R"]) if "patch_R" in df.columns else []
+    warnings: List[str] = []
+    if duplicate_rows:
+        warnings.append("duplicate_observation_key")
+    if len(h_values) < 2:
+        warnings.append("insufficient_h_values")
+    if len(r_values) < 2:
+        warnings.append("insufficient_patch_R_values")
+    missing_geom = [m for m in ["t", "Hout", "Hin"] if m not in df.columns]
+    missing_topo = [m for m in ["H1_norm", "H2_norm"] if m not in df.columns]
+    if missing_geom:
+        warnings.append("missing_metric")
+    if missing_topo:
+        warnings.append("topology_metrics_missing")
+    return {"missing_required_columns": missing, "duplicate_rows": duplicate_rows, "h_values": h_values, "patch_R_values": r_values, "missing_geometry_metrics": missing_geom, "missing_topology_metrics": missing_topo, "warning_flags": warnings}
+
+
+def build_phase11_condition_index(df: pd.DataFrame, args: argparse.Namespace, validation: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict[str, Any], List[str]]:
+    h_values = validation["h_values"]
+    r_values = validation["patch_R_values"]
+    ref_h, ref_h_policy, h_flags = _phase11_select_reference(h_values, str(args.reference_h), "h")
+    ref_r, ref_r_policy, r_flags = _phase11_select_reference(r_values, str(args.reference_patch_R), "patch_R")
+    rows = []
+    if all(c in df.columns for c in ["h", "patch_R"]):
+        for (h, r), g in df.groupby(["h", "patch_R"], sort=False, dropna=False):
+            flags: List[str] = []
+            if h_flags and str(h) == str(ref_h): flags.extend(h_flags)
+            if r_flags and str(r) == str(ref_r): flags.extend(r_flags)
+            rows.append({"h": h, "patch_R": r, "n_rows": int(len(g)), "n_capsides": int(g["capside"].nunique(dropna=True)) if "capside" in g else 0, "n_folds": int(g["fold"].nunique(dropna=True)) if "fold" in g else 0, "is_reference_h": str(h) == str(ref_h), "is_reference_patch_R": str(r) == str(ref_r), "warning_flags": _flag_string(flags)})
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values(["h", "patch_R"], key=lambda s: s.map(lambda x: str(_phase11_condition_sort_key(x))), kind="mergesort").reset_index(drop=True)
+    meta = {"reference_h": ref_h, "reference_h_policy": ref_h_policy, "reference_patch_R": ref_r, "reference_patch_R_policy": ref_r_policy}
+    return out, meta, h_flags + r_flags
+
+
+def _phase11_metric_list(df: pd.DataFrame) -> Tuple[List[str], List[str], List[str]]:
+    metrics = [m for m in PHASE11_PRIMARY_METRICS if m in df.columns]
+    optional = [m for m in PHASE11_OPTIONAL_METRICS if m in df.columns]
+    missing = [m for m in PHASE11_PRIMARY_METRICS if m not in df.columns]
+    return metrics + optional, optional, missing
+
+
+def _phase11_condition_mask(df: pd.DataFrame, **kwargs: Any) -> pd.Series:
+    mask = pd.Series(True, index=df.index)
+    for col, val in kwargs.items():
+        mask &= df[col].astype(str).eq(str(val))
+    return mask
+
+
+def _phase11_rel_error(test: Any, ref: Any, args: argparse.Namespace) -> Tuple[float, float, bool, bool, bool, str]:
+    flags: List[str] = []
+    try:
+        t = float(test); r = float(ref)
+    except Exception:
+        return np.nan, np.nan, False, False, False, "nonfinite_metric_value"
+    if not (np.isfinite(t) and np.isfinite(r)):
+        return np.nan, np.nan, False, False, False, "nonfinite_metric_value"
+    near_ref = abs(r) <= float(args.near_zero_threshold)
+    both_zero = near_ref and abs(t) <= float(args.near_zero_threshold)
+    if near_ref: flags.append("near_zero_reference_value")
+    if both_zero:
+        flags.append("both_values_near_zero")
+        return abs(r - t), 0.0, True, near_ref, both_zero, _flag_string(flags)
+    rel = abs(r - t) / (abs(r) + float(args.robustness_epsilon))
+    valid = bool(np.isfinite(rel))
+    if not valid: flags.append("invalid_relative_error")
+    return abs(r - t), rel, valid, near_ref, both_zero, _flag_string(flags)
+
+
+def compute_metric_convergence(df: pd.DataFrame, args: argparse.Namespace, refs: Dict[str, Any]) -> pd.DataFrame:
+    metrics, _, _ = _phase11_metric_list(df)
+    rows: List[Dict[str, Any]] = []
+    axes = (["h", "patch_R"] if args.robustness_mode == "both" else [args.robustness_mode])
+    for axis in axes:
+        if axis == "h":
+            for r in _phase11_sorted_unique(df["patch_R"]):
+                sub = df[_phase11_condition_mask(df, patch_R=r)]
+                if str(refs["reference_h"]) not in set(sub["h"].astype(str)):
+                    continue
+                tests = [h for h in _phase11_sorted_unique(sub["h"]) if str(h) != str(refs["reference_h"])]
+                for h in tests:
+                    for (cap, fold), gtest in sub[_phase11_condition_mask(sub, h=h)].groupby(["capside", "fold"], sort=True, dropna=False):
+                        gref = sub[_phase11_condition_mask(sub, h=refs["reference_h"])]
+                        gref = gref[(gref["capside"].astype(str) == str(cap)) & (gref["fold"].astype(str) == str(fold))]
+                        for metric in metrics:
+                            flags: List[str] = []
+                            if gref.empty:
+                                rows.append({"robustness_axis":"h","capside":cap,"fold":fold,"metric":metric,"h_test":h,"h_reference":refs["reference_h"],"patch_R_test":r,"patch_R_reference":r,"value_test":np.nan,"value_reference":np.nan,"absolute_difference":np.nan,"relative_error":np.nan,"tolerance":args.robustness_tolerance,"pass_tolerance":False,"near_zero_reference":False,"both_values_near_zero":False,"valid_comparison":False,"warning_flags":"missing_reference_value"})
+                                continue
+                            absdiff, rel, valid, near, both, f = _phase11_rel_error(gtest.iloc[0].get(metric), gref.iloc[0].get(metric), args)
+                            if f: flags.append(f)
+                            passed = bool(valid and rel <= float(args.robustness_tolerance))
+                            if valid and not passed: flags.append("tolerance_failed")
+                            rows.append({"robustness_axis":"h","capside":cap,"fold":fold,"metric":metric,"h_test":h,"h_reference":refs["reference_h"],"patch_R_test":r,"patch_R_reference":r,"value_test":gtest.iloc[0].get(metric),"value_reference":gref.iloc[0].get(metric),"absolute_difference":absdiff,"relative_error":rel,"tolerance":args.robustness_tolerance,"pass_tolerance":passed,"near_zero_reference":near,"both_values_near_zero":both,"valid_comparison":valid,"warning_flags":_flag_string(flags)})
+        if axis == "patch_R":
+            for h in _phase11_sorted_unique(df["h"]):
+                sub = df[_phase11_condition_mask(df, h=h)]
+                if str(refs["reference_patch_R"]) not in set(sub["patch_R"].astype(str)):
+                    continue
+                tests = [r for r in _phase11_sorted_unique(sub["patch_R"]) if str(r) != str(refs["reference_patch_R"])]
+                for r in tests:
+                    for (cap, fold), gtest in sub[_phase11_condition_mask(sub, patch_R=r)].groupby(["capside", "fold"], sort=True, dropna=False):
+                        gref = sub[_phase11_condition_mask(sub, patch_R=refs["reference_patch_R"])]
+                        gref = gref[(gref["capside"].astype(str) == str(cap)) & (gref["fold"].astype(str) == str(fold))]
+                        for metric in metrics:
+                            flags: List[str] = []
+                            if gref.empty:
+                                rows.append({"robustness_axis":"patch_R","capside":cap,"fold":fold,"metric":metric,"h_test":h,"h_reference":h,"patch_R_test":r,"patch_R_reference":refs["reference_patch_R"],"value_test":np.nan,"value_reference":np.nan,"absolute_difference":np.nan,"relative_error":np.nan,"tolerance":args.robustness_tolerance,"pass_tolerance":False,"near_zero_reference":False,"both_values_near_zero":False,"valid_comparison":False,"warning_flags":"missing_reference_value"})
+                                continue
+                            absdiff, rel, valid, near, both, f = _phase11_rel_error(gtest.iloc[0].get(metric), gref.iloc[0].get(metric), args)
+                            if f: flags.append(f)
+                            passed = bool(valid and rel <= float(args.robustness_tolerance))
+                            if valid and not passed: flags.append("tolerance_failed")
+                            rows.append({"robustness_axis":"patch_R","capside":cap,"fold":fold,"metric":metric,"h_test":h,"h_reference":h,"patch_R_test":r,"patch_R_reference":refs["reference_patch_R"],"value_test":gtest.iloc[0].get(metric),"value_reference":gref.iloc[0].get(metric),"absolute_difference":absdiff,"relative_error":rel,"tolerance":args.robustness_tolerance,"pass_tolerance":passed,"near_zero_reference":near,"both_values_near_zero":both,"valid_comparison":valid,"warning_flags":_flag_string(flags)})
+    out = pd.DataFrame(rows)
+    cols = ["robustness_axis","capside","fold","metric","h_test","h_reference","patch_R_test","patch_R_reference","value_test","value_reference","absolute_difference","relative_error","tolerance","pass_tolerance","near_zero_reference","both_values_near_zero","valid_comparison","warning_flags"]
+    if out.empty: return pd.DataFrame(columns=cols)
+    return out[cols].sort_values(["robustness_axis","metric","capside","fold","h_test","patch_R_test"], key=lambda s: s.map(str), kind="mergesort").reset_index(drop=True)
+
+
+def _phase11_label_fraction(frac: float) -> str:
+    if not np.isfinite(frac): return "insufficient_data"
+    if frac >= 0.90: return "robust"
+    if frac >= 0.75: return "mostly_robust"
+    if frac >= 0.50: return "partially_robust"
+    return "not_robust"
+
+
+def summarize_metric_robustness(conv: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    group_cols = ["robustness_axis","metric","h_test","h_reference","patch_R_test","patch_R_reference"]
+    if conv.empty: return pd.DataFrame(columns=group_cols + ["n_comparisons","n_valid_comparisons","n_pass","fraction_pass","mean_relative_error","median_relative_error","sd_relative_error","max_relative_error","p90_relative_error","worst_capside","worst_fold","worst_relative_error","robustness_label","warning_flags"])
+    for key, g in conv.groupby(group_cols, sort=True, dropna=False):
+        valid = g[g["valid_comparison"].astype(bool)].copy()
+        rel = pd.to_numeric(valid["relative_error"], errors="coerce")
+        idx = rel.idxmax() if len(rel.dropna()) else None
+        frac = float(valid["pass_tolerance"].mean()) if len(valid) else np.nan
+        rows.append(dict(zip(group_cols, key), **{"n_comparisons":int(len(g)),"n_valid_comparisons":int(len(valid)),"n_pass":int(valid["pass_tolerance"].sum()) if len(valid) else 0,"fraction_pass":frac,"mean_relative_error":float(rel.mean()) if len(rel) else np.nan,"median_relative_error":float(rel.median()) if len(rel) else np.nan,"sd_relative_error":float(rel.std(ddof=1)) if len(rel)>1 else np.nan,"max_relative_error":float(rel.max()) if len(rel) else np.nan,"p90_relative_error":float(rel.quantile(0.9)) if len(rel) else np.nan,"worst_capside":valid.loc[idx,"capside"] if idx is not None else "","worst_fold":valid.loc[idx,"fold"] if idx is not None else "","worst_relative_error":float(rel.loc[idx]) if idx is not None else np.nan,"robustness_label":_phase11_label_fraction(frac),"warning_flags":_flag_string(";".join(g["warning_flags"].fillna("")).split(";"))}))
+    return pd.DataFrame(rows).sort_values(["robustness_axis","metric","h_test","patch_R_test"], key=lambda s: s.map(str), kind="mergesort").reset_index(drop=True)
+
+
+def summarize_biological_unit_robustness(conv: pd.DataFrame) -> pd.DataFrame:
+    cols = ["capside","fold","metric","robustness_axis","n_valid_comparisons","mean_relative_error","max_relative_error","fraction_pass","robustness_label","worst_h_test","worst_h_reference","worst_patch_R_test","worst_patch_R_reference","warning_flags"]
+    if conv.empty: return pd.DataFrame(columns=cols)
+    rows = []
+    for key, g in conv.groupby(["capside","fold","metric","robustness_axis"], sort=True, dropna=False):
+        valid = g[g["valid_comparison"].astype(bool)].copy()
+        rel = pd.to_numeric(valid["relative_error"], errors="coerce")
+        idx = rel.idxmax() if len(rel.dropna()) else None
+        frac = float(valid["pass_tolerance"].mean()) if len(valid) else np.nan
+        rows.append({"capside":key[0],"fold":key[1],"metric":key[2],"robustness_axis":key[3],"n_valid_comparisons":int(len(valid)),"mean_relative_error":float(rel.mean()) if len(rel) else np.nan,"max_relative_error":float(rel.max()) if len(rel) else np.nan,"fraction_pass":frac,"robustness_label":_phase11_label_fraction(frac),"worst_h_test":valid.loc[idx,"h_test"] if idx is not None else "","worst_h_reference":valid.loc[idx,"h_reference"] if idx is not None else "","worst_patch_R_test":valid.loc[idx,"patch_R_test"] if idx is not None else "","worst_patch_R_reference":valid.loc[idx,"patch_R_reference"] if idx is not None else "","warning_flags":_flag_string(";".join(g["warning_flags"].fillna("")).split(";"))})
+    return pd.DataFrame(rows)[cols].sort_values(["robustness_axis","metric","max_relative_error","capside","fold"], ascending=[True,True,False,True,True], kind="mergesort").reset_index(drop=True)
+
+
+def compute_phase11_rankings(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for metric in [m for m in PHASE11_RANKING_BASE if m in out.columns]:
+        out[f"rank_{metric}"] = out.groupby(["capside","h","patch_R"], sort=False, dropna=False)[metric].rank(method="min", ascending=False)
+    if "t" in out.columns:
+        out["rank_t_thinnest"] = out.groupby(["capside","h","patch_R"], sort=False, dropna=False)["t"].rank(method="min", ascending=True)
+    return out
+
+
+def _phase11_rank_corr(a: pd.Series, b: pd.Series) -> Tuple[float, float]:
+    try:
+        from scipy import stats  # type: ignore
+        return float(stats.spearmanr(a, b, nan_policy="omit").statistic), float(stats.kendalltau(a, b, nan_policy="omit").statistic)
+    except Exception:
+        return float(a.corr(b, method="spearman")), float(a.corr(b, method="kendall"))
+
+
+def _phase11_ranking_label(rho: float, top: int) -> str:
+    if not np.isfinite(rho): return "insufficient_data"
+    if rho >= 0.90 and top == 1: return "ranking_robust"
+    if rho >= 0.70: return "ranking_mostly_robust"
+    if rho >= 0.40: return "ranking_partially_robust"
+    return "ranking_not_robust"
+
+
+def compute_ranking_robustness(rankings: pd.DataFrame, args: argparse.Namespace, refs: Dict[str, Any]) -> pd.DataFrame:
+    variables = [v for v in ["rank_d_max_pct","rank_t","rank_t_thinnest","rank_Hout","rank_Hin","rank_H1_norm","rank_H2_norm"] if v in rankings.columns]
+    rows: List[Dict[str, Any]] = []
+    axes = (["h", "patch_R"] if args.robustness_mode == "both" else [args.robustness_mode])
+    for axis in axes:
+        if axis == "h":
+            for cap in _phase11_sorted_unique(rankings["capside"]):
+              for r in _phase11_sorted_unique(rankings["patch_R"]):
+                sub = rankings[_phase11_condition_mask(rankings, capside=cap, patch_R=r)]
+                ref = sub[_phase11_condition_mask(sub, h=refs["reference_h"])]
+                for h in [x for x in _phase11_sorted_unique(sub["h"]) if str(x)!=str(refs["reference_h"])] :
+                    test = sub[_phase11_condition_mask(sub, h=h)]
+                    for var in variables:
+                        rows.append(_phase11_one_rank_compare("h", cap, var, test, ref, h, refs["reference_h"], r, r))
+        if axis == "patch_R":
+            for cap in _phase11_sorted_unique(rankings["capside"]):
+              for h in _phase11_sorted_unique(rankings["h"]):
+                sub = rankings[_phase11_condition_mask(rankings, capside=cap, h=h)]
+                ref = sub[_phase11_condition_mask(sub, patch_R=refs["reference_patch_R"])]
+                for r in [x for x in _phase11_sorted_unique(sub["patch_R"]) if str(x)!=str(refs["reference_patch_R"])] :
+                    test = sub[_phase11_condition_mask(sub, patch_R=r)]
+                    for var in variables:
+                        rows.append(_phase11_one_rank_compare("patch_R", cap, var, test, ref, h, h, r, refs["reference_patch_R"]))
+    cols = ["robustness_axis","capside","ranking_variable","h_test","h_reference","patch_R_test","patch_R_reference","n_folds_compared","folds_compared","spearman_rho","kendall_tau","top1_test","top1_reference","top1_match_binary","top1_jaccard","ranking_robustness_label","valid_comparison","warning_flags"]
+    out = pd.DataFrame(rows)
+    return pd.DataFrame(columns=cols) if out.empty else out[cols].sort_values(["robustness_axis","capside","ranking_variable","h_test","patch_R_test"], key=lambda s: s.map(str), kind="mergesort").reset_index(drop=True)
+
+
+def _phase11_one_rank_compare(axis: str, cap: Any, var: str, test: pd.DataFrame, ref: pd.DataFrame, htest: Any, href: Any, rtest: Any, rref: Any) -> Dict[str, Any]:
+    flags: List[str] = []
+    merged = test[["fold", var]].merge(ref[["fold", var]], on="fold", suffixes=("_test","_reference")) if var in test and var in ref else pd.DataFrame()
+    merged = merged.dropna(subset=[f"{var}_test", f"{var}_reference"])
+    n = int(len(merged))
+    valid = n >= 3
+    rho = tau = np.nan
+    if valid:
+        rho, tau = _phase11_rank_corr(merged[f"{var}_test"], merged[f"{var}_reference"])
+    else:
+        flags.append("insufficient_folds_for_ranking")
+    top_test = set(test.loc[pd.to_numeric(test.get(var), errors="coerce").eq(1), "fold"].astype(str)) if var in test else set()
+    top_ref = set(ref.loc[pd.to_numeric(ref.get(var), errors="coerce").eq(1), "fold"].astype(str)) if var in ref else set()
+    inter = top_test & top_ref; union = top_test | top_ref
+    top_match = 1 if inter else 0
+    jac = float(len(inter)/len(union)) if union else np.nan
+    if valid and (not np.isfinite(rho) or rho < 0.90): flags.append("ranking_changed")
+    if valid and top_match == 0: flags.append("top1_changed")
+    return {"robustness_axis":axis,"capside":cap,"ranking_variable":var,"h_test":htest,"h_reference":href,"patch_R_test":rtest,"patch_R_reference":rref,"n_folds_compared":n,"folds_compared":_semicolon_join(merged["fold"]) if not merged.empty else "","spearman_rho":rho,"kendall_tau":tau,"top1_test":_flag_string(sorted(top_test)),"top1_reference":_flag_string(sorted(top_ref)),"top1_match_binary":top_match,"top1_jaccard":jac,"ranking_robustness_label":_phase11_ranking_label(rho, top_match),"valid_comparison":valid,"warning_flags":_flag_string(flags)}
+
+
+def extract_condition_level_conclusions(df: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    # Fold tendency: recomputed directly from Phase 2 centered variables when present.
+    if "delta_d_max_pct" in df.columns:
+        for (h, r, fold), g in df.groupby(["h","patch_R","fold"], sort=True, dropna=False):
+            vals = pd.to_numeric(g["delta_d_max_pct"], errors="coerce").dropna()
+            frac_pos = float((vals > 0).mean()) if len(vals) else np.nan
+            label = "above_capsid_mean" if np.isfinite(frac_pos) and frac_pos >= args.tendency_threshold else ("below_or_mixed" if np.isfinite(frac_pos) else "insufficient_data")
+            rows.append({"h":h,"patch_R":r,"conclusion_family":"fold_tendency","conclusion_id":str(fold),"metric_name":"mean_delta_d_max_pct","metric_value":float(vals.mean()) if len(vals) else np.nan,"p_value":np.nan,"interpretation_label":label})
+    else:
+        rows.append({"h":np.nan,"patch_R":np.nan,"conclusion_family":"fold_tendency","conclusion_id":"skipped","metric_name":"mean_delta_d_max_pct","metric_value":np.nan,"p_value":np.nan,"interpretation_label":"conclusion_family_skipped"})
+    # Read summaries from earlier phases when available.
+    specs = [
+        ("phase03_centered_slopes.csv", "centered_geometry_association", "predictor", "slope", "p_perm_two_sided", "valid_model"),
+        ("phase05_model_comparison.csv", "additive_model", "comparison_id", "delta_r_squared", "p_perm_two_sided", "interpretation_label"),
+        ("phase07_mantel_summary.csv", "distance_matrix", "comparison_id", "mantel_r_pearson", "p_perm_two_sided", "interpretation_label"),
+        ("phase09_topology_value_add.csv", "topology_value_add", "comparison_or_predictor", "metric_value", "p_perm_two_sided", "topology_value_add_label"),
+    ]
+    for filename, fam, idcol, valcol, pcol, labelcol in specs:
+        path = args.outdir / filename
+        if not path.exists():
+            rows.append({"h":np.nan,"patch_R":np.nan,"conclusion_family":fam,"conclusion_id":"skipped","metric_name":valcol,"metric_value":np.nan,"p_value":np.nan,"interpretation_label":"conclusion_family_skipped"})
+            continue
+        try:
+            tab = pd.read_csv(path)
+            if not all(c in tab.columns for c in ["h","patch_R",idcol,valcol]):
+                raise ValueError("missing columns")
+            for _, rr in tab.iterrows():
+                label = rr.get(labelcol, "")
+                if labelcol == "valid_model": label = "valid_model" if bool(rr.get(labelcol)) else "invalid_model"
+                rows.append({"h":rr.get("h"),"patch_R":rr.get("patch_R"),"conclusion_family":fam,"conclusion_id":rr.get(idcol),"metric_name":valcol,"metric_value":rr.get(valcol),"p_value":rr.get(pcol, np.nan),"interpretation_label":label})
+        except Exception:
+            rows.append({"h":np.nan,"patch_R":np.nan,"conclusion_family":fam,"conclusion_id":"skipped","metric_name":valcol,"metric_value":np.nan,"p_value":np.nan,"interpretation_label":"conclusion_family_skipped"})
+    return pd.DataFrame(rows)
+
+
+def compute_conclusion_robustness(conc: pd.DataFrame, args: argparse.Namespace, refs: Dict[str, Any]) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    axes = (["h", "patch_R"] if args.robustness_mode == "both" else [args.robustness_mode])
+    if conc.empty:
+        return pd.DataFrame(columns=["robustness_axis","conclusion_family","conclusion_id","h_test","h_reference","patch_R_test","patch_R_reference","metric_name","value_test","value_reference","absolute_difference","relative_change","sign_test","sign_reference","sign_flip","label_test","label_reference","label_changed","p_test","p_reference","p_threshold_crossed","conclusion_robustness_label","warning_flags"])
+    for axis in axes:
+        group_fixed = ["patch_R"] if axis == "h" else ["h"]
+        for fixed_key, sub in conc.groupby(group_fixed, sort=True, dropna=False):
+            ref_cond_col = "h" if axis == "h" else "patch_R"
+            ref_val = refs["reference_h"] if axis == "h" else refs["reference_patch_R"]
+            tests = [v for v in _phase11_sorted_unique(sub[ref_cond_col]) if str(v) != str(ref_val)]
+            ref_rows = sub[_phase11_condition_mask(sub, **{ref_cond_col: ref_val})]
+            for test_val in tests:
+                test_rows = sub[_phase11_condition_mask(sub, **{ref_cond_col: test_val})]
+                for _, trow in test_rows.iterrows():
+                    match = ref_rows[(ref_rows["conclusion_family"].astype(str)==str(trow["conclusion_family"])) & (ref_rows["conclusion_id"].astype(str)==str(trow["conclusion_id"])) & (ref_rows["metric_name"].astype(str)==str(trow["metric_name"]))]
+                    if match.empty: continue
+                    rrow = match.iloc[0]
+                    vt = pd.to_numeric(pd.Series([trow.get("metric_value")]), errors="coerce").iloc[0]
+                    vr = pd.to_numeric(pd.Series([rrow.get("metric_value")]), errors="coerce").iloc[0]
+                    ad = abs(vr-vt) if np.isfinite(vt) and np.isfinite(vr) else np.nan
+                    rel = ad/(abs(vr)+float(args.robustness_epsilon)) if np.isfinite(ad) else np.nan
+                    sign_t = int(np.sign(vt)) if np.isfinite(vt) and abs(vt)>args.near_zero_threshold else 0
+                    sign_r = int(np.sign(vr)) if np.isfinite(vr) and abs(vr)>args.near_zero_threshold else 0
+                    sign_flip = bool(sign_t != sign_r and sign_t != 0 and sign_r != 0)
+                    label_changed = str(trow.get("interpretation_label")) != str(rrow.get("interpretation_label"))
+                    pt = pd.to_numeric(pd.Series([trow.get("p_value")]), errors="coerce").iloc[0]
+                    pr = pd.to_numeric(pd.Series([rrow.get("p_value")]), errors="coerce").iloc[0]
+                    pcross = bool(np.isfinite(pt) and np.isfinite(pr) and ((pt <= args.p_threshold) != (pr <= args.p_threshold)))
+                    flags: List[str] = []
+                    if str(trow.get("interpretation_label")) == "conclusion_family_skipped": flags.append("conclusion_family_skipped")
+                    if sign_flip: flags.append("sign_flip")
+                    if label_changed: flags.append("label_changed")
+                    if pcross: flags.append("p_threshold_crossed")
+                    if np.isfinite(rel) and rel >= args.robustness_relative_change_threshold: flags.append("high_relative_change")
+                    label = "strongly_condition_dependent" if (sign_flip or label_changed) else ("moderately_condition_dependent" if (np.isfinite(rel) and rel >= args.robustness_relative_change_threshold) else "stable_across_conditions")
+                    fixed = fixed_key[0] if isinstance(fixed_key, tuple) else fixed_key
+                    rows.append({"robustness_axis":axis,"conclusion_family":trow["conclusion_family"],"conclusion_id":trow["conclusion_id"],"h_test":test_val if axis=="h" else fixed,"h_reference":ref_val if axis=="h" else fixed,"patch_R_test":fixed if axis=="h" else test_val,"patch_R_reference":fixed if axis=="h" else ref_val,"metric_name":trow["metric_name"],"value_test":vt,"value_reference":vr,"absolute_difference":ad,"relative_change":rel,"sign_test":sign_t,"sign_reference":sign_r,"sign_flip":sign_flip,"label_test":trow.get("interpretation_label"),"label_reference":rrow.get("interpretation_label"),"label_changed":label_changed,"p_test":pt,"p_reference":pr,"p_threshold_crossed":pcross,"conclusion_robustness_label":label,"warning_flags":_flag_string(flags)})
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=["robustness_axis","conclusion_family","conclusion_id","h_test","h_reference","patch_R_test","patch_R_reference","metric_name","value_test","value_reference","absolute_difference","relative_change","sign_test","sign_reference","sign_flip","label_test","label_reference","label_changed","p_test","p_reference","p_threshold_crossed","conclusion_robustness_label","warning_flags"])
+    return out.sort_values(["robustness_axis","conclusion_family","conclusion_id","h_test","patch_R_test"], key=lambda s: s.map(str), kind="mergesort").reset_index(drop=True)
+
+
+def build_phase11_pass_fail_table(metric_summary: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
+    cols = ["robustness_axis","metric","n_condition_comparisons","n_total_valid_comparisons","overall_fraction_pass","max_relative_error_overall","median_relative_error_overall","p90_relative_error_overall","tolerance","pass_fraction_threshold","final_pass_fail","final_robustness_label","main_failure_mode","warning_flags"]
+    if metric_summary.empty: return pd.DataFrame(columns=cols)
+    rows = []
+    for (axis, metric), g in metric_summary.groupby(["robustness_axis","metric"], sort=True, dropna=False):
+        nvalid = int(pd.to_numeric(g["n_valid_comparisons"], errors="coerce").sum())
+        npass = int(pd.to_numeric(g["n_pass"], errors="coerce").sum())
+        frac = float(npass / nvalid) if nvalid else np.nan
+        rels = pd.to_numeric(g["max_relative_error"], errors="coerce")
+        label = _phase11_label_fraction(frac)
+        pf = "SKIPPED" if not nvalid else ("PASS" if frac >= float(args.robustness_pass_fraction) else "FAIL")
+        mode = "insufficient_comparisons" if not nvalid else ("tolerance_failed" if pf == "FAIL" else "")
+        rows.append({"robustness_axis":axis,"metric":metric,"n_condition_comparisons":int(len(g)),"n_total_valid_comparisons":nvalid,"overall_fraction_pass":frac,"max_relative_error_overall":float(rels.max()) if len(rels) else np.nan,"median_relative_error_overall":float(pd.to_numeric(g["median_relative_error"], errors="coerce").median()),"p90_relative_error_overall":float(pd.to_numeric(g["p90_relative_error"], errors="coerce").max()),"tolerance":args.robustness_tolerance,"pass_fraction_threshold":args.robustness_pass_fraction,"final_pass_fail":pf,"final_robustness_label":label,"main_failure_mode":mode,"warning_flags":_flag_string(";".join(g["warning_flags"].fillna("")).split(";"))})
+    return pd.DataFrame(rows)[cols].sort_values(["robustness_axis","final_pass_fail","metric"], kind="mergesort").reset_index(drop=True)
+
+
+def make_phase11_figures(conv: pd.DataFrame, passfail: pd.DataFrame, ranking: pd.DataFrame, conclusion: pd.DataFrame, args: argparse.Namespace) -> Tuple[List[str], List[str]]:
+    files: List[str] = []; warnings: List[str] = []
+    if args.no_plots: return files, warnings
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+    except Exception as exc:
+        return files, [f"plot_failed: matplotlib unavailable ({exc})"]
+    try:
+        if not conv.empty:
+            fig, ax = plt.subplots(figsize=(9,5));
+            for metric, g in conv.groupby("metric", sort=True):
+                ax.scatter(g["metric"].astype(str), pd.to_numeric(g["relative_error"], errors="coerce"), alpha=0.55, label=str(metric))
+            ax.axhline(float(args.robustness_tolerance), color="red", linestyle="--", label="tolerance")
+            ax.set_ylabel("relative_error"); ax.set_title("Phase 11 metric convergence"); ax.tick_params(axis="x", rotation=45); fig.tight_layout()
+            path=args.outdir/"phase11_metric_convergence.png"; fig.savefig(path, dpi=150); plt.close(fig); files.append(str(path))
+        if not passfail.empty:
+            fig, ax = plt.subplots(figsize=(9,5)); x=np.arange(len(passfail)); ax.bar(x, pd.to_numeric(passfail["overall_fraction_pass"], errors="coerce")); ax.axhline(float(args.robustness_pass_fraction), color="red", linestyle="--"); ax.set_xticks(x); ax.set_xticklabels((passfail["robustness_axis"].astype(str)+":"+passfail["metric"].astype(str)).tolist(), rotation=45, ha="right"); ax.set_ylim(0,1.05); ax.set_ylabel("fraction_pass"); fig.tight_layout(); path=args.outdir/"phase11_metric_pass_fraction.png"; fig.savefig(path,dpi=150); plt.close(fig); files.append(str(path))
+        if not ranking.empty:
+            fig, ax = plt.subplots(figsize=(9,5)); labels=(ranking["robustness_axis"].astype(str)+":"+ranking["ranking_variable"].astype(str)).tolist(); ax.bar(np.arange(len(ranking)), pd.to_numeric(ranking["spearman_rho"], errors="coerce")); ax.set_xticks(np.arange(len(ranking))); ax.set_xticklabels(labels, rotation=60, ha="right", fontsize=7); ax.set_ylabel("Spearman rho"); fig.tight_layout(); path=args.outdir/"phase11_ranking_robustness.png"; fig.savefig(path,dpi=150); plt.close(fig); files.append(str(path))
+        if not conclusion.empty:
+            fig, ax = plt.subplots(figsize=(9,5)); ax.scatter(pd.to_numeric(conclusion["value_reference"], errors="coerce"), pd.to_numeric(conclusion["value_test"], errors="coerce"), alpha=0.6); ax.set_xlabel("reference value"); ax.set_ylabel("test value"); ax.set_title("Phase 11 conclusion robustness"); fig.tight_layout(); path=args.outdir/"phase11_conclusion_robustness.png"; fig.savefig(path,dpi=150); plt.close(fig); files.append(str(path))
+    except Exception as exc:
+        warnings.append(f"plot_failed: {exc}")
+    return files, warnings
+
+
+def write_phase11_summary(path: Path, report: Dict[str, Any], passfail: pd.DataFrame, bio: pd.DataFrame, ranking: pd.DataFrame, conclusion: pd.DataFrame) -> None:
+    lines = ["Phase 11 h / patch_R robustness summary", "", f"Status: {report.get('status')}", f"h values detected: {report.get('h_values')}", f"patch_R values detected: {report.get('patch_R_values')}", f"reference h: {report.get('reference_h')} ({report.get('reference_h_policy')})", f"reference patch_R: {report.get('reference_patch_R')} ({report.get('reference_patch_R_policy')})", f"tolerance tau: {report.get('tolerance')}", f"pass-fraction threshold: {report.get('pass_fraction_threshold')}", ""]
+    if not passfail.empty:
+        passed = passfail.loc[passfail["final_pass_fail"]=="PASS", ["robustness_axis","metric"]].astype(str).agg(":".join, axis=1).tolist()
+        failed = passfail.loc[passfail["final_pass_fail"]=="FAIL", ["robustness_axis","metric"]].astype(str).agg(":".join, axis=1).tolist()
+        lines += [f"Metrics that passed robustness: {', '.join(passed) if passed else 'none'}", f"Metrics that failed robustness: {', '.join(failed) if failed else 'none'}"]
+        worst = passfail.sort_values("max_relative_error_overall", ascending=False).head(1)
+        if not worst.empty: lines.append(f"Worst metric by max relative error: {worst.iloc[0]['robustness_axis']}:{worst.iloc[0]['metric']} max={worst.iloc[0]['max_relative_error_overall']}")
+    if not bio.empty:
+        w = bio.sort_values("max_relative_error", ascending=False).head(1).iloc[0]
+        lines.append(f"Worst capside/fold pair: {w['capside']}/{w['fold']} metric={w['metric']} axis={w['robustness_axis']} max_relative_error={w['max_relative_error']}")
+    if not ranking.empty:
+        unstable = int(ranking["ranking_robustness_label"].isin(["ranking_not_robust","ranking_partially_robust"]).sum())
+        lines.append("Fold rankings are stable under tested conditions." if unstable == 0 else f"Fold rankings show condition dependence in {unstable} comparisons.")
+    if not conclusion.empty:
+        dep = int(conclusion["conclusion_robustness_label"].isin(["moderately_condition_dependent","strongly_condition_dependent"]).sum())
+        lines.append("Key conclusions are stable under the tested conditions." if dep == 0 else f"Key conclusions are condition-dependent in {dep} comparisons.")
+    topo = "evaluated" if report.get("topology_metrics_evaluated") else "skipped"
+    lines.append(f"Topology robustness status: {topo}.")
+    lines.append("These results test dependence on h and patch_R under the defined tolerance; they do not prove convergence or biological validation.")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def run_phase11(input_df: pd.DataFrame, phase01_report: Dict, phase02_report: Dict, phase03_report: Dict, phase04_report: Dict, phase05_report: Dict, phase06_report: Dict, phase07_report: Dict, phase08_report: Dict, phase09_report: Dict, phase10_report: Dict, args: argparse.Namespace) -> Dict[str, Any]:
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    validation = validate_phase11_input(input_df)
+    warnings: List[str] = list(validation.get("warning_flags", [])); severe: List[str] = []
+    for pn, rep in [("phase02", phase02_report),("phase03", phase03_report),("phase04", phase04_report),("phase05", phase05_report),("phase06", phase06_report),("phase07", phase07_report),("phase08", phase08_report),("phase09", phase09_report),("phase10", phase10_report)]:
+        if rep.get("status") == "WARN": warnings.append(f"upstream_{pn}_warn")
+    if phase01_report.get("status") == "FAIL": severe.append("phase01_validation_failed")
+    if phase02_report.get("status") == "FAIL": severe.append("phase02_validation_failed")
+    if validation["missing_required_columns"]: severe.append("missing_required_column")
+    if validation["duplicate_rows"]: severe.append("duplicate_observation_key")
+    condition_index, refs, ref_flags = build_phase11_condition_index(input_df, args, validation) if not validation["missing_required_columns"] else (pd.DataFrame(), {"reference_h":None,"reference_h_policy":str(args.reference_h),"reference_patch_R":None,"reference_patch_R_policy":str(args.reference_patch_R)}, [])
+    relevant_ref_flags = [
+        f for f in ref_flags
+        if (f == "reference_h_not_found" and args.robustness_mode in ["h", "both"])
+        or (f == "reference_patch_R_not_found" and args.robustness_mode in ["patch_R", "both"])
+    ]
+    warnings.extend(relevant_ref_flags)
+    axes: List[str] = []
+    if args.robustness_mode in ["h", "both"] and len(validation["h_values"]) >= 2 and "reference_h_not_found" not in relevant_ref_flags: axes.append("h")
+    if args.robustness_mode in ["patch_R", "both"] and len(validation["patch_R_values"]) >= 2 and "reference_patch_R_not_found" not in relevant_ref_flags: axes.append("patch_R")
+    if not axes:
+        warnings.append("no_robustness_axis_available")
+        if relevant_ref_flags:
+            severe.extend(relevant_ref_flags)
+    orig_mode = args.robustness_mode
+    if axes and orig_mode == "both": args.robustness_mode = "both"
+    elif axes: args.robustness_mode = axes[0]
+    conv = compute_metric_convergence(input_df, args, refs) if not severe else pd.DataFrame()
+    args.robustness_mode = orig_mode
+    metric_summary = summarize_metric_robustness(conv)
+    bio = summarize_biological_unit_robustness(conv)
+    rankings = compute_phase11_rankings(input_df) if not input_df.empty and all(c in input_df.columns for c in ["capside","h","patch_R","fold"]) else pd.DataFrame()
+    ranking = compute_ranking_robustness(rankings, args, refs) if not rankings.empty and not severe else pd.DataFrame()
+    conc = extract_condition_level_conclusions(input_df, args) if not severe else pd.DataFrame()
+    conclusion = compute_conclusion_robustness(conc, args, refs) if not severe else pd.DataFrame()
+    passfail = build_phase11_pass_fail_table(metric_summary, args)
+    if conv.empty and not severe: severe.append("no_valid_metric_comparison")
+    paths = {"condition_index": args.outdir/"phase11_condition_index.csv", "metric_convergence": args.outdir/"phase11_metric_convergence_long.csv", "metric_summary": args.outdir/"phase11_metric_robustness_summary.csv", "biological_unit": args.outdir/"phase11_biological_unit_robustness.csv", "ranking": args.outdir/"phase11_ranking_robustness.csv", "conclusion": args.outdir/"phase11_conclusion_robustness.csv", "pass_fail": args.outdir/"phase11_pass_fail_by_metric.csv", "report": args.outdir/"phase11_report.json", "summary": args.outdir/"phase11_summary.txt"}
+    for pth, dfout in [(paths["condition_index"], condition_index),(paths["metric_convergence"], conv),(paths["metric_summary"], metric_summary),(paths["biological_unit"], bio),(paths["ranking"], ranking),(paths["conclusion"], conclusion),(paths["pass_fail"], passfail)]:
+        _phase10_csv(pth, dfout)
+    figs, fig_warn = make_phase11_figures(conv, passfail, ranking, conclusion, args); warnings.extend(fig_warn)
+    metrics_eval, optional_eval, missing_metrics = _phase11_metric_list(input_df)
+    topo_eval = [m for m in ["H1_norm","H2_norm"] if m in metrics_eval]
+    if missing_metrics: warnings.extend(["missing_metric"] if any(m in ["t","Hout","Hin"] for m in missing_metrics) else [])
+    if not topo_eval: warnings.append("topology_metrics_missing")
+    if passfail["final_pass_fail"].eq("FAIL").any() if not passfail.empty else False: warnings.append("tolerance_failed")
+    if ranking["warning_flags"].fillna("").str.contains("ranking_changed|top1_changed", regex=True).any() if not ranking.empty else False: warnings.append("ranking_changed")
+    status = "FAIL" if severe else ("WARN" if warnings or (not passfail.empty and passfail["final_pass_fail"].eq("FAIL").any()) else "PASS")
+    output_files = {k: str(v) for k,v in paths.items()}; output_files["figures"] = figs
+    report = {"phase":11,"status":status,"timestamp":datetime.now(timezone.utc).isoformat(),"input_file":str(args.input),"output_directory":str(args.outdir),"upstream_phase01_status":phase01_report.get("status"),"upstream_phase02_status":phase02_report.get("status"),"upstream_phase03_status":phase03_report.get("status"),"upstream_phase04_status":phase04_report.get("status"),"upstream_phase05_status":phase05_report.get("status"),"upstream_phase06_status":phase06_report.get("status"),"upstream_phase07_status":phase07_report.get("status"),"upstream_phase08_status":phase08_report.get("status"),"upstream_phase09_status":phase09_report.get("status"),"upstream_phase10_status":phase10_report.get("status"),"n_rows_input":int(len(input_df)),"n_capsides":int(input_df["capside"].nunique(dropna=True)) if "capside" in input_df else 0,"n_folds":int(input_df["fold"].nunique(dropna=True)) if "fold" in input_df else 0,"h_values":validation["h_values"],"patch_R_values":validation["patch_R_values"],"reference_h_policy":refs.get("reference_h_policy"),"reference_h":refs.get("reference_h"),"reference_patch_R_policy":refs.get("reference_patch_R_policy"),"reference_patch_R":refs.get("reference_patch_R"),"robustness_mode":orig_mode,"robustness_axes_evaluated":axes,"metrics_evaluated":[m for m in metrics_eval if m not in optional_eval],"topology_metrics_evaluated":topo_eval,"optional_composite_metrics_evaluated":optional_eval,"tolerance":float(args.robustness_tolerance),"pass_fraction_threshold":float(args.robustness_pass_fraction),"epsilon":float(args.robustness_epsilon),"near_zero_threshold":float(args.near_zero_threshold),"relative_change_threshold":float(args.robustness_relative_change_threshold),"convergence_formula":"abs(value_reference - value_test) / (abs(value_reference) + epsilon)","denominator_policy":"epsilon-stabilized reference absolute value; both near-zero values have relative_error=0 and are flagged","ranking_variables_evaluated":[v for v in ["rank_d_max_pct","rank_t","rank_t_thinnest","rank_Hout","rank_Hin","rank_H1_norm","rank_H2_norm"] if v in ranking.get("ranking_variable", pd.Series(dtype=str)).unique().tolist()],"conclusion_families_evaluated":sorted([f for f in conclusion.get("conclusion_family", pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if f != "skipped"]),"conclusion_families_skipped":sorted([f for f in conc.get("conclusion_family", pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if conc[conc["conclusion_family"].astype(str)==f].get("interpretation_label", pd.Series(dtype=str)).astype(str).eq("conclusion_family_skipped").all()]) if not conc.empty else [],"output_files":output_files,"warnings":sorted(set([w for w in warnings if w])),"severe_flags":sorted(set(severe))}
+    Path(paths["report"]).write_text(json.dumps(_nan_to_none(report), indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+    write_phase11_summary(paths["summary"], report, passfail, bio, ranking, conclusion)
+    return report
+
+
+def _print_phase11_summary(report: Dict[str, Any]) -> None:
+    print(f"[{report.get('status')}] Phase 11 completed.")
+    files = report.get("output_files", {})
+    for label, key in [("Condition index","condition_index"),("Metric convergence table","metric_convergence"),("Metric robustness summary","metric_summary"),("Biological-unit robustness","biological_unit"),("Ranking robustness","ranking"),("Conclusion robustness","conclusion"),("Pass/fail by metric","pass_fail"),("Phase 11 report","report")]:
+        if key in files: print(f"[INFO] {label}: {files[key]}")
+    try:
+        pf = pd.read_csv(files.get("pass_fail", ""))
+        for _, r in pf.iterrows():
+            if r.get("final_pass_fail") == "PASS":
+                print(f"[ROBUST] axis={r['robustness_axis']} metric={r['metric']} pass_fraction={r['overall_fraction_pass']:.3f} label={r['final_robustness_label']}")
+            elif r.get("final_pass_fail") == "FAIL":
+                print(f"[FAIL-METRIC] axis={r['robustness_axis']} metric={r['metric']} max_error={r['max_relative_error_overall']} worst=see phase11_metric_robustness_summary.csv")
+    except Exception:
+        pass
+    if report.get("warnings"):
+        print("[WARN] Phase 11 completed with warnings. See phase11_report.json.")
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -4931,9 +5427,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--phase",
-        choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+        choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"],
         default="1",
-        help="Analysis phase to run. Phase 1 is the default. Phase 10 runs Phases 1 through 10 and performs leave-one-capsid-out sensitivity diagnostics."
+        help="Analysis phase to run. Phase 1 is the default. Phase 11 runs Phases 1 through 11 and performs h / patch_R robustness diagnostics."
     )
 
     parser.add_argument(
@@ -4961,7 +5457,7 @@ def parse_args() -> argparse.Namespace:
         "--outdir",
         default=Path("results"),
         type=Path,
-        help="Output directory for Phase 2 through Phase 10 artifacts."
+        help="Output directory for Phase 2 through Phase 11 artifacts."
     )
 
     parser.add_argument(
@@ -5016,7 +5512,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-plots",
         action="store_true",
-        help="Skip Phase 3 centered scatterplots, Phase 4 ordinal ranking plots, Phase 5 model comparison figures, Phase 6 figures, Phase 7 heatmaps, Phase 8 figures, Phase 9 heatmaps/scatterplots, and Phase 10 summary figures."
+        help="Skip Phase 3 centered scatterplots, Phase 4 ordinal ranking plots, Phase 5 model comparison figures, Phase 6 figures, Phase 7 heatmaps, Phase 8 figures, Phase 9 heatmaps/scatterplots, Phase 10 summary figures, and Phase 11 robustness figures."
     )
 
     parser.add_argument(
@@ -5183,6 +5679,59 @@ def parse_args() -> argparse.Namespace:
         "--phase10-include-phase8",
         action="store_true",
         help="Phase 10: include optional Phase 8 anisotropy sensitivity if implemented."
+    )
+
+    parser.add_argument(
+        "--robustness-mode",
+        default="both",
+        choices=["h", "patch_R", "both"],
+        help="Phase 11 robustness axis: h, patch_R, or both (default)."
+    )
+
+    parser.add_argument(
+        "--reference-h",
+        default="auto",
+        help="Phase 11 reference h value. 'auto' chooses min(h), assuming smaller h is finer."
+    )
+
+    parser.add_argument(
+        "--reference-patch-R",
+        default="auto",
+        help="Phase 11 reference patch_R value. 'auto' chooses max(patch_R)."
+    )
+
+    parser.add_argument(
+        "--robustness-tolerance",
+        default=0.05,
+        type=float,
+        help="Phase 11 relative-error tolerance tau. Default: 0.05."
+    )
+
+    parser.add_argument(
+        "--robustness-pass-fraction",
+        default=0.90,
+        type=float,
+        help="Phase 11 fraction of valid comparisons required for strict metric pass. Default: 0.90."
+    )
+
+    parser.add_argument(
+        "--robustness-epsilon",
+        default=1e-12,
+        type=float,
+        help="Phase 11 denominator stabilizer for relative-error calculations. Default: 1e-12."
+    )
+
+    parser.add_argument(
+        "--robustness-relative-change-threshold",
+        default=0.50,
+        type=float,
+        help="Phase 11 conclusion-level relative-change warning threshold. Default: 0.50."
+    )
+
+    parser.add_argument(
+        "--save-detailed-robustness-plots",
+        action="store_true",
+        help="Phase 11: generate optional detailed robustness plots when implemented. Default: false."
     )
 
     parser.add_argument(
@@ -5445,9 +5994,29 @@ def main() -> int:
     phase10_input_df = phase09_input_df if not phase09_input_df.empty else (centered_phase02_df if not centered_phase02_df.empty else normalized_df)
     phase10_report = run_phase10(phase10_input_df, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, phase06_report, phase07_report, phase08_report, phase09_report, args)
     _print_phase10_summary(phase10_report)
-    if phase10_report["status"] == "FAIL":
+
+    if args.phase == "10":
+        if phase10_report["status"] == "FAIL":
+            return 1
+        if args.fail_on_warning and phase10_report["status"] != "PASS":
+            return 1
+        return 0
+
+    phase11_input_df = phase10_input_df if not phase10_input_df.empty else (centered_phase02_df if not centered_phase02_df.empty else normalized_df)
+    for candidate in [args.outdir / "phase06_composite_geometry.csv", args.outdir / "phase03_centered_geometry.csv", centered_path, args.output]:
+        if candidate.exists() and candidate.stat().st_size > 0:
+            try:
+                tmp = pd.read_csv(candidate)
+                if all(c in tmp.columns for c in ["capside", "fold", "h", "patch_R", "d_max_pct"]):
+                    phase11_input_df = tmp
+                    break
+            except Exception:
+                pass
+    phase11_report = run_phase11(phase11_input_df, phase01_report, phase02_report, phase03_report, phase04_report, phase05_report, phase06_report, phase07_report, phase08_report, phase09_report, phase10_report, args)
+    _print_phase11_summary(phase11_report)
+    if phase11_report["status"] == "FAIL":
         return 1
-    if args.fail_on_warning and phase10_report["status"] != "PASS":
+    if args.fail_on_warning and phase11_report["status"] != "PASS":
         return 1
     return 0
 
