@@ -13,13 +13,15 @@ def parse_args():
         epilog=(
             "Example:\n"
             "  python3 tools/make_maps.py --results results --capsid 1cwp "
-            "--fold 2_0,2_1,3_0,5_0 --cyl_radius 35\n\n"
+            "--fold 2_0,2_1,3_0,5_0 --cyl_radius 35\n"
+            "  python3 tools/make_maps.py --results results_cubic_grid_2 --capsid 1cwp "
+            "--fold 2_0 --cyl_radius 35 --output_suffix _cubic\n\n"
             "Outputs:\n"
-            "  results/{capsid}/R{cyl_radius}_thickness_map.png\n"
-            "  results/{capsid}/R{cyl_radius}_outer_H_map.png\n"
-            "  results/{capsid}/R{cyl_radius}_inner_H_map.png\n"
-            "  results/{capsid}/R{cyl_radius}_outer_K_map.png\n"
-            "  results/{capsid}/R{cyl_radius}_inner_K_map.png"
+            "  results/{capsid}/R{cyl_radius}{output_suffix}_thickness_map.png\n"
+            "  results/{capsid}/R{cyl_radius}{output_suffix}_outer_H_map.png\n"
+            "  results/{capsid}/R{cyl_radius}{output_suffix}_inner_H_map.png\n"
+            "  results/{capsid}/R{cyl_radius}{output_suffix}_outer_K_map.png\n"
+            "  results/{capsid}/R{cyl_radius}{output_suffix}_inner_K_map.png"
         ),
     )
     p.add_argument("--results", required=True, help="Results root directory")
@@ -27,6 +29,19 @@ def parse_args():
     p.add_argument("--fold", required=True, help="Comma-separated folds in desired panel order")
     p.add_argument("--cyl_radius", required=True, type=int, help="Cylinder radius R")
     p.add_argument("--res", default=500, type=int, help="Grid resolution per dimension (default: 500)")
+    p.add_argument(
+        "--input_suffix",
+        default=None,
+        help=(
+            "Optional suffix inserted after R{cyl_radius} when reading input CSVs "
+            "(defaults to --output_suffix when omitted)."
+        ),
+    )
+    p.add_argument(
+        "--output_suffix",
+        default="",
+        help="Optional suffix inserted after R{cyl_radius} in output map filenames.",
+    )
     return p.parse_args()
 
 
@@ -72,7 +87,7 @@ def _read_csv(path):
     return pd.read_csv(path)
 
 
-def _build_panel_data(results_dir, capsid, folds, r, kind, res):
+def _build_panel_data(results_dir, capsid, folds, r, kind, res, input_suffix=""):
     out = []
     pooled_valid_values = []
 
@@ -82,27 +97,27 @@ def _build_panel_data(results_dir, capsid, folds, r, kind, res):
             raise FileNotFoundError(f"Missing required fold directory: {base}")
 
         if kind == "thickness":
-            fp = base / f"R{r}_thickness_radial.csv"
+            fp = base / f"R{r}{input_suffix}_thickness_radial.csv"
             df = _read_csv(fp)
             value_col = "thickness_radial"
             valid_col = "thickness_valid"
         elif kind == "outer_H":
-            fp = base / f"R{r}_outer_curvature.csv"
+            fp = base / f"R{r}{input_suffix}_outer_curvature.csv"
             df = _read_csv(fp)
             value_col = "H_oriented"
             valid_col = "curvature_valid"
         elif kind == "inner_H":
-            fp = base / f"R{r}_inner_curvature.csv"
+            fp = base / f"R{r}{input_suffix}_inner_curvature.csv"
             df = _read_csv(fp)
             value_col = "H_oriented"
             valid_col = "curvature_valid"
         elif kind == "outer_K":
-            fp = base / f"R{r}_outer_curvature.csv"
+            fp = base / f"R{r}{input_suffix}_outer_curvature.csv"
             df = _read_csv(fp)
             value_col = "K_raw"
             valid_col = "curvature_valid"
         elif kind == "inner_K":
-            fp = base / f"R{r}_inner_curvature.csv"
+            fp = base / f"R{r}{input_suffix}_inner_curvature.csv"
             df = _read_csv(fp)
             value_col = "K_raw"
             valid_col = "curvature_valid"
@@ -188,6 +203,8 @@ def main():
     results_dir = Path(args.results)
     capsid = args.capsid
     r = args.cyl_radius
+    input_suffix = args.output_suffix if args.input_suffix is None else args.input_suffix
+    output_suffix = args.output_suffix
 
     rb_cmap = LinearSegmentedColormap.from_list("rbw", ["red", "white", "blue"], N=256)
     rb_cmap.set_bad("black")
@@ -195,15 +212,47 @@ def main():
     viridis.set_bad("black")
 
     jobs = [
-        ("thickness", f"R{r}_thickness_map.png", "Thickness (radial) [Ang]", viridis, False),
-        ("outer_H", f"R{r}_outer_H_map.png", "Outer H (H_oriented) [Ang^-1]", rb_cmap, True),
-        ("inner_H", f"R{r}_inner_H_map.png", "Inner H (H_oriented) [Ang^-1]", rb_cmap, True),
-        ("outer_K", f"R{r}_outer_K_map.png", "Outer K (K_raw) [Ang^-2]", rb_cmap, True),
-        ("inner_K", f"R{r}_inner_K_map.png", "Inner K (K_raw) [Ang^-2]", rb_cmap, True),
+        (
+            "thickness",
+            f"R{r}{output_suffix}_thickness_map.png",
+            "Thickness (radial) [Ang]",
+            viridis,
+            False,
+        ),
+        (
+            "outer_H",
+            f"R{r}{output_suffix}_outer_H_map.png",
+            "Outer H (H_oriented) [Ang^-1]",
+            rb_cmap,
+            True,
+        ),
+        (
+            "inner_H",
+            f"R{r}{output_suffix}_inner_H_map.png",
+            "Inner H (H_oriented) [Ang^-1]",
+            rb_cmap,
+            True,
+        ),
+        (
+            "outer_K",
+            f"R{r}{output_suffix}_outer_K_map.png",
+            "Outer K (K_raw) [Ang^-2]",
+            rb_cmap,
+            True,
+        ),
+        (
+            "inner_K",
+            f"R{r}{output_suffix}_inner_K_map.png",
+            "Inner K (K_raw) [Ang^-2]",
+            rb_cmap,
+            True,
+        ),
     ]
 
     for kind, out_name, title, cmap, center_zero in jobs:
-        panels, vmin, vmax = _build_panel_data(results_dir, capsid, folds, r, kind, args.res)
+        panels, vmin, vmax = _build_panel_data(
+            results_dir, capsid, folds, r, kind, args.res, input_suffix=input_suffix
+        )
         out = results_dir / capsid / out_name
         _render_composed(panels, vmin, vmax, title, out, cmap, center_zero=center_zero)
 
